@@ -21,14 +21,43 @@ write_mail_pull() {
   log "wrote $_wp"
 }
 
-# install_pull_timer MINUTES BIN -> systemd --user timer running $BIN/mail-pull
+CRON_TAG="# mail-setup: mail-pull"
+
+# install_pull_cron MINUTES BIN -> a crontab line running $BIN/mail-pull
+install_pull_cron() {
+  _min="$1"; _bin="$2"
+  if ! command -v crontab >/dev/null 2>&1; then
+    warn "no systemd and no crontab - install cron, or run 'mail-pull' by hand"
+    return 1
+  fi
+  if [ "$_min" -ge 60 ]; then _when="0 * * * *"; warn "cron: $_min min rounded to hourly"
+  else _when="*/$_min * * * *"; fi
+  { crontab -l 2>/dev/null | grep -vF "$CRON_TAG" || true
+    echo "$_when $_bin/mail-pull >/dev/null 2>&1   $CRON_TAG"; } | crontab -
+  log "crontab: mail-pull every $_min min  (crontab -l to see it)"
+  pgrep -x cron >/dev/null 2>&1 || pgrep -x crond >/dev/null 2>&1 || pgrep -f cygrunsrv.*cron >/dev/null 2>&1 \
+    || warn "cron doesn't seem to be running - start it (e.g. sudo service cron start)"
+}
+
+remove_pull_cron() {
+  command -v crontab >/dev/null 2>&1 || return 0
+  crontab -l 2>/dev/null | grep -qF "$CRON_TAG" || return 0
+  { crontab -l 2>/dev/null | grep -vF "$CRON_TAG" || true; } | crontab -
+  log "removed the mail-pull crontab line (the systemd timer replaces it)"
+}
+
+# install_pull_timer MINUTES BIN -> systemd --user timer running $BIN/mail-pull,
+# or a crontab line where there's no systemd (WSL, Cygwin, containers).
+# MAIL_SETUP_NO_SYSTEMD=1 forces cron (tests).
 install_pull_timer() {
   _min="$1"; _bin="$2"
   [ "$_min" != 0 ] && [ "$_min" -gt 0 ] 2>/dev/null || return 0
-  if ! { command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; }; then
-    warn "--timer given but no systemd --user available; run 'mail-pull' from cron instead"
-    return 0
+  if [ -n "${MAIL_SETUP_NO_SYSTEMD:-}" ] \
+     || ! { command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; }; then
+    install_pull_cron "$_min" "$_bin"
+    return
   fi
+  remove_pull_cron
   ud="$HOME/.config/systemd/user"; install -d -m 0700 "$ud"
   # units from before mail-setup was split out of tvmail
   if [ -e "$ud/tvmail-pull.timer" ]; then
@@ -59,7 +88,14 @@ EOF
   systemctl --user enable --now mail-pull.timer
   log "systemd --user timer: mail-pull.timer (every ${_min} min)"
   log "  status:  systemctl --user list-timers mail-pull.timer"
-  log "  (needs 'loginctl enable-linger $USER' to run while you're logged out)"
+  # a --user timer only runs while you're logged in, unless you linger
+  if loginctl show-user "$USER" -p Linger 2>/dev/null | grep -q '=yes'; then
+    :
+  elif loginctl enable-linger "$USER" 2>/dev/null; then
+    log "  enabled lingering, so it runs while you're logged out too"
+  else
+    warn "run 'sudo loginctl enable-linger $USER' so it keeps pulling while you're logged out"
+  fi
 }
 
 # find_mda -> $MAIL_SETUP_MDA, else the first executable sendmail-compatible

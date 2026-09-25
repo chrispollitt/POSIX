@@ -32,14 +32,26 @@ which imports it into `third_party/`, but it doesn't depend on tvmail.
 ./mail-setup.sh                      # asks: master or client, then each step
 ./mail-setup.sh --role client        # skip the question
 ./mail-setup.sh --role master --puller getmail
+./mail-setup.sh --role master --lan auto --pull-every 5 -y   # unattended master
 ./mail-setup.sh --assume-no          # checks only, changes nothing
 ```
+
+On a master the wizard also asks two things that `--yes` alone won't answer
+for you:
+
+- **Accept mail from LAN clients?** If yes, Postfix listens on all interfaces
+  and trusts your LAN (auto-detected, e.g. `192.168.1.0/24`) on port 25 with
+  no password, so clients and the sendmail shim can send through it. It's
+  off by default because it opens a port; `--lan CIDR|auto|off` answers it
+  unattended.
+- **Pull every how many minutes?** (default 5, `0` = on demand) Schedules
+  `mail-pull`; `--pull-every N`.
 
 Every step is a yes/no offer. Each one is also its own script you can run alone:
 
 | script | does |
 |---|---|
-| `scripts/configure-sendmail-relay.sh` | Postfix: local delivery + an authenticated TLS smarthost relay; rewrites local senders on the way out. Linux only. |
+| `scripts/configure-sendmail-relay.sh` | Postfix: local delivery + an authenticated TLS smarthost relay; rewrites local senders on the way out. `--lan CIDR\|auto` lets LAN clients send through it, `--no-lan` (or `--lan off`) goes back to loopback-only; a re-run with neither keeps the current setting, and a re-run without `--relay-file` keeps the current smarthost. Linux only. |
 | `scripts/configure-dovecot.sh` | Dovecot IMAP: INBOX = `/var/mail/<user>`, other folders in `~/mail`, with Drafts/Sent/Trash/Junk/Archive auto-created. Writes one drop-in (`conf.d/99-mail-setup.conf`), checks it with `doveconf`, and rolls back if that fails. Handles both Dovecot 2.3 and 2.4 syntax. Linux only. |
 | `scripts/configure-mail-pull.sh` | installs `bin/pop-pull` (stdlib-Python POP3S puller) + `~/.config/mailpull.conf` |
 | `scripts/configure-getmail.sh` | installs getmail6 if missing (distro package, else `pip --user`) and writes a `getmailrc` (POP3S, or `--imap`) |
@@ -54,8 +66,10 @@ Both puller scripts install **`mail-pull`** (in `~/bin`, else `~/.local/bin`),
 a two-line wrapper that runs whichever puller you configured last. Timers,
 cron and other programs (tvmail's **F3**) just run `mail-pull`, so switching
 pullers means re-running the other configure script. `--timer N` on either
-script installs a systemd `--user` timer, `mail-pull.timer`. That replaces the
-old `tvmail-pull.timer`, which gets removed.
+script schedules it: a systemd `--user` timer, `mail-pull.timer` (lingering
+is enabled so it runs while you're logged out; the old `tvmail-pull.timer` is
+removed), or, without systemd (WSL, containers, Cygwin), one crontab line
+tagged `# mail-setup: mail-pull` that re-runs replace, never duplicate.
 
 Exit status is pop-pull's: `0` = got mail, `1` = nothing new, `2` = error.
 getmail only ever returns 0 or an error.
@@ -109,7 +123,8 @@ nor `getmailrc` contains it. Client passwords live in `~/.mu-tickets`
 
 The tests only change a temp dir. Environment hooks they use (also handy for
 dry runs): `MAIL_SETUP_SUDO=` (never escalate), `MAIL_SETUP_MDA`,
-`MAIL_SETUP_GETMAIL`, `SENDMAIL_DEST`.
+`MAIL_SETUP_GETMAIL`, `MAIL_SETUP_NO_SYSTEMD=1` (schedule with cron),
+`SENDMAIL_DEST`.
 
 ## Layout
 

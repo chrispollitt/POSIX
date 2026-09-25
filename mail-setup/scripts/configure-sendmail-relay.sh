@@ -21,6 +21,12 @@
 #   --user NAME         local account that receives root's mail   (default: you)
 #   --service KIND      systemd | sysv | none   (default: ask)
 #   --smtp-port N       override the smarthost submission port
+#   --lan CIDR|auto     accept mail from LAN clients: listen on all interfaces
+#                       and trust CIDR (mynetworks) - 'auto' = this box's own
+#                       IPv4 network, e.g. 192.168.1.0/24.  LAN clients then
+#                       send through here on port 25 with no password.
+#   --no-lan            back to loopback-only (the default on a fresh setup;
+#                       a re-run without either flag keeps what's there)
 #   --cron              add a 15-minute queue-runner cron entry (send-only mode)
 #   --test ADDR         after configuring, send a test message to ADDR and you
 #   -h | --help         show this header.
@@ -33,6 +39,7 @@ ADD_CRON=0
 TEST_ADDR=""
 SERVICE=""
 SMTP_PORT=""
+LAN=""           # "" = keep / fresh default, CIDR, or "off"
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -41,6 +48,8 @@ while [ $# -gt 0 ]; do
     --service)     SERVICE="${2:?}";    shift 2 ;;
     --smtp-port)   SMTP_PORT="${2:?}";  shift 2 ;;
     --rewrite-all) shift ;;   # deprecated no-op: outbound From is always rewritten now
+    --lan)         LAN="${2:?}"; shift 2 ;;
+    --no-lan)      LAN=off; shift ;;
     --cron)        ADD_CRON=1; shift ;;
     --test)        TEST_ADDR="${2:?}"; shift 2 ;;
     -h|--help)     sed -n '2,/^set -euo/p' "$0" | sed 's/^# \{0,1\}//; $d'; exit 0 ;;
@@ -48,9 +57,8 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-log()  { printf '  %s\n' "$*"; }
-warn() { printf 'WARN: %s\n' "$*" >&2; }
-die()  { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+. "$here/../lib/common.sh"      # log/warn/die, lan_cidr
 
 [ "$(uname -s 2>/dev/null)" = Linux ] || die \
 "Linux only - Postfix isn't available on $(uname -s 2>/dev/null || echo 'this OS').
@@ -59,7 +67,9 @@ die()  { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 
 _enable_service() {   # $1 = service name; uses $svc / $SUDO
     case "$svc" in
-      systemd) $SUDO systemctl enable --now "$1"
+      systemd) $SUDO systemctl enable "$1" >/dev/null 2>&1 || true
+               # restart, not just start: inet_interfaces changes need it
+               $SUDO systemctl restart "$1"
                log "$1: enabled + running (systemd)" ;;
       sysv)    $SUDO update-rc.d "$1" defaults >/dev/null 2>&1 || true
                $SUDO service "$1" restart
@@ -68,6 +78,23 @@ _enable_service() {   # $1 = service name; uses $svc / $SUDO
                  || $SUDO service "$1" stop 2>/dev/null || true
                log "$1: not run as a service" ;;
     esac
+}
+
+_cfg_lan() {   # who may submit mail without a password: loopback, or + the LAN
+    local_nets='127.0.0.0/8 [::ffff:127.0.0.0]/104 [::1]/128'
+    if [ -n "$LAN_NET" ]; then
+        $SUDO postconf -e "inet_interfaces = all" "mynetworks = $local_nets $LAN_NET"
+        log "postfix: LAN clients welcome - listening on all interfaces, trusting $LAN_NET"
+        log "  (only expose port 25 to that LAN, never to the Internet)"
+    elif [ "$LAN" = off ] || [ -z "$($SUDO postconf -n mynetworks 2>/dev/null)" ]; then
+        # fresh setup, or asked for: this box only
+        $SUDO postconf -e "inet_interfaces = loopback-only"
+        $SUDO postconf -X mynetworks 2>/dev/null || true
+        log "postfix: loopback-only (LAN clients: re-run with --lan auto)"
+    else
+        log "postfix: keeping $($SUDO postconf -n inet_interfaces 2>/dev/null || echo 'inet_interfaces = (default)'),"
+        log "  $($SUDO postconf -n mynetworks)  (--no-lan resets to loopback-only)"
+    fi
 }
 
 _cfg_postfix() {   # configure an already-installed Postfix as a smarthost relay
@@ -92,7 +119,6 @@ _cfg_postfix() {   # configure an already-installed Postfix as a smarthost relay
       "smtp_tls_security_level = encrypt" \
       "smtp_use_tls = yes" \
       "smtp_generic_maps = hash:/etc/postfix/generic" \
-      "inet_interfaces = loopback-only" \
       "mydestination = \$myhostname, localhost.\$mydomain, localhost" \
       "alias_maps = hash:/etc/aliases" \
       "alias_database = hash:/etc/aliases"
@@ -115,8 +141,8 @@ EOF
     $SUDO grep -qs '^root:' /etc/aliases \
       || printf 'root: %s\n' "$ADMIN_USER" | $SUDO tee -a /etc/aliases >/dev/null
     $SUDO newaliases 2>/dev/null || true
-    log "postfix: relayhost=[${H}]:${PORT}, SASL+TLS, generic rewrite -> ${U}, loopback-only"
-    log "  (for LAN delivery later: inet_interfaces=all + mynetworks=<your /24>)"
+    _cfg_lan
+    log "postfix: relayhost=[${H}]:${PORT}, SASL+TLS, generic rewrite -> ${U}"
     _enable_service postfix
 }
 
@@ -132,9 +158,32 @@ if [ -n "$RELAY_FILE" ] && [ -f "$RELAY_FILE" ]; then
     H="$(_rv 'Outgoing Server')"; U="$(_rv Username)"; P="$(_rv Password)"
     PORT="$(sed -n 's/.*SMTP Port:[[:space:]]*\([0-9]\{1,\}\).*/\1/p' "$RELAY_FILE" | head -1 | tr -d ' \r')"
 fi
+# No relay file on a re-run (e.g. just --lan): keep the smarthost Postfix
+# already has, rather than falling back to the defaults below.
+REUSED=0
+if [ -z "$H" ] && command -v postconf >/dev/null 2>&1; then
+    cur="$(postconf -h relayhost 2>/dev/null || true)"          # [host]:port
+    if [ -n "$cur" ]; then
+        H="${cur#[}"; H="${H%%]*}"
+        case "$cur" in *]:*) PORT="${cur##*]:}" ;; esac
+        U="$($SUDO awk -v k="$cur" '$1==k {split($2,a,":"); print a[1]; exit}' \
+               /etc/postfix/sasl_passwd 2>/dev/null || true)"
+        REUSED=1
+        log "no relay file - keeping the current smarthost $cur${U:+ ($U)}"
+    fi
+fi
 : "${H:=u-l.ca}"; : "${U:=cwp@u-l.ca}"
-case "$PORT" in 465|"") PORT=587 ;; esac    # STARTTLS submission (465 needs extra wiring)
+# STARTTLS submission (465 needs extra wiring) - but leave a working setup's port be
+[ "$REUSED" = 1 ] || case "$PORT" in 465|"") PORT=587 ;; esac
+[ -n "$PORT" ] || PORT=587
 [ -n "$SMTP_PORT" ] && PORT="$SMTP_PORT"
+
+LAN_NET=""
+case "$LAN" in
+  ""|off) : ;;
+  auto) LAN_NET="$(lan_cidr)" || die "--lan auto: couldn't work out this box's network - give it, e.g. --lan 192.168.1.0/24" ;;
+  *)    LAN_NET="$(cidr_check "$LAN")" || die "--lan: '$LAN' isn't an IPv4/IPv6 network (e.g. 192.168.1.0/24)" ;;
+esac
 
 if ! command -v postfix >/dev/null 2>&1; then
     command -v apt-get >/dev/null 2>&1 || die \
@@ -185,6 +234,7 @@ log "auth user : ${U}"
 log "rewrite   : local senders -> ${U}   (on outbound only)"
 log "service   : ${svc}"
 log "root mail : ${ADMIN_USER}"
+log "LAN       : $( [ -n "$LAN_NET" ] && echo "accept from $LAN_NET" || { [ "$LAN" = off ] && echo 'loopback-only' || echo 'unchanged (loopback-only on a fresh setup)'; } )"
 echo
 
 _cfg_postfix

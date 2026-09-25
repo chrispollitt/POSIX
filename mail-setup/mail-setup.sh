@@ -27,6 +27,10 @@
 # Options:
 #   --role master|client     skip the role question
 #   --puller pop-pull|getmail|none   skip the puller question (master)
+#   --pull-every N           pull every N minutes, 0 = only on demand
+#                            (master; default: ask, suggesting 5)
+#   --lan CIDR|auto|off      let LAN clients send through this master's Postfix
+#                            (default: ask; never switched on by --yes alone)
 #   --caller NAME            name shown in test-message subjects (default:
 #                            mail-setup; tvmail's configure.sh passes tvmail)
 #   -y, --yes                accept every "offer to ..." prompt (unattended)
@@ -42,6 +46,8 @@ S="$here/scripts"
 ROLE=""
 PULLER=""
 CALLER=mail-setup
+PULL_EVERY=""
+LAN=""
 ASSUME=""        # "" = ask each time / "yes" / "no"
 
 while [ $# -gt 0 ]; do
@@ -51,6 +57,10 @@ while [ $# -gt 0 ]; do
     --puller)    PULLER="${2:?}"; shift 2 ;;
     --puller=*)  PULLER="${1#--puller=}"; shift ;;
     --caller)    CALLER="${2:?}"; shift 2 ;;
+    --pull-every) PULL_EVERY="${2:?}"; shift 2 ;;
+    --lan)       LAN="${2:?}"; shift 2 ;;
+    --lan=*)     LAN="${1#--lan=}"; shift ;;
+    --pull-every=*) PULL_EVERY="${1#--pull-every=}"; shift ;;
     -y|--yes)    ASSUME=yes; shift ;;
     --assume-no) ASSUME=no; shift ;;
     -h|--help)   usage "$0"; exit 0 ;;
@@ -59,6 +69,7 @@ while [ $# -gt 0 ]; do
 done
 case "$ROLE" in ""|master|client) : ;; *) die "--role must be master or client" ;; esac
 case "$PULLER" in ""|pop-pull|getmail|none) : ;; *) die "--puller must be pop-pull, getmail or none" ;; esac
+case "$PULL_EVERY" in ""|[0-9]|[0-9][0-9]|[0-9][0-9][0-9]) : ;; *) die "--pull-every must be minutes (0 = on demand)" ;; esac
 export ASSUME     # the step scripts' ask() honours it too
 
 log "OS: $OS   package manager: ${PKG:-none found}"
@@ -107,9 +118,20 @@ if [ "$ROLE" = master ]; then
     if ask "Run configure-sendmail-relay.sh now?"; then
       relay_file=$(readval "cPanel-style relay-info file (blank = enter host/user/pass when asked)" "")
       test_addr=$(readval "send a live test message to (blank = skip)" "")
+      # LAN clients sending through here - security-relevant, so never
+      # switched on by --yes alone (pass --lan for unattended runs)
+      if [ -z "$LAN" ] && [ -z "$ASSUME" ]; then
+        echo "Will other machines (tvmail clients, the sendmail shim) send mail through"
+        echo "this box?  Then Postfix must listen on the LAN and trust it (port 25, no"
+        echo "password - LAN only, never expose it to the Internet)."
+        if ask "Accept mail from LAN clients?" N; then
+          LAN=$(readval "LAN network" "$(lan_cidr 2>/dev/null || echo 192.168.1.0/24)")
+        fi
+      fi
       set -- "$S/configure-sendmail-relay.sh"
       [ -n "$relay_file" ] && set -- "$@" --relay-file "$relay_file"
       [ -n "$test_addr" ]  && set -- "$@" --test "$test_addr"
+      case "$LAN" in "") : ;; off) set -- "$@" --no-lan ;; *) set -- "$@" --lan "$LAN" ;; esac
       log "running: $*"
       bash "$@" || warn "configure-sendmail-relay.sh exited non-zero - see above"
     fi
@@ -150,9 +172,17 @@ if [ "$ROLE" = master ]; then
     if ask "Run $(basename "$script") now?"; then
       relay_file=$(readval "same relay-info file (blank = defaults / prompts)" "${relay_file:-}")
       do_test=""; ask "Run one fetch right after configuring?" N && do_test=1
+      # tvmail on the master talks to Dovecot (remote mode), where F3 doesn't
+      # pull - so mail only arrives if something runs mail-pull on a schedule
+      if [ -z "$PULL_EVERY" ]; then
+        if [ -n "$ASSUME" ]; then PULL_EVERY=5
+        else PULL_EVERY=$(readval "pull every how many minutes (0 = only when you run mail-pull)" 5)
+        fi
+      fi
       set -- "$script"
       [ -n "$relay_file" ] && set -- "$@" --relay-file "$relay_file"
       [ -n "$do_test" ]    && set -- "$@" --test
+      [ "${PULL_EVERY:-0}" -gt 0 ] 2>/dev/null && set -- "$@" --timer "$PULL_EVERY"
       log "running: $*"
       bash "$@" || warn "$(basename "$script") exited non-zero - see above"
     fi

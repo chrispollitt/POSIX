@@ -164,6 +164,48 @@ check "bad --puller rejected" '[ $? != 0 ]'
 check "-h prints the usage" '"$M/mail-setup.sh" -h | grep -q "^Usage:"'
 
 # --------------------------------------------------------------------------
+t "pull timer (cron fallback)"
+cat > "$FAKE/crontab" <<'EOF'
+#!/bin/sh
+f="$HOME/crontab.txt"
+case "$1" in
+  -l) [ -f "$f" ] && cat "$f" || { echo "no crontab for you" >&2; exit 1; } ;;
+  -)  t=$(cat); printf '%s\n' "$t" > "$f" ;;     # read it all first, like crontab
+esac
+EOF
+chmod 755 "$FAKE/crontab"
+echo "0 3 * * * my-own-job" > "$HOME/crontab.txt"
+MAIL_SETUP_NO_SYSTEMD=1 "$S/configure-mail-pull.sh" --pwfile "$PW" --timer 7 > "$OUT" 2>&1
+check "exits 0" '[ $? = 0 ]'
+check "crontab line every 7 min runs mail-pull" 'grep -q "^\*/7 \* \* \* \* $HOME/bin/mail-pull .*# mail-setup: mail-pull" "$HOME/crontab.txt"'
+check "your other cron jobs kept" 'has "$HOME/crontab.txt" "my-own-job"'
+MAIL_SETUP_NO_SYSTEMD=1 "$S/configure-getmail.sh" --pwfile "$PW" --timer 10 > /dev/null 2>&1
+check "re-run replaces it, no duplicate" '[ "$(grep -c "mail-setup: mail-pull" "$HOME/crontab.txt")" = 1 ] && grep -q "^\*/10 " "$HOME/crontab.txt"'
+MAIL_SETUP_NO_SYSTEMD=1 "$S/configure-mail-pull.sh" --pwfile "$PW" --timer 90 > "$OUT" 2>&1
+check ">= 60 min rounds to hourly" 'grep -q "^0 \* \* \* \* .*mail-pull" "$HOME/crontab.txt" && has "$OUT" "rounded to hourly"'
+"$S/configure-mail-pull.sh" --pwfile "$PW" > /dev/null 2>&1
+check "no --timer leaves the schedule alone" 'grep -q "mail-setup: mail-pull" "$HOME/crontab.txt"'
+rm "$FAKE/crontab"
+
+# --------------------------------------------------------------------------
+t "LAN network helpers"
+cat > "$FAKE/ip" <<'EOF'
+#!/bin/sh
+echo "2: eth0    inet 192.168.7.42/24 brd 192.168.7.255 scope global dynamic eth0\       valid_lft 86000sec"
+EOF
+chmod 755 "$FAKE/ip"
+LANOUT=$(bash -c '. "$1/lib/common.sh"; lan_cidr' _ "$M")
+check "lan_cidr = this box's network" '[ "$LANOUT" = 192.168.7.0/24 ]'
+check "cidr_check normalises" '[ "$(bash -c ". \"$M/lib/common.sh\"; cidr_check 10.1.2.3/8")" = 10.0.0.0/8 ]'
+check "cidr_check rejects junk" '! bash -c ". \"$M/lib/common.sh\"; cidr_check not-a-net"'
+rm "$FAKE/ip"
+check "relay script documents --lan / --no-lan" '"$S/configure-sendmail-relay.sh" -h | grep -q -- "--lan CIDR|auto" && "$S/configure-sendmail-relay.sh" -h | grep -q -- "--no-lan"'
+"$M/mail-setup.sh" --pull-every soon > /dev/null 2>&1
+check "mail-setup.sh rejects a bad --pull-every" '[ $? != 0 ]'
+"$M/mail-setup.sh" --role master --assume-no --lan=auto --pull-every=0 > "$OUT" 2>&1
+check "mail-setup.sh takes --lan= / --pull-every=" '[ $? = 0 ]'
+
+# --------------------------------------------------------------------------
 t "syntax"
 for f in "$M"/mail-setup.sh "$S"/*.sh "$M"/lib/*.sh; do
   bash -n "$f" || bad "bash -n $f"

@@ -112,3 +112,16 @@ backup() {
   [ -e "$1" ] || return 0
   ${2:+$SUDO} cp -p "$1" "$1.bak.$(date +%Y%m%d-%H%M%S)" && log "backed up existing $1"
 }
+
+# cidr_check NET -> NET normalised (192.168.1.7/24 -> 192.168.1.0/24), or fail
+cidr_check() {
+  _py=$(find_python) || return 1
+  "$_py" -c 'import ipaddress,sys; print(ipaddress.ip_network(sys.argv[1], strict=False))' "$1" 2>/dev/null
+}
+
+# lan_cidr -> this box's first global IPv4 network, e.g. 192.168.1.0/24, or fail
+lan_cidr() {
+  _a=$(ip -o -4 addr show scope global 2>/dev/null | awk '{print $4; exit}')
+  [ -n "$_a" ] || return 1
+  cidr_check "$_a"
+}
