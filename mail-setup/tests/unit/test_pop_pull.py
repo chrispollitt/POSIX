@@ -142,6 +142,7 @@ class PopPullTest(unittest.TestCase):
             code, out, _ = self.run_pull(s, "-n", "-v")
             self.assertEqual(code, 0)
             self.assertIn("[dry-run] msg 1 uid uid-1", out)
+            self.assertIn("1 new message(s) would go to /var/mail/chris", out)
             self.assertEqual(s.deleted, set())
         self.assertEqual(self.delivered(), b"")
         self.assertFalse(os.path.exists(self.mod.SEEN))

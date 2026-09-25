@@ -105,7 +105,8 @@ def main():
         die(str(e))
 
     if got:
-        print("pop-pull: %d new message(s) -> /var/mail/%s" % (got, local_user))
+        print("pop-pull: %d new message(s) %s /var/mail/%s"
+              % (got, "would go to" if a.dry_run else "->", local_user))
         sys.exit(0)
     print("pop-pull: no new mail")
     sys.exit(1)

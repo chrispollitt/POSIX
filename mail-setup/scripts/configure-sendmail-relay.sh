@@ -34,7 +34,7 @@
 set -euo pipefail
 
 RELAY_FILE=""
-ADMIN_USER="$(id -un)"
+ADMIN_USER="${SUDO_USER:-$(id -un)}"     # under sudo: whoever ran sudo
 ADD_CRON=0
 TEST_ADDR=""
 SERVICE=""
@@ -110,6 +110,11 @@ _cfg_postfix() {   # configure an already-installed Postfix as a smarthost relay
         fi
         log "postfix: had no main.cf - started from the distro default"
     fi
+    # myorigin = $myhostname: a bare "chris" / "root" must stay chris@<this box>
+    # and be delivered HERE.  Debian's default (/etc/mailname) is often the
+    # public domain, which turns local mail into chris@that-domain and relays
+    # it out - where it bounces ("No Such User").  Outbound mail still leaves
+    # as the real mailbox via the generic map below.
     $SUDO postconf -e \
       "relayhost = [${H}]:${PORT}" \
       "smtp_sasl_auth_enable = yes" \
@@ -117,21 +122,39 @@ _cfg_postfix() {   # configure an already-installed Postfix as a smarthost relay
       "smtp_sasl_security_options = noanonymous" \
       "smtp_sasl_tls_security_options = noanonymous" \
       "smtp_tls_security_level = encrypt" \
+      "smtp_tls_wrappermode = ${WRAP}" \
       "smtp_use_tls = yes" \
       "smtp_generic_maps = hash:/etc/postfix/generic" \
       "mydestination = \$myhostname, localhost.\$mydomain, localhost" \
+      "myorigin = \$myhostname" \
       "alias_maps = hash:/etc/aliases" \
       "alias_database = hash:/etc/aliases"
     if [ "$reuse" = 0 ]; then
         printf '[%s]:%s %s:%s\n' "$H" "$PORT" "$U" "$P" | $SUDO tee /etc/postfix/sasl_passwd >/dev/null
         $SUDO chmod 600 /etc/postfix/sasl_passwd
+    elif ! $SUDO grep -q "^\[${H}\]:${PORT}[[:space:]]" /etc/postfix/sasl_passwd; then
+        # reusing the stored password, but the host/port changed: Postfix
+        # looks it up by the exact "[host]:port" key, so re-key that line
+        $SUDO sed -i "s|^\[[^]]*\]:[0-9]*\([[:space:]][[:space:]]*${U}:\)|[${H}]:${PORT}\1|" \
+            /etc/postfix/sasl_passwd
+        $SUDO grep -q "^\[${H}\]:${PORT}[[:space:]]" /etc/postfix/sasl_passwd \
+            && log "sasl_passwd: ${U} now keyed to [${H}]:${PORT}" \
+            || warn "sasl_passwd has no line for ${U} - re-run with the password (it'll ask)"
     fi
     $SUDO postmap /etc/postfix/sasl_passwd
+    # The pullers (pop-pull, getmail via sasl-pass) run as you and read the
+    # mailbox password from this same file - so it's root:<your group> 0640,
+    # not root-only.  On Debian-style systems that group is just you.
+    grp="$(id -gn "$ADMIN_USER" 2>/dev/null || echo root)"
+    $SUDO chown "root:$grp" /etc/postfix/sasl_passwd /etc/postfix/sasl_passwd.db
+    $SUDO chmod 640 /etc/postfix/sasl_passwd /etc/postfix/sasl_passwd.db
+    log "sasl_passwd: root:$grp 0640 (readable by $ADMIN_USER's pullers)"
     # one-way rewrite: every locally originated address -> the real mailbox,
     # applied only on outbound (smtp_generic_maps)
-    $SUDO tee /etc/postfix/generic >/dev/null <<EOF
-@${hn}                  ${U}
-@${fqdn}                ${U}
+    { printf '@%-22s %s\n' "$hn" "$U"
+      [ "$fqdn" = "$hn" ] || printf '@%-22s %s\n' "$fqdn" "$U"
+    } | $SUDO tee /etc/postfix/generic >/dev/null
+    $SUDO tee -a /etc/postfix/generic >/dev/null <<EOF
 @localhost              ${U}
 @localhost.localdomain  ${U}
 root@localhost          ${U}
@@ -173,10 +196,13 @@ if [ -z "$H" ] && command -v postconf >/dev/null 2>&1; then
     fi
 fi
 : "${H:=u-l.ca}"; : "${U:=cwp@u-l.ca}"
-# STARTTLS submission (465 needs extra wiring) - but leave a working setup's port be
-[ "$REUSED" = 1 ] || case "$PORT" in 465|"") PORT=587 ;; esac
 [ -n "$PORT" ] || PORT=587
+
 [ -n "$SMTP_PORT" ] && PORT="$SMTP_PORT"
+# 465 = SMTPS: TLS from the first byte (Postfix "wrapper mode");
+# 587/25 = plain connect, then STARTTLS.  Some networks block one of them -
+# check with:  timeout 5 bash -c 'exec 3<>/dev/tcp/HOST/PORT' && echo open
+WRAP=no; [ "$PORT" = 465 ] && WRAP=yes
 
 LAN_NET=""
 case "$LAN" in
@@ -229,7 +255,7 @@ if [ "$svc" != systemd ] && [ "$svc" != sysv ]; then
 fi
 
 echo
-log "smarthost : ${H}::${PORT}  (STARTTLS, AUTH)"
+log "smarthost : ${H}:${PORT}  ($( [ "$WRAP" = yes ] && echo 'TLS from connect' || echo STARTTLS ), AUTH)"
 log "auth user : ${U}"
 log "rewrite   : local senders -> ${U}   (on outbound only)"
 log "service   : ${svc}"

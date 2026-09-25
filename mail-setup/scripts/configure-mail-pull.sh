@@ -82,7 +82,8 @@ MDA="$(find_mda || true)"
 # where the SMTP/POP password lives - Postfix's own sasl_passwd, the same
 # file configure-sendmail-relay.sh already wrote (format: "[host]:port user:pass")
 PWFILE="${PWFILE_OPT:-/etc/postfix/sasl_passwd}"
-[ -r "$PWFILE" ] || warn "$PWFILE is not readable - run configure-sendmail-relay.sh, pass --pwfile, or add one by hand"
+[ -r "$PWFILE" ] || warn "$PWFILE is not readable by $(id -un) - re-run configure-sendmail-relay.sh
+  --user $(id -un) (it makes it root:<your group> 0640), or pass --pwfile"
 
 # --------------------------------------------------------------------------
 # settings

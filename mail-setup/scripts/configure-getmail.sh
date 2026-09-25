@@ -109,7 +109,8 @@ fi
 if [ "$PROTO" = imap ]; then RTYPE=SimpleIMAPSSLRetriever; PORT=993
 else                         RTYPE=SimplePOP3SSLRetriever; PORT=995; fi
 
-[ -r "$PWFILE" ] || warn "$PWFILE is not readable - run configure-sendmail-relay.sh, pass --pwfile, or add one by hand"
+[ -r "$PWFILE" ] || warn "$PWFILE is not readable by $(id -un) - re-run configure-sendmail-relay.sh
+  --user $(id -un) (it makes it root:<your group> 0640), or pass --pwfile"
 [ -r "$PWFILE" ] && { grep -qF -- " ${REMOTE_USER}:" "$PWFILE" \
   || warn "no line for '${REMOTE_USER}' in $PWFILE - getmail will fail until one exists"; }
 
