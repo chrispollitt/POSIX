@@ -1,0 +1,101 @@
+#!/usr/bin/env python3
+#
+# **Important:
+# Change the RELAY_HOST variable at the top to the IP address
+#   or hostname of your target mail server.
+#
+# **Installation:  scripts/install-sendmail-shim.sh does all of this; by hand:
+# 1. Backup existing sendmail (if it exists)
+#   sudo mv /usr/sbin/sendmail /usr/sbin/sendmail.bak
+# 2. Move the script into place
+#   sudo cp sendmail-shim /usr/sbin/sendmail
+# 3. Make it executable
+#   sudo chmod +x /usr/sbin/sendmail
+# 4. Ensure it's owned by root
+#   sudo chown root:root /usr/sbin/sendmail
+#
+# **Testing:
+#   echo -e "From: test@example.com\nTo: recipient@example.com\nSubject: Test\n\nThis is a test." | /usr/sbin/sendmail -t
+#
+# **Important Caveats:
+# SELinux / AppArmor: If you are on a system with strict Mandatory Access Control (like RHEL/CentOS/Fedora with SELinux, or Ubuntu with AppArmor), the security policy might block the sendmail binary from making outbound network connections on port 25.
+# For SELinux: You may need to allow it: sudo setsebool -P httpd_can_network_connect 1 (if PHP is calling it) or create a custom policy module.
+# For AppArmor: You may need to add a rule to the AppArmor profile for the calling daemon (e.g., PHP-FPM or cron) to allow network access.
+# Python 3 Dependency: This script relies on Python 3 being installed on the system. On 99% of modern Linux distributions, python3 is installed by default. If it isn't, you will need to install it (apt install python3 or yum install python3).
+# No Queuing: Because this is a "blind forwarder", if the target server on port 25 is down or unreachable, the script will fail and exit immediately. It does not queue mail for later retry like a full MTA (Postfix) does.
+
+import sys
+import os
+import smtplib
+import email
+import email.utils
+import argparse
+
+# ==========================================
+# CONFIGURATION
+# ==========================================
+RELAY_HOST = "mail.yourserver.com"  # <-- CHANGE THIS to your target SMTP server
+RELAY_PORT = 25                     # Standard SMTP port
+TIMEOUT = 10                        # Seconds to wait for SMTP connection
+# ==========================================
+
+def main():
+    # 1. Parse arguments. Sendmail has many flags; we define the common ones 
+    # so argparse consumes them, leaving only the actual recipients in 'unknown'.
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument('-t', action='store_true') # Read recipients from headers
+    parser.add_argument('-i', '-oi', action='store_true') # Ignore dots
+    parser.add_argument('-bm', '-bs', '-bt', '-bv', action='store_true') # Modes
+    parser.add_argument('-f', '-F', '-C', '-L', '-N', '-O', '-R', '-q', type=str) # Flags with args
+    
+    args, unknown = parser.parse_known_args()
+    
+    # 'unknown' now contains only the positional arguments (explicit recipients)
+    recipients = [arg for arg in unknown if not arg.startswith('-')]
+
+    # 2. Read the raw message from stdin
+    raw_msg = sys.stdin.buffer.read()
+    if not raw_msg:
+        sys.exit(0) # Nothing to send
+
+    # 3. Parse the message to extract headers
+    msg = email.message_from_bytes(raw_msg)
+
+    # Determine Sender
+    sender = args.f
+    if not sender:
+        # Fallback to From header, or root@localhost
+        name, addr = email.utils.parseaddr(msg.get('From', 'root@localhost'))
+        sender = addr if addr else 'root@localhost'
+
+    # Determine Recipients
+    if args.t or not recipients:
+        # Extract To, Cc, and Bcc from headers
+        header_recipients = []
+        for header in ('To', 'Cc', 'Bcc'):
+            header_recipients.extend(msg.get_all(header, []))
+        
+        # Parse email addresses from the header strings
+        parsed_addrs = [addr for name, addr in email.utils.getaddresses(header_recipients) if addr]
+        recipients.extend(parsed_addrs)
+
+    if not recipients:
+        print("sendmail-relay: No recipients specified.", file=sys.stderr)
+        sys.exit(66) # EX_NOUSER / standard sendmail error code
+
+    # 4. Strip Bcc header (mimicking real sendmail behavior so Bcc isn't leaked to recipients)
+    if 'Bcc' in msg:
+        del msg['Bcc']
+        raw_msg = msg.as_bytes()
+
+    # 5. Send via SMTP
+    try:
+        with smtplib.SMTP(RELAY_HOST, RELAY_PORT, timeout=TIMEOUT) as server:
+            # server.ehlo() is called automatically by smtplib
+            server.sendmail(sender, recipients, raw_msg)
+    except Exception as e:
+        print(f"sendmail-relay: SMTP Error: {e}", file=sys.stderr)
+        sys.exit(71) # EX_OSERR / standard sendmail error code
+
+if __name__ == '__main__':
+    main()

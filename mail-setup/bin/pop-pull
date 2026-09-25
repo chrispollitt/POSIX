@@ -1,0 +1,114 @@
+#!/usr/bin/env python3
+"""pop-pull - on-demand POP3S fetch into the local mailbox via sendmail.
+
+Config: ~/.config/mailpull.conf   Password: read live from Postfix's own
+/etc/postfix/sasl_passwd (format "[host]:port user:pass"), or pwfile= if set.
+Seen-UID cache (keep mode): ~/.local/state/mailpull.seen
+"""
+import os, sys, ssl, poplib, argparse, configparser, subprocess
+
+CFG  = os.path.expanduser("~/.config/mailpull.conf")
+SEEN = os.path.expanduser("~/.local/state/mailpull.seen")
+
+def die(m, code=2):
+    print("pop-pull: " + m, file=sys.stderr); sys.exit(code)
+
+def password(pwfile, login):
+    # Postfix sasl_passwd lines look like:  [host]:port  user:pass
+    try:
+        with open(pwfile) as f:
+            for ln in f:
+                ln = ln.strip()
+                if not ln or ln.startswith("#"):
+                    continue
+                fields = ln.split(None, 1)
+                if len(fields) != 2:
+                    continue
+                user, sep, pw = fields[1].partition(":")
+                if sep and user == login:
+                    return pw
+    except OSError as e:
+        die("cannot read %s: %s" % (pwfile, e))
+    die("no password for %s in %s" % (login, pwfile))
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("-v", "--verbose", action="store_true")
+    ap.add_argument("-n", "--dry-run", action="store_true")
+    a = ap.parse_args()
+
+    c = configparser.ConfigParser()
+    if not c.read(CFG):
+        die("missing config %s (run mail-setup.sh or scripts/configure-mail-pull.sh)" % CFG)
+    s = c["mailpull"]
+    server, login = s["server"], s["user"]
+    port = s.getint("port", 995)
+    local_user = s["local_user"]
+    keep = s.getboolean("keep", True)
+    verify = s.getboolean("verify", True)
+    cafile = s.get("cafile", "").strip()
+    mda = s.get("mda", "/usr/sbin/sendmail")
+    pw = password(s.get("pwfile", "/etc/postfix/sasl_passwd"), login)
+
+    ctx = ssl.create_default_context()
+    if cafile and os.path.exists(cafile):
+        ctx.load_verify_locations(cafile)
+    if not verify:
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+
+    seen = set()
+    if keep and os.path.exists(SEEN):
+        with open(SEEN) as f:
+            seen = set(f.read().split())
+
+    try:
+        M = poplib.POP3_SSL(server, port, context=ctx, timeout=45)
+    except Exception as e:
+        die("connect %s:%d failed: %s" % (server, port, e))
+    try:
+        M.user(login); M.pass_(pw)
+        n = M.stat()[0]
+        uidl = {}
+        for line in M.uidl()[1]:
+            i, u = line.decode().split(None, 1)
+            uidl[int(i)] = u
+        got = 0; new = set(seen)
+        for i in range(1, n + 1):
+            u = uidl.get(i, str(i))
+            if keep and u in seen:
+                continue
+            raw = b"\r\n".join(M.retr(i)[1]) + b"\r\n"
+            if a.dry_run:
+                if a.verbose:
+                    print("[dry-run] msg %d uid %s (%d bytes)" % (i, u, len(raw)))
+            else:
+                r = subprocess.run([mda, "-oi", "--", local_user], input=raw)
+                if r.returncode != 0:
+                    print("pop-pull: delivery failed on msg %d" % i, file=sys.stderr)
+                    break
+                if a.verbose:
+                    print("delivered msg %d uid %s (%d bytes)" % (i, u, len(raw)))
+            got += 1
+            if keep:
+                new.add(u)
+            elif not a.dry_run:
+                M.dele(i)
+        if keep and not a.dry_run:
+            os.makedirs(os.path.dirname(SEEN), exist_ok=True)
+            with open(SEEN, "w") as f:
+                f.write("\n".join(sorted(new)) + "\n")
+        M.quit()
+    except Exception as e:
+        try: M.quit()
+        except Exception: pass
+        die(str(e))
+
+    if got:
+        print("pop-pull: %d new message(s) -> /var/mail/%s" % (got, local_user))
+        sys.exit(0)
+    print("pop-pull: no new mail")
+    sys.exit(1)
+
+if __name__ == "__main__":
+    main()
