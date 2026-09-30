@@ -148,6 +148,29 @@ if [ "$(uname -s)" != Linux ]; then
 fi
 
 # --------------------------------------------------------------------------
+t "configure-webmin --print"
+W=$("$S/configure-webmin.sh" --print --user alice)
+check "alerts go to you@localhost by default" 'grep -q "alerts to : alice@localhost" <<<"$W"'
+check "defaults: every 5 min, queue > 0 for 2 checks" 'grep -q "every 5 min" <<<"$W" && grep -q "queue > 0 messages for 2 checks" <<<"$W"'
+check "access + webhook unchanged by default" 'grep -q "access    : unchanged" <<<"$W" && grep -q "webhook   : unchanged" <<<"$W"'
+W=$("$S/configure-webmin.sh" --print --email me@example.org --every 10 --queue-max 3 --fails 1 --allow 10.1.2.3/8 --webhook https://hook.example.org/x)
+check "options show up" 'grep -q "alerts to : me@example.org" <<<"$W" && grep -q "every 10 min" <<<"$W" && grep -q "queue > 3 messages for 1 checks" <<<"$W"'
+check "--allow normalised, localhost kept" 'grep -q "localhost + 10.0.0.0/8" <<<"$W"'
+check "--webhook shown" 'grep -q "webhook   : https://hook.example.org/x" <<<"$W"'
+for bad in "--every 0" "--every 61" "--every x" "--queue-max -1" "--fails 0" "--email nobody" "--webhook ftp://x" "--allow not-a-net"; do
+  "$S/configure-webmin.sh" --print $bad > /dev/null 2>&1
+  check "rejects $bad" '[ $? != 0 ]'
+done
+if [ "$(uname -s)" != Linux ]; then
+  "$S/configure-webmin.sh" > "$OUT" 2>&1
+  check "refuses to run off Linux" '[ $? != 0 ] && has "$OUT" "Linux only"'
+fi
+
+t "relay failure notices"
+check "delay warning + postmaster notices set" 'has "$S/configure-sendmail-relay.sh" "\"delay_warning_time = 1h\"" && has "$S/configure-sendmail-relay.sh" "\"notify_classes = resource, software, bounce, delay, 2bounce\""'
+check "postmaster alias ensured" 'has "$S/configure-sendmail-relay.sh" "postmaster: root"'
+
+# --------------------------------------------------------------------------
 t "mail-setup.sh"
 "$M/mail-setup.sh" --role client --assume-no --caller tvmail > "$OUT" 2>&1
 check "client, --assume-no: exits 0" '[ $? = 0 ] && has "$OUT" "mail-setup done (role: client)"'
@@ -155,6 +178,7 @@ check "client offers the shim, not Postfix" 'has "$OUT" "sendmail shim" && ! has
 "$M/mail-setup.sh" --role master --assume-no > "$OUT" 2>&1
 check "master, --assume-no: exits 0" '[ $? = 0 ] && has "$OUT" "mail-setup done (role: master)"'
 check "master offers Postfix, Dovecot, a puller" 'has "$OUT" "== Postfix" && has "$OUT" "== Dovecot" && has "$OUT" "puller: pop-pull"'
+check "master offers the Webmin watchdog" 'has "$OUT" "== Webmin" && has "$OUT" "configure-webmin.sh now"'
 "$M/mail-setup.sh" --role master --puller none --assume-no > "$OUT" 2>&1
 check "--puller none skips the puller" 'has "$OUT" "puller: none" && ! has "$OUT" "configure-mail-pull.sh now"'
 "$M/mail-setup.sh" --role boss > /dev/null 2>&1

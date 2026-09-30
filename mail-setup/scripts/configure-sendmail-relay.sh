@@ -5,6 +5,9 @@
 # Configure Postfix as a send-only sendmail: local mail -> /var/mail,
 # everything else -> an authenticated TLS smarthost, with locally generated
 # senders rewritten to the real mailbox (this box can't receive replies).
+# Delivery failures are reported locally: the sender is warned after 1h
+# stuck in the queue, and postmaster (-> root -> --user) gets a copy of every
+# bounce / delay notice.  For a watchdog on top, see configure-webmin.sh.
 #
 # Linux only - the mail master role (the one host that owns /var/mail) is
 # meant for a Linux/Pi box.  If Postfix isn't installed, apt-installs it.
@@ -129,6 +132,15 @@ _cfg_postfix() {   # configure an already-installed Postfix as a smarthost relay
       "myorigin = \$myhostname" \
       "alias_maps = hash:/etc/aliases" \
       "alias_database = hash:/etc/aliases"
+    # Failure notices, all delivered locally (postmaster -> root -> you), so
+    # they still arrive when the smarthost is the thing that's broken:
+    #  - senders hear after 1h that a message is stuck, not after the 5-day
+    #    bounce (default: never warned)
+    #  - postmaster gets a copy (headers only) of every bounce, delay warning
+    #    and undeliverable bounce - covers LAN clients' mail and daemons too
+    $SUDO postconf -e \
+      "delay_warning_time = 1h" \
+      "notify_classes = resource, software, bounce, delay, 2bounce"
     if [ "$reuse" = 0 ]; then
         printf '[%s]:%s %s:%s\n' "$H" "$PORT" "$U" "$P" | $SUDO tee /etc/postfix/sasl_passwd >/dev/null
         $SUDO chmod 600 /etc/postfix/sasl_passwd
@@ -163,9 +175,12 @@ EOF
     $SUDO postmap /etc/postfix/generic
     $SUDO grep -qs '^root:' /etc/aliases \
       || printf 'root: %s\n' "$ADMIN_USER" | $SUDO tee -a /etc/aliases >/dev/null
+    $SUDO grep -qs '^postmaster:' /etc/aliases \
+      || printf 'postmaster: root\n' | $SUDO tee -a /etc/aliases >/dev/null
     $SUDO newaliases 2>/dev/null || true
     _cfg_lan
     log "postfix: relayhost=[${H}]:${PORT}, SASL+TLS, generic rewrite -> ${U}"
+    log "postfix: failure notices -> postmaster -> root -> ${ADMIN_USER} (stuck > 1h, bounces)"
     _enable_service postfix
 }
 

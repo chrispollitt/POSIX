@@ -18,6 +18,7 @@
 #   configure-dovecot.sh         Dovecot IMAP over /var/mail + ~/mail
 #   configure-mail-pull.sh       pop-pull   (POP3S -> /var/mail)
 #   configure-getmail.sh         getmail    (POP3S/IMAPS -> /var/mail)
+#   configure-webmin.sh          Webmin watchdog: mails you when mail gets stuck
 #   install-sendmail-shim.sh     client-side /usr/sbin/sendmail forwarder
 #   configure-mailutils.sh       mail(1) + ~/.mail + ~/.mu-tickets
 #
@@ -186,6 +187,20 @@ if [ "$ROLE" = master ]; then
       log "running: $*"
       bash "$@" || warn "$(basename "$script") exited non-zero - see above"
     fi
+  fi
+
+  # ------------------------------------------------------------------------
+  step "Webmin (mail watchdog: emails you when mail gets stuck)"
+  # ------------------------------------------------------------------------
+  # installing a web admin UI is a big step, so --yes alone only
+  # (re)configures a Webmin that's already there
+  if [ -r /etc/webmin/miniserv.conf ] || [ "$ASSUME" != yes ]; then
+    if ask "Run configure-webmin.sh now?" N; then
+      log "running: $S/configure-webmin.sh"
+      bash "$S/configure-webmin.sh" || warn "configure-webmin.sh exited non-zero - see above"
+    fi
+  else
+    log "Webmin not installed - skipped under --yes (run scripts/configure-webmin.sh)"
   fi
 
 else

@@ -55,10 +55,26 @@ Every step is a yes/no offer. Each one is also its own script you can run alone:
 | `scripts/configure-dovecot.sh` | Dovecot IMAP: INBOX = `/var/mail/<user>`, other folders in `~/mail`, with Drafts/Sent/Trash/Junk/Archive auto-created. Writes one drop-in (`conf.d/99-mail-setup.conf`), checks it with `doveconf`, and rolls back if that fails. Handles both Dovecot 2.3 and 2.4 syntax. Linux only. |
 | `scripts/configure-mail-pull.sh` | installs `bin/pop-pull` (stdlib-Python POP3S puller) + `~/.config/mailpull.conf` |
 | `scripts/configure-getmail.sh` | installs getmail6 if missing (distro package, else `pip --user`) and writes a `getmailrc` (POP3S, or `--imap`) |
+| `scripts/configure-webmin.sh` | installs Webmin (official apt repo) if missing and sets its System and Server Status module to check, every 5 min (`--every`), the Postfix mail queue plus Postfix/Dovecot running. You get a local email when a check fails and another when it recovers. `--queue-max` / `--fails` set the queue alarm, `--webhook URL` adds an HTTP call, and `--allow CIDR\|auto\|all` limits who can reach port 10000. The wizard offers it on a master (under `--yes` only when Webmin is already installed). Linux only. |
 | `scripts/install-sendmail-shim.sh` | client: installs `bin/sendmail-shim` as `/usr/sbin/sendmail`, forwarding to the master |
 | `scripts/configure-mailutils.sh` | installs GNU Mailutils (a source build on Cygwin) and writes `~/.mail` + `~/.mu-tickets` |
 
 `--help` on any of them prints its options.
+
+### When mail doesn't go out
+
+Every failure notice is delivered locally, to `/var/mail/<you>` on the master,
+so it still arrives when the smarthost is what's broken.
+
+- **Postfix** (`configure-sendmail-relay.sh`): a message stuck in the queue
+  for 1 hour gets its sender a "delayed" notice (`delay_warning_time`), and
+  postmaster (→ root → you) gets a headers-only copy of every bounce, delay
+  and undeliverable bounce (`notify_classes`). Your own mail can therefore
+  produce two notices: one as sender, one as postmaster.
+- **Webmin** (`configure-webmin.sh`, optional): one email when the queue starts
+  backing up and one when it has cleared. For the reason a message is stuck, see
+  *Servers → Postfix Mail Server → Mail Queue*; the log is at
+  *System → System Logs* → `/var/log/mail.log`.
 
 ### Pullers and `mail-pull`
 
