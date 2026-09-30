@@ -5,6 +5,9 @@
 # Configure Postfix as a send-only sendmail: local mail -> /var/mail,
 # everything else -> an authenticated TLS smarthost, with locally generated
 # senders rewritten to the real mailbox (this box can't receive replies).
+# Addresses LAN clients qualify with their own hostname (chris@laptop - any
+# domain without a dot) are treated as this box, so they deliver here and
+# leave as the real mailbox too.
 # Delivery failures are reported locally: the sender is warned after 1h
 # stuck in the queue, and postmaster (-> root -> --user) gets a copy of every
 # bounce / delay notice.  For a watchdog on top, see configure-webmin.sh.
@@ -173,6 +176,22 @@ root@localhost          ${U}
 ${ADMIN_USER}@localhost ${U}
 EOF
     $SUDO postmap /etc/postfix/generic
+    # LAN clients qualify addresses with their own hostname: "chris" sent
+    # from the laptop arrives as chris@laptop - both as recipient (relayed
+    # out, bounced) and as sender (the smarthost's sender verify rejects it).
+    # A domain without a dot can't be delivered anywhere else, so treat it as
+    # this box: chris@laptop -> chris@$myhostname (always in mydestination),
+    # delivered here, and on the way out the generic map turns it into the
+    # real mailbox.  Headers are rewritten for LAN clients too (by default
+    # only for local submissions).
+    mh="$($SUDO postconf -h myhostname)"
+    $SUDO grep -q "^@${mh}[[:space:]]" /etc/postfix/generic || {
+        printf '@%-22s %s\n' "$mh" "$U" | $SUDO tee -a /etc/postfix/generic >/dev/null
+        $SUDO postmap /etc/postfix/generic; }
+    printf '/^([^@]+)@[^.@]+$/    ${1}@%s\n' "$mh" | $SUDO tee /etc/postfix/lan-canonical >/dev/null
+    $SUDO postconf -e \
+      "canonical_maps = regexp:/etc/postfix/lan-canonical" \
+      "local_header_rewrite_clients = permit_inet_interfaces, permit_mynetworks"
     $SUDO grep -qs '^root:' /etc/aliases \
       || printf 'root: %s\n' "$ADMIN_USER" | $SUDO tee -a /etc/aliases >/dev/null
     $SUDO grep -qs '^postmaster:' /etc/aliases \

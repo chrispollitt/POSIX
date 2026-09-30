@@ -51,7 +51,7 @@ Every step is a yes/no offer. Each one is also its own script you can run alone:
 
 | script | does |
 |---|---|
-| `scripts/configure-sendmail-relay.sh` | Postfix: local delivery + an authenticated TLS smarthost relay; rewrites local senders on the way out. `--lan CIDR\|auto` lets LAN clients send through it, `--no-lan` (or `--lan off`) goes back to loopback-only; a re-run with neither keeps the current setting, and a re-run without `--relay-file` keeps the current smarthost. Linux only. |
+| `scripts/configure-sendmail-relay.sh` | Postfix: local delivery + an authenticated TLS smarthost relay; rewrites local senders on the way out. Addresses that LAN clients qualify with their own hostname (`chris@laptop`, i.e. any domain without a dot) are treated as the master's, so they deliver locally and go out as the real mailbox. `--lan CIDR\|auto` lets LAN clients send through it, `--no-lan` (or `--lan off`) goes back to loopback-only; a re-run with neither keeps the current setting, and a re-run without `--relay-file` keeps the current smarthost. Linux only. |
 | `scripts/configure-dovecot.sh` | Dovecot IMAP: INBOX = `/var/mail/<user>`, other folders in `~/mail`, with Drafts/Sent/Trash/Junk/Archive auto-created. Writes one drop-in (`conf.d/99-mail-setup.conf`), checks it with `doveconf`, and rolls back if that fails. Handles both Dovecot 2.3 and 2.4 syntax. Linux only. |
 | `scripts/configure-mail-pull.sh` | installs `bin/pop-pull` (stdlib-Python POP3S puller) + `~/.config/mailpull.conf` |
 | `scripts/configure-getmail.sh` | installs getmail6 if missing (distro package, else `pip --user`) and writes a `getmailrc` (POP3S, or `--imap`) |

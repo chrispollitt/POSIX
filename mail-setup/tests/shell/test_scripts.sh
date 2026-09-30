@@ -169,6 +169,9 @@ fi
 t "relay failure notices"
 check "delay warning + postmaster notices set" 'has "$S/configure-sendmail-relay.sh" "\"delay_warning_time = 1h\"" && has "$S/configure-sendmail-relay.sh" "\"notify_classes = resource, software, bounce, delay, 2bounce\""'
 check "postmaster alias ensured" 'has "$S/configure-sendmail-relay.sh" "postmaster: root"'
+check "dotless (LAN host) domains canonicalised, headers too" 'has "$S/configure-sendmail-relay.sh" "canonical_maps = regexp:/etc/postfix/lan-canonical" && has "$S/configure-sendmail-relay.sh" "permit_mynetworks\""'
+LC=$(printf '/^([^@]+)@[^.@]+$/    ${1}@%s\n' cmpi | sed -n 's|^/\(.*\)/ .*|\1|p')
+check "lan-canonical regex: dotless only" 'grep -Eq "$LC" <<<"chris@cmlaptop" && ! grep -Eq "$LC" <<<"me@gmail.com" && ! grep -Eq "$LC" <<<"chris"'
 
 # --------------------------------------------------------------------------
 t "mail-setup.sh"
