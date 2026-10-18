@@ -7,9 +7,6 @@
 # (the password, URL-encoded, mode 600).  Other programs can reuse those two
 # files (tvmail-backend does, as a fallback behind its own tvmail.conf).
 #
-# Cygwin has no mailutils package: it offers a from-source build into
-# /usr/local instead ($MAILUTILS_VERSION picks the release, default 3.17).
-#
 # Usage:
 #   ./configure-mailutils.sh [options]
 #
@@ -44,7 +41,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 if [ -z "$DEF_HOST" ]; then
-  [ "$ROLE" = master ] && DEF_HOST=localhost || DEF_HOST=cmpi
+  [ "$ROLE" = master ] && DEF_HOST=localhost || DEF_HOST=cpbee
 fi
 
 # python3, for the ~/.mu-tickets percent-encoder below (falls back to sed).
@@ -62,29 +59,6 @@ enc() {   # enc STRING -> percent-encoded STRING
 # --------------------------------------------------------------------------
 step "GNU Mailutils (mail(1))"
 # --------------------------------------------------------------------------
-cygwin_build_mailutils() {
-  ver="${MAILUTILS_VERSION:-3.17}"
-  url="https://ftp.gnu.org/gnu/mailutils/mailutils-${ver}.tar.gz"
-  work=$(mktemp -d)
-  log "fetching $url"
-  if ( cd "$work" \
-       && curl -fLO "$url" \
-       && tar xf "mailutils-${ver}.tar.gz" \
-       && cd "mailutils-${ver}" \
-       && ./configure --prefix=/usr/local \
-       && make -j"$(nproc 2>/dev/null || echo 2)" \
-       && make install ); then
-    rm -rf "$work"
-    hash -r
-    log "installed GNU Mailutils $ver to /usr/local"
-  else
-    warn "automated build failed - left the source tree in $work"
-    warn "check the version list at https://ftp.gnu.org/gnu/mailutils/ and re-run with"
-    warn "  MAILUTILS_VERSION=<ver> $0"
-    return 1
-  fi
-}
-
 HAVE_MU=0
 if command -v mail >/dev/null 2>&1 && mail --version 2>/dev/null | grep -qi mailutils; then
   HAVE_MU=1
@@ -97,14 +71,7 @@ else
       dnf|yum) pkg_install mailutils ;;
       pacman) pkg_install mailutils || warn "not in the official repos - try the AUR: yay -S mailutils" ;;
       brew)   pkg_install mailutils || warn "no stock brew formula - see https://mailutils.org" ;;
-      cygwin)
-        warn "Cygwin has no mailutils package - it needs a from-source build:"
-        warn "  curl -LO https://ftp.gnu.org/gnu/mailutils/mailutils-<ver>.tar.gz"
-        warn "  tar xf mailutils-*.tar.gz && cd mailutils-*"
-        warn "  ./configure --prefix=/usr/local && make && make install"
-        if ask "Attempt that build now (needs gcc, make, curl - can take a while)?" N; then
-          cygwin_build_mailutils || true
-        fi ;;
+      cygwin)  pkg_install mailutils ;;
       *) warn "no known package manager - see https://mailutils.org" ;;
     esac
     command -v mail >/dev/null 2>&1 && HAVE_MU=1

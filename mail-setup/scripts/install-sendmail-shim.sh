@@ -14,7 +14,7 @@
 #   ./install-sendmail-shim.sh [--host MASTER] [--port N]
 #
 # Options:
-#   --host NAME   the master's hostname   (default: ask, suggesting cmpi)
+#   --host NAME   the master's hostname   (default: ask, suggesting cpbee)
 #   --port N      its SMTP port           (default: ask, suggesting 25)
 #   -h | --help   show this header
 #
@@ -38,7 +38,7 @@ done
 PY="$(find_python || true)"
 [ -n "$PY" ] || die "need a python3 (>= 3.6) - the shim is a Python script"
 
-[ -n "$MASTER_HOST" ] || MASTER_HOST=$(readval "master hostname" "cmpi")
+[ -n "$MASTER_HOST" ] || MASTER_HOST=$(readval "master hostname" "cpbee")
 [ -n "$MASTER_PORT" ] || MASTER_PORT=$(readval "master SMTP port (25 = trusts this LAN via mynetworks, no auth)" "25")
 
 dest="${SENDMAIL_DEST:-/usr/sbin/sendmail}"   # override: tests

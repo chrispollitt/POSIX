@@ -208,7 +208,7 @@ else
   step "sendmail shim (forwards straight to the master, no local queue)"
   # ------------------------------------------------------------------------
   if ask "Install bin/sendmail-shim as /usr/sbin/sendmail?"; then
-    MASTER_HOST=$(readval "master hostname" "cmpi")
+    MASTER_HOST=$(readval "master hostname" "cpbee")
     MASTER_PORT=$(readval "master SMTP port (25 = trusts this LAN via mynetworks, no auth)" "25")
     bash "$S/install-sendmail-shim.sh" --host "$MASTER_HOST" --port "$MASTER_PORT" \
       || warn "install-sendmail-shim.sh exited non-zero - see above"

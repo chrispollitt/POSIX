@@ -57,7 +57,7 @@ Every step is a yes/no offer. Each one is also its own script you can run alone:
 | `scripts/configure-getmail.sh` | installs getmail6 if missing (distro package, else `pip --user`) and writes a `getmailrc` (POP3S, or `--imap`) |
 | `scripts/configure-webmin.sh` | installs Webmin (official apt repo) if missing and sets its System and Server Status module to check, every 5 min (`--every`), the Postfix mail queue plus Postfix/Dovecot running. You get a local email when a check fails and another when it recovers. `--queue-max` / `--fails` set the queue alarm, `--webhook URL` adds an HTTP call, and `--allow CIDR\|auto\|all` limits who can reach port 10000. The wizard offers it on a master (under `--yes` only when Webmin is already installed). Linux only. |
 | `scripts/install-sendmail-shim.sh` | client: installs `bin/sendmail-shim` as `/usr/sbin/sendmail`, forwarding to the master |
-| `scripts/configure-mailutils.sh` | installs GNU Mailutils (a source build on Cygwin) and writes `~/.mail` + `~/.mu-tickets` |
+| `scripts/configure-mailutils.sh` | installs GNU Mailutils and writes `~/.mail` + `~/.mu-tickets` |
 
 `--help` on any of them prints its options.
 
