@@ -20,7 +20,11 @@
 #      because Sieve only runs for mail Dovecot delivers.  Postfix local(8)
 #      writing /var/mail directly bypasses it.  pop-pull, getmail and the
 #      sendmail shim all hand mail to Postfix, so this one setting covers them,
-#      and mail still lands in the same /var/mail/<user> that IMAP reads;
+#      and mail still lands in the same /var/mail/<user> that IMAP reads.
+#      dovecot-lda runs as the recipient, so to create a user's first
+#      /var/mail/<user> (group-writable /var/mail only) it is made setgid
+#      mail - otherwise that user's first mail is deferred with
+#      "setegid(privileged) failed" (dpkg-statoverride keeps it across upgrades);
 #   4. opens port 4190 in ufw if ufw is active; if an nftables input chain
 #      drops by default and has no rule for 4190, says which rule to add
 #      (clients would just time out) and adds it with --open-firewall;
@@ -278,6 +282,21 @@ for c in /usr/lib/dovecot/dovecot-lda /usr/libexec/dovecot/dovecot-lda /usr/lib6
 done
 [ -n "$LDA" ] || LDA="$(command -v dovecot-lda || true)"
 [ -n "$LDA" ] || die "dovecot-lda not found - is the dovecot-core package complete?"
+# dovecot-lda runs as the recipient.  /var/mail is group-writable by "mail"
+# only, so a user without an existing /var/mail/<user> (a new account) can't
+# have it created: "setegid(privileged) failed: Operation not permitted" and
+# the mail is deferred.  The binary has to be setgid mail (Dovecot's own
+# LDA/Postfix instructions say so).  dpkg-statoverride keeps it across upgrades.
+if getent group mail >/dev/null 2>&1 \
+   && { [ ! -g "$LDA" ] || [ "$(stat -c %G "$LDA" 2>/dev/null)" != mail ]; }; then
+  if command -v dpkg-statoverride >/dev/null 2>&1; then
+    $SUDO dpkg-statoverride --list "$LDA" >/dev/null 2>&1 && $SUDO dpkg-statoverride --remove "$LDA"
+    $SUDO dpkg-statoverride --update --add root mail 2755 "$LDA"
+  else
+    $SUDO chgrp mail "$LDA" && $SUDO chmod 2755 "$LDA"
+  fi
+  log "dovecot-lda : setgid mail (so it can create /var/mail/<user> for new accounts)"
+fi
 WANT="$LDA -f \"\$SENDER\" -a \"\$RECIPIENT\""
 CUR="$($SUDO postconf -h mailbox_command)"
 if [ "$CUR" = "$WANT" ]; then
