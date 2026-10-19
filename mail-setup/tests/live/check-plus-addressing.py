@@ -51,6 +51,15 @@ def relay_field(path, label):
     return ""
 
 
+def smtp_port(explicit, relay_value):
+    """--smtp-port, else the relay file's "SMTP Port", else 465 (SMTPS): many
+    networks and hosts block 25/587 (cp1/u-l.ca: only 26 and 465 answer)."""
+    if explicit:
+        return explicit
+    digits = re.sub(r"\D", "", relay_value or "")
+    return int(digits) if digits and int(digits) > 0 else 465
+
+
 def password(pwfile, login):
     try:
         with open(pwfile) as f:
@@ -72,9 +81,13 @@ def send_probe(a, login, pw, addr, token):
            "mail-setup check-plus-addressing.py probe %s\r\n"
            % (addr, addr, token, email.utils.formatdate(localtime=True), token, token))
     try:
-        s = smtplib.SMTP(a.smtp_host, a.smtp_port, timeout=45)
+        if a.smtp_port == 465 and not a.no_tls:        # SMTPS: TLS from the first byte
+            s = smtplib.SMTP_SSL(a.smtp_host, a.smtp_port, timeout=45,
+                                 context=ssl.create_default_context())
+        else:
+            s = smtplib.SMTP(a.smtp_host, a.smtp_port, timeout=45)
         try:
-            if not a.no_tls:
+            if not a.no_tls and a.smtp_port != 465:    # STARTTLS (587, 26, ...)
                 s.starttls(context=ssl.create_default_context())
             if not a.no_auth:
                 s.login(login, pw)
@@ -89,7 +102,11 @@ def send_probe(a, login, pw, addr, token):
     except smtplib.SMTPRecipientsRefused as e:
         return False, "smarthost refused the recipient %s: %s" % (addr, e.recipients)
     except (smtplib.SMTPException, OSError) as e:
-        return False, "SMTP error: %s" % e
+        hint = ""
+        if isinstance(e, (socket.timeout, TimeoutError, ConnectionRefusedError)):
+            hint = (" - could not even connect to %s:%d; many networks block 25/587, "
+                    "try --smtp-port 465 (SMTPS) or the host's alternate port" % (a.smtp_host, a.smtp_port))
+        return False, "SMTP error: %s%s" % (e, hint)
     return (not refused), ("recipient refused: %s" % refused if refused else "accepted %s as sender and recipient" % addr)
 
 
@@ -248,9 +265,7 @@ def main():
     a.smtp_host = a.smtp_host or (rf and relay_field(rf, "Outgoing Server")) or "u-l.ca"
     a.pop_host = a.pop_host or (rf and relay_field(rf, "Incoming Server")) or "u-l.ca"
     a.imap_host = a.imap_host or a.pop_host
-    a.smtp_port = a.smtp_port or int((rf and re.sub(r"\D", "", relay_field(rf, "SMTP Port") or "") or "0") or 587)
-    if a.smtp_port == 465:
-        a.smtp_port = 587               # STARTTLS submission, like configure-sendmail-relay.sh
+    a.smtp_port = smtp_port(a.smtp_port, rf and relay_field(rf, "SMTP Port"))
     a.pop_port = a.pop_port or 995
     a.imap_port = a.imap_port or 993
     base = a.base or login

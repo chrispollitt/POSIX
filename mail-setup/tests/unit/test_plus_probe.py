@@ -178,6 +178,19 @@ class RelayFieldTest(unittest.TestCase):
         self.assertEqual(mod.relay_field(p, "Nope"), "")
 
 
+class SmtpPortTest(unittest.TestCase):
+    def test_port_resolution(self):
+        mod = load()
+        self.assertEqual(mod.smtp_port(2525, "465"), 2525)      # explicit wins
+        self.assertEqual(mod.smtp_port(None, "587"), 587)       # relay file
+        self.assertEqual(mod.smtp_port(None, "465"), 465)       # kept: SMTPS, not remapped
+        # no relay file / no usable value: 465, never 0 (that was the bug:
+        # "smarthost u-l.ca:0", a timeout against nothing)
+        self.assertEqual(mod.smtp_port(None, None), 465)
+        self.assertEqual(mod.smtp_port(None, ""), 465)
+        self.assertEqual(mod.smtp_port(None, "0"), 465)
+
+
 class FolderMatchTest(unittest.TestCase):
     def test_tag_folders(self):
         mod = load()
