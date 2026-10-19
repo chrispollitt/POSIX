@@ -189,6 +189,33 @@ class SmtpPortTest(unittest.TestCase):
         self.assertEqual(mod.smtp_port(None, None), 465)
         self.assertEqual(mod.smtp_port(None, ""), 465)
         self.assertEqual(mod.smtp_port(None, "0"), 465)
+        # no relay file, but Postfix already relays through a port: use that
+        self.assertEqual(mod.smtp_port(None, None, 26), 26)
+        self.assertEqual(mod.smtp_port(None, "587", 26), 587)   # relay file still wins
+
+    def test_parse_relayhost(self):
+        mod = load()
+        self.assertEqual(mod.parse_relayhost("[mail.u-l.ca]:465"), ("mail.u-l.ca", 465))
+        self.assertEqual(mod.parse_relayhost("[mail.u-l.ca]"), ("mail.u-l.ca", None))
+        self.assertEqual(mod.parse_relayhost("smtp.example.org:587"), ("smtp.example.org", 587))
+        self.assertEqual(mod.parse_relayhost(""), (None, None))
+
+    def test_postfix_relay_from_postconf_and_sasl_passwd(self):
+        # on the master the probe asks Postfix instead of needing a relay file
+        mod = load()
+        d = tempfile.mkdtemp()
+        pc = os.path.join(d, "postconf")
+        with open(pc, "w") as f:
+            f.write("#!/bin/sh\n[ \"$1 $2\" = '-h relayhost' ] && echo '[mail.u-l.ca]:465'\n")
+        os.chmod(pc, 0o755)
+        pw = os.path.join(d, "sasl_passwd")
+        with open(pw, "w") as f:
+            f.write("# comment\n[other.example]:587 x@y:p1\n[mail.u-l.ca]:465 cwp@u-l.ca:s3cret\n")
+        with mock.patch.dict(os.environ, {"PATH": d + os.pathsep + os.environ["PATH"]}):
+            self.assertEqual(mod.postfix_relay(pw),
+                             {"host": "mail.u-l.ca", "port": 465, "login": "cwp@u-l.ca"})
+        with mock.patch.dict(os.environ, {"PATH": tempfile.mkdtemp()}):   # no postconf at all
+            self.assertEqual(mod.postfix_relay(pw), {})
 
 
 class FolderMatchTest(unittest.TestCase):

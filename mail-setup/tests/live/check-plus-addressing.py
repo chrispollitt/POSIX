@@ -22,9 +22,13 @@ address, prints a recommendation (getmail --imap, with the folder prefix it
 found, vs pop-pull) and deletes the probe again (--keep to leave it).  If the
 probe's delivery created the tag folder, that is deleted too.
 
-    check-plus-addressing.py --relay-file smtp-relay.txt [--tag chris]
+    check-plus-addressing.py [--tag chris]                  # on the master
+    check-plus-addressing.py --relay-file smtp-relay.txt    # or from the host's relay text
+    check-plus-addressing.py --smtp-port 465 --pwfile FILE  # or spell it out
 
-The password is read from Postfix's sasl_passwd (--pwfile), like pop-pull.
+With no --relay-file the smarthost host/port and the login come from this
+box's own Postfix (`postconf relayhost` + sasl_passwd), else cwp@u-l.ca on
+u-l.ca:465.  The password is read from Postfix's sasl_passwd (--pwfile), like pop-pull.
 Exit status: 0 = sender accepted and the probe arrived somewhere routable,
 1 = a check failed, 2 = couldn't run.
 """
@@ -51,13 +55,48 @@ def relay_field(path, label):
     return ""
 
 
-def smtp_port(explicit, relay_value):
-    """--smtp-port, else the relay file's "SMTP Port", else 465 (SMTPS): many
-    networks and hosts block 25/587 (cp1/u-l.ca: only 26 and 465 answer)."""
+def parse_relayhost(value):
+    """'[mail.u-l.ca]:465' -> ('mail.u-l.ca', 465);  'host' -> ('host', None)."""
+    m = re.match(r"^\[?([^\]:\s]+)\]?(?::(\d+))?$", (value or "").strip())
+    return (m.group(1), int(m.group(2)) if m.group(2) else None) if m else (None, None)
+
+
+def postfix_relay(pwfile):
+    """What this master's Postfix already uses to reach the smarthost: host and
+    port from `postconf -h relayhost`, the login from sasl_passwd's line for
+    that exact key.  {} when there is no Postfix or no relayhost - so on the
+    master the probe needs no relay file at all."""
+    import subprocess
+    try:
+        rh = subprocess.run(["postconf", "-h", "relayhost"], capture_output=True, text=True,
+                            timeout=10).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    host, port = parse_relayhost(rh)
+    if not host:
+        return {}
+    out = {"host": host, "port": port}
+    try:
+        with open(pwfile) as f:
+            for ln in f:
+                fields = ln.strip().split(None, 1)
+                if len(fields) == 2 and not ln.lstrip().startswith("#") and fields[0] == rh:
+                    out["login"] = fields[1].partition(":")[0]
+    except OSError:
+        pass
+    return out
+
+
+def smtp_port(explicit, relay_value, postfix_value=None):
+    """--smtp-port, else the relay file's "SMTP Port", else the port this
+    box's Postfix relays through, else 465 (SMTPS): many networks and hosts
+    block 25/587 (cp1/u-l.ca: only 26 and 465 answer)."""
     if explicit:
         return explicit
     digits = re.sub(r"\D", "", relay_value or "")
-    return int(digits) if digits and int(digits) > 0 else 465
+    if digits and int(digits) > 0:
+        return int(digits)
+    return postfix_value if postfix_value else 465
 
 
 def password(pwfile, login):
@@ -261,11 +300,12 @@ def main():
     socket.setdefaulttimeout(45)
 
     rf = a.relay_file
-    login = a.user or (rf and relay_field(rf, "Username")) or "cwp@u-l.ca"
-    a.smtp_host = a.smtp_host or (rf and relay_field(rf, "Outgoing Server")) or "u-l.ca"
+    pf = {} if rf else postfix_relay(a.pwfile)      # on the master: ask Postfix
+    login = a.user or (rf and relay_field(rf, "Username")) or pf.get("login") or "cwp@u-l.ca"
+    a.smtp_host = a.smtp_host or (rf and relay_field(rf, "Outgoing Server")) or pf.get("host") or "u-l.ca"
     a.pop_host = a.pop_host or (rf and relay_field(rf, "Incoming Server")) or "u-l.ca"
     a.imap_host = a.imap_host or a.pop_host
-    a.smtp_port = smtp_port(a.smtp_port, rf and relay_field(rf, "SMTP Port"))
+    a.smtp_port = smtp_port(a.smtp_port, rf and relay_field(rf, "SMTP Port"), pf.get("port"))
     a.pop_port = a.pop_port or 995
     a.imap_port = a.imap_port or 993
     base = a.base or login
