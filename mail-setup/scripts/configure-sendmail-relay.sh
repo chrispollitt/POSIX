@@ -30,6 +30,15 @@
 # smarthost to accept a +tag sender - check with
 # tests/live/check-plus-addressing.py before relying on it.
 #
+# Loud and proud: a header_checks table stamps every locally submitted message
+# (sendmail(1), cron, mail(1), tvmail ...) with
+#     X-Relayed-By: Postfix 3.9.1 on cpbee (submitted by chris, uid 1000)
+# by reading Postfix's own "Received: by HOST (Postfix, from userid N)" line.
+# This happens at submission, BEFORE smtp_generic_maps rewrites the sender to
+# the real mailbox on the way out, so the original local user and host survive
+# the rewrite.  Mail that comes in over SMTP is not touched.  An existing
+# header_checks setting is kept (ours is appended to the list).
+#
 # The new map is test-built (postmap) in a temp dir before anything under
 # /etc/postfix is touched; after install it is looked up and `postfix check`ed
 # before Postfix is reloaded, and the previous map is put back if that fails.
@@ -57,6 +66,7 @@
 #                       login, e.g. cwp@u-l.ca)
 #   --print             just print the generic map to stdout - no root, no
 #                       Linux, nothing changed (used by the tests)
+#   --print-header-checks   same, for the header_checks table
 #   --fqdn NAME         use NAME instead of `hostname -f` (mainly with --print)
 #   --cron              add a 15-minute queue-runner cron entry (send-only mode)
 #   --test ADDR         after configuring, send a test message to ADDR and you
@@ -74,6 +84,7 @@ LAN=""           # "" = keep / fresh default, CIDR, or "off"
 PLUS_USERS=""
 PLUS_BASE=""
 PRINT=0
+PRINT_HC=0
 FQDN_OPT=""
 # tests point these into a sandbox
 PF_DIR="${MAIL_SETUP_POSTFIX_DIR:-/etc/postfix}"
@@ -91,6 +102,7 @@ while [ $# -gt 0 ]; do
     --plus-users)  PLUS_USERS="${2:?}"; shift 2 ;;
     --plus-base)   PLUS_BASE="${2:?}";  shift 2 ;;
     --print)       PRINT=1; shift ;;
+    --print-header-checks) PRINT=1; PRINT_HC=1; shift ;;
     --fqdn)        FQDN_OPT="${2:?}";   shift 2 ;;
     --cron)        ADD_CRON=1; shift ;;
     --test)        TEST_ADDR="${2:?}"; shift 2 ;;
@@ -175,6 +187,52 @@ gen_generic() {
       *" $ADMIN_USER "*) : ;;     # already has its own line above
       *) printf '%-23s %s\n' "${ADMIN_USER}@localhost" "$U" ;;
     esac
+}
+
+# gen_header_checks -> the header_checks table (for $PF_DIR/header_checks) on
+# stdout.  Needs fqdn/hn from _names.  One rule per local account (uid 0 and
+# >= 1000, from getent passwd or $MAIL_SETUP_PASSWD) so the user NAME is
+# recorded, then a catch-all rule that records the bare uid.
+gen_header_checks() {
+    ver="$(postconf -h mail_version 2>/dev/null || true)"
+    tool="Postfix${ver:+ $ver}"
+    echo "# header_checks - written $(date) by configure-sendmail-relay.sh; re-run it, don't edit"
+    echo "# stamp locally submitted mail with who sent it and from where (see the script's header)"
+    { if [ -n "${MAIL_SETUP_PASSWD:-}" ]; then cat "$MAIL_SETUP_PASSWD" 2>/dev/null
+      else getent passwd 2>/dev/null; fi
+    } | awk -F: '$1 ~ /^[a-z_][a-z0-9._-]*$/ && ($3 == 0 || ($3 >= 1000 && $3 < 60000)) { print $1, $3 }' \
+      | while read -r name uid; do
+          printf '/^Received: by ([^ ]+) \\(Postfix, from userid %s\\)/ PREPEND X-Relayed-By: %s on ${1} (submitted by %s, uid %s)\n' \
+              "$uid" "$tool" "$name" "$uid"
+        done
+    printf '/^Received: by ([^ ]+) \\(Postfix, from userid ([0-9]+)\\)/ PREPEND X-Relayed-By: %s on ${1} (submitted by uid ${2})\n' "$tool"
+}
+
+# _install_header_checks - install the table, check that Postfix really reads
+# it, then add it to header_checks.  Cosmetic, so a problem only warns.
+_install_header_checks() {
+    hc="$PF_DIR/header_checks"; old=""
+    tmp="$(mktemp)"; gen_header_checks > "$tmp"
+    if $SUDO test -e "$hc"; then
+        old="$hc.bak.$(date +%Y%m%d-%H%M%S)"; $SUDO cp -p "$hc" "$old"
+        log "backed up existing $hc"
+    fi
+    $SUDO install -m 0644 "$tmp" "$hc"; rm -f "$tmp"
+    uid="$(id -u "$ADMIN_USER" 2>/dev/null || echo 1000)"
+    got="$($SUDO postmap -q "Received: by $hn (Postfix, from userid $uid)" "regexp:$hc" 2>/dev/null || true)"
+    case "$got" in
+      "PREPEND X-Relayed-By: "*) : ;;
+      *) if [ -n "$old" ]; then $SUDO cp -p "$old" "$hc"; else $SUDO rm -f "$hc"; fi
+         warn "Postfix did not read the new $hc as expected (got '${got}') - header stamping left off"
+         return 0 ;;
+    esac
+    cur="$($SUDO postconf -h header_checks 2>/dev/null || true)"
+    case "$cur" in
+      *"$hc"*) : ;;
+      "")      $SUDO postconf -e "header_checks = regexp:$hc" ;;
+      *)       $SUDO postconf -e "header_checks = $cur, regexp:$hc" ;;
+    esac
+    log "postfix: local mail is stamped  X-Relayed-By: ${tool:-Postfix} on $hn (submitted by USER, uid N)"
 }
 
 # validate --plus-users / --plus-base -> PLUS_LIST (space separated), PLUS_LOCAL, PLUS_DOM
@@ -300,6 +358,7 @@ _cfg_postfix() {   # configure an already-installed Postfix as a smarthost relay
     # (or, per user, its plus-address), applied only on outbound
     # (smtp_generic_maps).  Tested + verified, rolled back on failure.
     _install_generic
+    _install_header_checks
     # LAN clients qualify addresses with their own hostname: "chris" sent
     # from the laptop arrives as chris@laptop - both as recipient (relayed
     # out, bounced) and as sender (the smarthost's sender verify rejects it).
@@ -364,7 +423,11 @@ fi
 WRAP=no; [ "$PORT" = 465 ] && WRAP=yes
 
 _plus_setup
-if [ "$PRINT" = 1 ]; then _names; gen_generic; exit 0; fi
+if [ "$PRINT" = 1 ]; then
+    _names
+    if [ "$PRINT_HC" = 1 ]; then gen_header_checks; else gen_generic; fi
+    exit 0
+fi
 
 LAN_NET=""
 case "$LAN" in

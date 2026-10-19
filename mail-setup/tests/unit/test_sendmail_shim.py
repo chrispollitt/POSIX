@@ -60,6 +60,35 @@ class ShimTest(unittest.TestCase):
         self.assertNotIn(b"Bcc:", data)
         self.assertNotIn(b"secret@example.org", data)
 
+    def test_adds_tool_user_and_host_headers(self):
+        with FakeSMTP() as s:
+            self.send(s.port, MSG, "-t")
+        data = s.messages[0][2]
+        self.assertRegex(data, rb"(?m)^X-Mailer: sendmail-shim \d+\.\d+\.\d+\r?$")
+        self.assertRegex(data, rb"(?m)^X-Origin-User: \S+\r?$")
+        self.assertRegex(data, rb"(?m)^X-Origin-Host: \S+\r?$")
+        self.assertNotIn(b"X-Relayed-By", data)
+
+    def test_callers_identity_is_preserved(self):
+        msg = (b"X-Mailer: cron-job 9\nX-Origin-User: orig\nX-Origin-Host: elsewhere\n"
+               b"From: a@example.org\nTo: b@example.org\nSubject: s\n\nb\n")
+        with FakeSMTP() as s:
+            self.send(s.port, msg, "-t")
+        data = s.messages[0][2]
+        self.assertEqual(data.count(b"X-Mailer:"), 1)
+        self.assertIn(b"X-Mailer: cron-job 9", data)
+        self.assertEqual(data.count(b"X-Origin-User:"), 1)
+        self.assertIn(b"X-Origin-User: orig", data)
+        self.assertIn(b"X-Origin-Host: elsewhere", data)
+        self.assertRegex(data, rb"(?m)^X-Relayed-By: sendmail-shim \d+\.\d+\.\d+ on \S+ \(\S+\)")
+
+    def test_stamping_leaves_the_message_bytes_alone(self):
+        msg = b"From: a@example.org\r\nTo: b@example.org\r\nSubject: s\r\n\r\nb\r\n"
+        with FakeSMTP() as s:
+            self.send(s.port, msg, "-t")
+        data = s.messages[0][2]
+        self.assertTrue(data.endswith(msg), data)
+
     def test_f_sets_envelope_sender(self):
         with FakeSMTP() as s:
             self.send(s.port, MSG, "-f", "bounce@example.org", "x@example.org")

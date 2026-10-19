@@ -99,6 +99,26 @@ gets it through `password_command` = `bin/sasl-pass`. Neither `mailpull.conf`
 nor `getmailrc` contains it. Client passwords live in `~/.mu-tickets`
 (mode 600). None of the files in this project hold credentials.
 
+## Message headers: loud and proud
+
+These tools say what they are and where mail came from, and they never erase
+that when they rewrite a message.
+
+| Header | Set by | Meaning |
+|---|---|---|
+| `X-Mailer: TOOL VERSION` | the originating tool (`tvmail`, else `tvmail-backend`, else `sendmail-shim`) | what composed/submitted it. Only added if the message has no `X-Mailer`/`User-Agent` yet, so the first tool keeps the credit |
+| `X-Origin-User`, `X-Origin-Host` | `tvmail-backend`, `sendmail-shim` | the account and machine it was submitted from. Added only if absent, so a re-sent or forwarded message keeps its original origin |
+| `X-Relayed-By: TOOL VERSION on HOST (USER)` | `sendmail-shim` (when the caller already named itself) | one hop's trace line |
+| `X-Relayed-By: Postfix VERSION on HOST (submitted by USER, uid N)` | Postfix `header_checks` (`configure-sendmail-relay.sh`) | local submissions only, stamped before `smtp_generic_maps` rewrites the sender |
+| `X-Pulled-By: pop-pull VERSION on HOST (USER) from LOGIN@SERVER` | `pop-pull` | who fetched it and from which mailbox; the message's own `Received`/`X-Mailer`/`X-Origin-*` are delivered byte for byte |
+| `X-Original-From` | `tvmail-backend` when `[smtp] from =` forces the sender | the `From:` it replaced |
+| `User-Agent: mail (GNU Mailutils X.Y)` | Mailutils `mail(1)`; `configure-mailutils.sh` pins `set xmailer` in `~/.mailrc` | |
+
+Rules every tool follows: add, never overwrite; when a sender address is
+rewritten, keep the original somewhere in the headers. Postfix's own
+`Received:` lines are left alone (they already name the host and, for local
+mail, the uid). getmail's `Received:` line names getmail the same way.
+
 ## Several users, one mailbox (plus-addresses)
 
 A web host often gives you one POP mailbox (say `cwp@u-l.ca`) while the master

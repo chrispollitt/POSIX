@@ -132,6 +132,27 @@ class PopPullTest(PullBase):
             self.assertIn("1 new message(s)", out)
             self.assertEqual(self.delivered().count(b"Subject: test"), 3)
 
+    def test_delivered_mail_says_who_pulled_it_and_keeps_its_own_origin(self):
+        self.config(keep=True)
+        origin = msg(1, "")
+        origin = (b"Received: from far.example.net by mx.example.org; Mon, 1 Jan 2026\r\n"
+                  b"X-Mailer: Their Mailer 3\r\nX-Origin-User: orig\r\n" + origin)
+        with FakePOP3([origin], user="me@example.org", password="pa:ss") as s:
+            self.assertEqual(self.run_pull(s)[0], 0)
+        box = self.delivered()
+        self.assertRegex(box, rb"X-Pulled-By: pop-pull \d+\.\d+\.\d+ on \S+ \(\S+\) "
+                              rb"from me@example.org@pop\.example\.org\r\n")
+        # the sender's headers come through untouched, after ours
+        self.assertIn(origin, box)
+        self.assertLess(box.index(b"X-Pulled-By"), box.index(b"Received: from far"))
+
+    def test_version_flag(self):
+        self.config()
+        with FakePOP3([], user="me@example.org", password="pa:ss") as s:
+            code, out, err = self.run_pull(s, "--version")
+        self.assertEqual(code, 0)
+        self.assertRegex(out, r"^pop-pull \d+\.\d+\.\d+")
+
     def test_delete_mode_deletes_and_keeps_no_state(self):
         self.config(keep=False)
         with FakePOP3([msg(1), msg(2)], user="me@example.org", password="pa:ss") as s:

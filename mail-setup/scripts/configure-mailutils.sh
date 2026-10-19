@@ -106,6 +106,23 @@ mailer {
 EOF
   log "wrote $mail_cfg"
 
+  # Loud and proud: have mail(1) name itself in every message it sends
+  # (User-Agent: mail (GNU Mailutils X.Y)).  That is Mailutils' default; this
+  # pins it, so a site-wide /etc/mailrc "set noxmailer" can't silence it.
+  # Who/where it came from is stamped downstream by Postfix (header_checks,
+  # see configure-sendmail-relay.sh) or sendmail-shim.  Added once; the rest
+  # of ~/.mailrc is left alone.
+  mailrc="$HOME/.mailrc"
+  if ! grep -qs '^# >>> mail-setup: loud and proud' "$mailrc" 2>/dev/null; then
+    backup "$mailrc"
+    cat >> "$mailrc" <<'EOF'
+# >>> mail-setup: loud and proud >>>
+set xmailer
+# <<< mail-setup <<<
+EOF
+    log "added 'set xmailer' to $mailrc (User-Agent header on outgoing mail)"
+  fi
+
   if ask "Add a ~/.mu-tickets credential for ${imap_user}@${imap_host}?"; then
     pw=$(readsecret "password for ${imap_user}@${imap_host}")
     tickets="$HOME/.mu-tickets"

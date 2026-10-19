@@ -26,6 +26,8 @@
 
 import sys
 import os
+import re
+import socket
 import smtplib
 import email
 import email.utils
@@ -38,6 +40,46 @@ RELAY_HOST = "mail.yourserver.com"  # <-- CHANGE THIS to your target SMTP server
 RELAY_PORT = 25                     # Standard SMTP port
 TIMEOUT = 10                        # Seconds to wait for SMTP connection
 # ==========================================
+
+TOOL = "sendmail-shim"
+VERSION = "1.1.0"
+
+# "Loud and proud" headers (see mail-setup/README.md, "Message headers"):
+#   X-Origin-User / X-Origin-Host   who submitted it, where - set only if the
+#                                   message doesn't already carry them
+#   X-Mailer                        this tool + version - only if the caller
+#                                   didn't already name itself (X-Mailer or
+#                                   User-Agent); otherwise the caller's stays
+#                                   and we add X-Relayed-By instead
+# Existing headers are never overwritten or removed.
+
+def _clean(s):
+    """Header-safe ASCII: no controls, no folding."""
+    return re.sub(r"[^\x21-\x7e]+", "_", str(s))[:200] or "unknown"
+
+def _whoami():
+    try:
+        import pwd
+        return pwd.getpwuid(os.getuid()).pw_name
+    except Exception:
+        return os.environ.get("USER") or os.environ.get("LOGNAME") or "unknown"
+
+def stamp_headers(raw, msg):
+    """RAW with trace headers prepended; msg is its parsed form (for lookups).
+    The original bytes (line endings, folding, encodings) are untouched."""
+    eol = b"\r\n" if raw.split(b"\n", 1)[0].endswith(b"\r") else b"\n"
+    me, host = _clean(_whoami()), _clean(socket.gethostname())
+    add = []
+    if "X-Origin-User" not in msg:
+        add.append("X-Origin-User: " + me)
+    if "X-Origin-Host" not in msg:
+        add.append("X-Origin-Host: " + host)
+    ident = "%s %s" % (TOOL, VERSION)
+    if "X-Mailer" in msg or "User-Agent" in msg:
+        add.append("X-Relayed-By: %s on %s (%s)" % (ident, host, me))
+    else:
+        add.append("X-Mailer: " + ident)
+    return eol.join(h.encode("ascii") for h in add) + eol + raw
 
 def main():
     # 1. Parse arguments. Sendmail has many flags; we define the common ones 
@@ -87,6 +129,9 @@ def main():
     if 'Bcc' in msg:
         del msg['Bcc']
         raw_msg = msg.as_bytes()
+
+    # 4b. Say who we are and where the message came from (never overwriting)
+    raw_msg = stamp_headers(raw_msg, msg)
 
     # 5. Send via SMTP
     try:

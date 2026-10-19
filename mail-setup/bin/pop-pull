@@ -20,12 +20,14 @@ tagged mail, so use  getmail --imap  (configure-getmail.sh --imap --plus-base
 ... --plus-users ...), which fetches the tag folders.  Check which kind of
 host you have with tests/live/check-plus-addressing.py.
 """
-import os, re, sys, ssl, poplib, argparse, configparser, subprocess
+import os, re, sys, ssl, socket, poplib, argparse, configparser, subprocess
 import email.parser, email.utils
 try:
     import pwd
 except ImportError:                  # no account database (plain Windows)
     pwd = None
+
+TOOL, VERSION = "pop-pull", "1.1.0"
 
 CFG  = os.path.expanduser("~/.config/mailpull.conf")
 SEEN = os.path.expanduser("~/.local/state/mailpull.seen")
@@ -34,6 +36,29 @@ SEEN = os.path.expanduser("~/.local/state/mailpull.seen")
 PLUS_HEADERS = ("Delivered-To", "X-Original-To", "To", "Cc")
 # a tag is untrusted mail-header text: only login-name-looking tags get through
 TAG_RE = re.compile(r"^[a-z0-9_][a-z0-9._-]*$")
+
+def _clean(s):
+    """Header-safe ASCII: no controls, no folding."""
+    return re.sub(r"[^\x21-\x7e]+", "_", str(s))[:200] or "unknown"
+
+def trace_header(server, login):
+    """The X-Pulled-By line pop-pull prepends to every message it delivers:
+    who fetched it, where, and from which mailbox.  It is only ever ADDED -
+    the message's own origin headers (Received, X-Mailer, X-Origin-*, ...)
+    are passed through byte for byte, so the sender's origin survives."""
+    try:
+        import getpass
+        me = getpass.getuser()
+    except Exception:
+        me = "unknown"
+    return "X-Pulled-By: %s %s on %s (%s) from %s@%s" % (
+        TOOL, VERSION, _clean(socket.gethostname()), _clean(me),
+        _clean(login), _clean(server))
+
+def stamp(raw, line):
+    """RAW with LINE prepended, using RAW's own line-ending style."""
+    eol = b"\r\n" if raw.split(b"\n", 1)[0].endswith(b"\r") else b"\n"
+    return line.encode("ascii") + eol + raw
 
 def die(m, code=2):
     print("pop-pull: " + m, file=sys.stderr); sys.exit(code)
@@ -88,6 +113,8 @@ def password(pwfile, login):
 
 def main():
     ap = argparse.ArgumentParser()
+    ap.add_argument("-V", "--version", action="version",
+                    version="%s %s" % (TOOL, VERSION))
     ap.add_argument("-v", "--verbose", action="store_true")
     ap.add_argument("-n", "--dry-run", action="store_true")
     ap.add_argument("-c", "--config", default=os.environ.get("MAILPULL_CONF") or CFG,
@@ -148,7 +175,8 @@ def main():
                 if a.verbose:
                     print("[dry-run] msg %d uid %s (%d bytes)%s" % (i, u, len(raw), dest))
             else:
-                r = subprocess.run([mda, "-oi", "--", to], input=raw)
+                r = subprocess.run([mda, "-oi", "--", to],
+                                   input=stamp(raw, trace_header(server, login)))
                 if r.returncode != 0:
                     print("pop-pull: delivery failed on msg %d" % i, file=sys.stderr)
                     break

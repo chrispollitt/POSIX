@@ -236,6 +236,37 @@ check "tagged base rejected" '[ $? != 0 ] && has "$OUT" "must be a plain address
 check "--plus-base without --plus-users rejected" '[ $? != 0 ] && has "$OUT" "only makes sense with --plus-users"'
 
 # --------------------------------------------------------------------------
+t "configure-sendmail-relay --print-header-checks (loud and proud)"
+PWF="$SANDBOX/passwd"
+printf 'root:x:0:0::/root:/bin/sh
+chris:x:1000:1000::/h:/bin/sh
+miche:x:1001:1001::/h:/bin/sh
+daemon:x:1:1::/:/bin/false
+nobody:x:65534:65534::/:/bin/false
+' > "$PWF"
+HC=$(MAIL_SETUP_PASSWD="$PWF" "$R" --print-header-checks --fqdn mx.lan.example)
+check "a rule per human account (and root), none for system users" 'has_str() { grep -qF -- "$2" <<<"$1"; }; has_str "$HC" "from userid 1000" && has_str "$HC" "from userid 1001" && has_str "$HC" "from userid 0" && ! grep -q "userid 1\\)" <<<"$HC" && ! grep -q "userid 65534" <<<"$HC"'
+check "names the user and the tool" 'grep -q "PREPEND X-Relayed-By: Postfix on \${1} (submitted by chris, uid 1000)" <<<"$HC"'
+check "catch-all for any other uid comes last" '[ "$(grep -v "^#" <<<"$HC" | tail -1 | grep -c "(submitted by uid \${2})")" = 1 ]'
+PYX=$(find_python 2>/dev/null || command -v python3 || true)
+if [ -n "$PYX" ]; then
+  # the table must really match Postfix's own Received line and expand its captures
+  got=$(HCT="$HC" "$PYX" -c '
+import os, re
+line = "Received: by mx.lan.example (Postfix, from userid %s)"
+for uid in ("1000", "4242"):
+    for rule in os.environ["HCT"].splitlines():
+        if rule.startswith("#"): continue
+        pat, act = rule.split(" PREPEND ", 1)
+        m = re.match(pat[1:-1], line % uid)
+        if m:
+            print(re.sub(r"\$\{(\d)\}", lambda g: m.group(int(g.group(1))), act)); break
+')
+  check "chris's local mail gets chris + the host" '[ "$(sed -n 1p <<<"$got")" = "X-Relayed-By: Postfix on mx.lan.example (submitted by chris, uid 1000)" ]'
+  check "an unknown uid still gets stamped" '[ "$(sed -n 2p <<<"$got")" = "X-Relayed-By: Postfix on mx.lan.example (submitted by uid 4242)" ]'
+fi
+
+# --------------------------------------------------------------------------
 t "configure-sendmail-relay (sandboxed Postfix)"
 # fake postfix tools + a Linux-looking uname, first on PATH for these runs only;
 # /etc/postfix and /etc/aliases are replaced by sandbox paths
@@ -255,6 +286,7 @@ case "${FAKE_POSTMAP_FAIL:-}:$*" in
   inside:*/pf*/generic*) exit 1 ;;
 esac
 if [ "$1" = -q ]; then                  # postmap -q KEY hash:FILE
+  case "$3" in regexp:*) [ -f "${3#regexp:}" ] && echo "PREPEND X-Relayed-By: fake" && exit 0; exit 1 ;; esac
   f=${3#hash:}
   awk -v k="$2" '!/^#/ && $1 == k { print $2; found = 1 } END { exit !found }' "$f"
   exit
@@ -288,6 +320,7 @@ check "smtp_generic_maps points at it" 'has "$FAKE_CALLS" "smtp_generic_maps = h
 check "sasl_passwd line, mode 600" 'has "$PF/sasl_passwd" "[out.example.org]:465 me@example.org:sekrit"'    # the relay file says 465: SMTPS is kept
 check_mode "sasl_passwd is mode 600" "$PF/sasl_passwd"
 check "root alias added" 'has "$SANDBOX/aliases" "root: zed"'
+check "header_checks table installed + added to header_checks" 'has "$PF/header_checks" "PREPEND X-Relayed-By:" && has "$FAKE_CALLS" "header_checks = regexp:$PF/header_checks"'
 check "no per-user lines by default" '! grep -q "+" "$PF/generic"'
 relay --plus-users chris,miche > "$OUT" 2>&1
 check "--plus-users run exits 0" '[ $? = 0 ]'
@@ -327,10 +360,12 @@ printf 'mhost\n143\nme\nmhost\n25\np@ss:w/rd\n' \
 check "exits 0" '[ $? = 0 ]'
 check "finds (fake) Mailutils, no install" 'has "$OUT" "GNU Mailutils: found"'
 check "~/.mail mailbox + folder + mailer" 'has "$HOME/.mail" "mailbox-pattern \"imap://me@mhost:143/INBOX\";" && has "$HOME/.mail" "folder \"imap://me@mhost:143/\";" && has "$HOME/.mail" "url \"smtp://mhost:25\";"'
+check "~/.mailrc pins xmailer (User-Agent on outgoing mail)" 'has "$HOME/.mailrc" "set xmailer"'
 check "~/.mu-tickets URL-encodes the password" 'has "$HOME/.mu-tickets" "*://me:p%40ss%3Aw%2Frd@mhost"'
 check_mode "~/.mu-tickets is mode 600" "$HOME/.mu-tickets"
 printf 'mhost\n143\nme\nmhost\n25\nnewpw\n' | ASSUME=yes "$S/configure-mailutils.sh" > /dev/null 2>&1
 check "re-run replaces that host's ticket, doesn't duplicate" '[ "$(grep -c "@mhost$" "$HOME/.mu-tickets")" = 1 ] && has "$HOME/.mu-tickets" "me:newpw@mhost"'
+check "re-run doesn't repeat the ~/.mailrc block" '[ "$(grep -c "^set xmailer" "$HOME/.mailrc")" = 1 ]'
 check "re-run backs up ~/.mail" 'ls "$HOME"/.mail.bak.* >/dev/null 2>&1'
 ASSUME=no "$S/configure-mailutils.sh" --role master > "$OUT" 2>&1
 check "--assume-no writes nothing new" '[ $? = 0 ] && has "$OUT" "Write ~/.mail and ~/.mu-tickets now? -> no"'
