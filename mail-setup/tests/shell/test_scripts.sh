@@ -269,7 +269,7 @@ case "$1" in
 esac
 exit 0
 EOF
-for n in postconf newaliases systemctl; do
+for n in postconf newaliases systemctl chown; do   # chown: the relay chowns sasl_passwd to root:group
   printf '#!/bin/sh\necho "%s $*" >> "$FAKE_CALLS"\nexit 0\n' "$n" > "$PFAKE/$n"
 done
 chmod 755 "$PFAKE"/*
@@ -284,7 +284,7 @@ relay > "$OUT" 2>&1
 check "plain run exits 0" '[ $? = 0 ]'
 check "generic written + postmapped" 'has "$PF/generic" "@mx.lan.example" && [ -f "$PF/generic.db" ]'
 check "smtp_generic_maps points at it" 'has "$FAKE_CALLS" "smtp_generic_maps = hash:$PF/generic"'
-check "sasl_passwd line, mode 600" 'has "$PF/sasl_passwd" "[out.example.org]:587 me@example.org:sekrit"'
+check "sasl_passwd line, mode 600" 'has "$PF/sasl_passwd" "[out.example.org]:465 me@example.org:sekrit"'    # the relay file says 465: SMTPS is kept
 check_mode "sasl_passwd is mode 600" "$PF/sasl_passwd"
 check "root alias added" 'has "$SANDBOX/aliases" "root: zed"'
 check "no per-user lines by default" '! grep -q "+" "$PF/generic"'
@@ -385,7 +385,7 @@ fi
 t "relay failure notices"
 check "delay warning + postmaster notices set" 'has "$S/configure-sendmail-relay.sh" "\"delay_warning_time = 1h\"" && has "$S/configure-sendmail-relay.sh" "\"notify_classes = resource, software, bounce, delay, 2bounce\""'
 check "postmaster alias ensured" 'has "$S/configure-sendmail-relay.sh" "postmaster: root"'
-check "dotless (LAN host) domains canonicalised, headers too" 'has "$S/configure-sendmail-relay.sh" "canonical_maps = regexp:/etc/postfix/lan-canonical" && has "$S/configure-sendmail-relay.sh" "permit_mynetworks\""'
+check "dotless (LAN host) domains canonicalised, headers too" 'has "$S/configure-sendmail-relay.sh" "canonical_maps = regexp:\$PF_DIR/lan-canonical" && has "$S/configure-sendmail-relay.sh" "permit_mynetworks\""'
 LC=$(printf '/^([^@]+)@[^.@]+$/    ${1}@%s\n' cpbee | sed -n 's|^/\(.*\)/ .*|\1|p')
 check "lan-canonical regex: dotless only" 'grep -Eq "$LC" <<<"chris@cmlaptop" && ! grep -Eq "$LC" <<<"me@gmail.com" && ! grep -Eq "$LC" <<<"chris"'
 

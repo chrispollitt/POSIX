@@ -77,7 +77,7 @@ PRINT=0
 FQDN_OPT=""
 # tests point these into a sandbox
 PF_DIR="${MAIL_SETUP_POSTFIX_DIR:-/etc/postfix}"
-ALIASES="${MAIL_SETUP_ALIASES:-$ALIASES}"
+ALIASES="${MAIL_SETUP_ALIASES:-/etc/aliases}"
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -151,7 +151,7 @@ _names() {   # sets hn / fqdn / mh
     fi
 }
 
-# gen_generic -> the $PF_DIR/generic text on stdout.  Needs hn fqdn mh U
+# gen_generic -> the generic map text (for $PF_DIR/generic) on stdout.  Needs hn fqdn mh U
 # ADMIN_USER, and PLUS_LIST / PLUS_LOCAL / PLUS_DOM from _plus_setup.
 gen_generic() {
     echo "# generic - written $(date) by configure-sendmail-relay.sh; re-run it, don't edit"
