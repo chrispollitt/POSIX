@@ -21,7 +21,10 @@
 #      writing /var/mail directly bypasses it.  pop-pull, getmail and the
 #      sendmail shim all hand mail to Postfix, so this one setting covers them,
 #      and mail still lands in the same /var/mail/<user> that IMAP reads;
-#   4. opens port 4190 in ufw if ufw is active, then reloads both daemons.
+#   4. opens port 4190 in ufw if ufw is active; if an nftables input chain
+#      drops by default and has no rule for 4190, says which rule to add
+#      (clients would just time out) and adds it with --open-firewall;
+#      then reloads both daemons.
 #
 # TLS: the distro's self-signed Dovecot cert is left as is, as in
 # configure-dovecot.sh.
@@ -35,6 +38,11 @@
 #   --listen all|local  managesieve on every interface (LAN clients such as
 #                       tvmail on another machine; default) or localhost only
 #   --force             replace an existing Postfix mailbox_command
+#   --open-firewall     add the nftables rule for 4190 now (runtime only - it is
+#                       gone when nftables reloads; the message says how to keep it)
+#   --firewall-plan     just print the nftables rule(s) that would open 4190, one
+#                       per line, and exit - no root, nothing changed.  Reads
+#                       `nft list ruleset`, or the file in $MAIL_SETUP_NFT_RULESET
 #   --print VERSION     just print the drop-in for Dovecot VERSION (2.3 / 2.4)
 #                       to stdout - no root, no Linux, nothing changed (tests)
 #   -h | --help         show this header
@@ -46,12 +54,16 @@ here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 
 LISTEN=all
 FORCE=0
+OPEN_FW=0
+FW_PLAN=0
 PRINT=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --listen)  LISTEN="${2:?}"; shift 2 ;;
     --force)   FORCE=1; shift ;;
+    --open-firewall) OPEN_FW=1; shift ;;
+    --firewall-plan) FW_PLAN=1; shift ;;
     --print)   PRINT="${2:?}"; shift 2 ;;
     -h|--help) usage "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
@@ -126,9 +138,66 @@ EOF
   fi
 }
 
+# --------------------------------------------------------------------------
+# firewall helpers.  A default-drop nftables input chain silently eats 4190:
+# the client just times out.  Rather than guess at a hand-written ruleset we
+# open 4190 wherever IMAP (143/993) is already accepted - same interface, same
+# chain - and by default only SAY so.
+# --------------------------------------------------------------------------
+fw_ruleset() {   # the nftables ruleset text on stdout (empty if there is none)
+  if [ -n "${MAIL_SETUP_NFT_RULESET:-}" ]; then cat "$MAIL_SETUP_NFT_RULESET" 2>/dev/null || true
+  elif command -v nft >/dev/null 2>&1; then ${SUDO:-} nft list ruleset 2>/dev/null || true
+  fi
+}
+
+# fw_plan: ruleset on stdin -> one TAB line per place to open:
+#   family  table  chain  interface   (interface "-": IMAP rule had none)
+fw_plan() {
+  awk '
+    function has(line, p) { return (" " line " ") ~ ("[^0-9]" p "[^0-9]") }
+    /^table / { fam = $2; tbl = $3; chain = ""; next }
+    /^[ \t]*chain / { chain = $2; hook = 0; drop = 0; ok = 0; n = 0; split("", seen); next }
+    chain != "" && /type filter hook input/ { hook = 1; drop = ($0 ~ /policy drop/); next }
+    chain != "" && hook && drop && /tcp dport/ && /accept/ {
+      if (has($0, "4190")) ok = 1
+      else if (has($0, "143") || has($0, "993")) {
+        iface = "-"
+        if (match($0, /iifname "[^"]+"/)) iface = substr($0, RSTART + 9, RLENGTH - 10)
+        if (!(iface in seen)) { seen[iface] = 1; order[++n] = iface }
+      }
+      next
+    }
+    /^[ \t]*}/ && chain != "" {
+      if (hook && drop && !ok) {
+        if (n == 0) printf "%s\t%s\t%s\t-\n", fam, tbl, chain
+        for (i = 1; i <= n; i++) printf "%s\t%s\t%s\t%s\n", fam, tbl, chain, order[i]
+      }
+      chain = ""
+    }'
+}
+
+# fw_rules: plan -> "interface<TAB>nft command" lines
+fw_rules() {
+  local fam tbl chain iif
+  while IFS=$'\t' read -r fam tbl chain iif; do
+    [ -n "$fam" ] || continue
+    # names come from the ruleset text and end up in a command line: plain only
+    case "$fam$tbl$chain$iif" in *[!A-Za-z0-9_.@:-]*) continue ;; esac
+    if [ "$iif" = - ]; then
+      printf '%s\t%s\n' - "nft add rule $fam $tbl $chain tcp dport 4190 accept"
+    else
+      printf '%s\t%s\n' "$iif" "nft add rule $fam $tbl $chain iifname \"$iif\" tcp dport 4190 accept"
+    fi
+  done
+}
+
 if [ -n "$PRINT" ]; then
   syn=$(syntax_of "$PRINT") || die "unsupported Dovecot version '$PRINT' (need 2.3 or 2.4)"
   dropin "$syn" "$PRINT"
+  exit 0
+fi
+if [ "$FW_PLAN" = 1 ]; then
+  fw_ruleset | fw_plan | fw_rules | cut -f2
   exit 0
 fi
 
@@ -228,6 +297,26 @@ fi
 # --------------------------------------------------------------------------
 if command -v ufw >/dev/null 2>&1 && $SUDO ufw status 2>/dev/null | grep -q '^Status: active'; then
   $SUDO ufw allow 4190/tcp >/dev/null && log "ufw         : allowed 4190/tcp"
+fi
+FW_RULES="$(fw_ruleset | fw_plan | fw_rules)"
+if [ -n "$FW_RULES" ]; then
+  while IFS=$'\t' read -r iif cmd; do
+    if [ "$OPEN_FW" = 1 ] && [ "$iif" != - ]; then
+      eval "$SUDO $cmd" && log "nftables    : opened 4190 on $iif  ($cmd)"   # names vetted in fw_rules
+    elif [ "$iif" = - ]; then
+      warn "nftables drops 4190 by default; no interface could be inferred from the IMAP rules."
+      warn "  to open it (on EVERY interface - narrow it with iifname \"...\"):  $cmd"
+    else
+      warn "nftables drops 4190 by default on $iif, so clients will just time out."
+      warn "  open it now:  $cmd      (or re-run with --open-firewall)"
+    fi
+  done <<<"$FW_RULES"
+  warn "A runtime rule is lost when nftables reloads.  To keep it, add 4190 to the same rule"
+  warn "  that accepts 143/993 in your ruleset file (often /etc/nftables.conf), check it with"
+  warn "  'nft -c -f FILE', and leave the live rule as it is until the next boot."
+fi
+if command -v iptables >/dev/null 2>&1 && $SUDO iptables -S INPUT 2>/dev/null | grep -q '^-P INPUT DROP'; then
+  warn "iptables drops by default; if clients time out on 4190:  iptables -A INPUT -p tcp --dport 4190 -j ACCEPT"
 fi
 if [ -d /run/systemd/system ]; then
   $SUDO systemctl restart dovecot

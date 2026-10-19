@@ -423,6 +423,75 @@ if [ "$(uname -s)" != Linux ]; then
 fi
 
 # --------------------------------------------------------------------------
+t "configure-sieve firewall plan (nftables)"
+# a router-style ruleset: default-drop input chain that accepts IMAP per interface
+# (a real one, trimmed) - clients of 4190 would just time out
+NFT="$SANDBOX/nft-drop.txt"
+cat > "$NFT" <<'EOF'
+table inet filter {
+        chain input {
+                type filter hook input priority filter; policy drop;
+                ct state invalid drop
+                ct state established,related accept
+                iifname "lo" accept
+                iifname "lan0" tcp dport { 22, 53 } accept
+                iifname "lan0" tcp dport 25 accept
+                iifname "lan0" tcp dport { 143, 993 } accept
+                iifname "lan0" tcp dport 8080 accept
+                iifname "wan0" udp sport 67 udp dport 68 accept
+                iifname "vr180" ip saddr { 192.168.123.253 } tcp dport 22 accept
+        }
+
+        chain forward {
+                type filter hook forward priority filter; policy drop;
+                iifname "lan0" oifname "wan0" accept
+        }
+
+        chain output {
+                type filter hook output priority filter; policy accept;
+        }
+}
+table ip nat {
+        chain postrouting {
+                type nat hook postrouting priority srcnat; policy accept;
+                oifname "wan0" masquerade
+        }
+}
+EOF
+MAIL_SETUP_NFT_RULESET="$NFT" "$S/configure-sieve.sh" --firewall-plan > "$OUT" 2>&1
+check "--firewall-plan exits 0, no root needed" '[ $? = 0 ]'
+check "opens 4190 where IMAP already is (lan0 only)" '[ "$(cat "$OUT")" = "nft add rule inet filter input iifname \"lan0\" tcp dport 4190 accept" ]'
+# a second IMAP interface and a bare (no iifname) IMAP rule
+cat > "$NFT" <<'EOF'
+table ip filter {
+  chain input {
+    type filter hook input priority 0; policy drop;
+    iifname "lan0" tcp dport 993 accept
+    iifname "lan1" tcp dport { 143, 993 } accept
+    iifname "lan0" tcp dport 143 accept
+  }
+}
+EOF
+MAIL_SETUP_NFT_RULESET="$NFT" "$S/configure-sieve.sh" --firewall-plan > "$OUT" 2>&1
+check "one rule per interface, no duplicates" '[ "$(wc -l < "$OUT")" = 2 ] && has "$OUT" "iifname \"lan0\" tcp dport 4190" && has "$OUT" "iifname \"lan1\" tcp dport 4190"'
+printf 'table inet filter {\n chain input {\n  type filter hook input priority 0; policy drop;\n  tcp dport { 143, 993 } accept\n }\n}\n' > "$NFT"
+MAIL_SETUP_NFT_RULESET="$NFT" "$S/configure-sieve.sh" --firewall-plan > "$OUT" 2>&1
+check "IMAP rule without an interface: rule for every interface (just printed)" '[ "$(cat "$OUT")" = "nft add rule inet filter input tcp dport 4190 accept" ]'
+# nothing to do
+printf 'table inet filter {\n chain input {\n  type filter hook input priority 0; policy drop;\n  tcp dport { 22, 993, 4190 } accept\n }\n}\n' > "$NFT"
+MAIL_SETUP_NFT_RULESET="$NFT" "$S/configure-sieve.sh" --firewall-plan > "$OUT" 2>&1
+check "4190 already accepted: nothing to add" '[ ! -s "$OUT" ]'
+printf 'table inet filter {\n chain input {\n  type filter hook input priority 0; policy accept;\n  tcp dport 993 accept\n }\n}\n' > "$NFT"
+MAIL_SETUP_NFT_RULESET="$NFT" "$S/configure-sieve.sh" --firewall-plan > "$OUT" 2>&1
+check "policy accept: nothing to add" '[ ! -s "$OUT" ]'
+printf 'table inet filter {\n chain input {\n  type filter hook input priority 0; policy drop;\n  iifname "ev\\"il;x" tcp dport 993 accept\n }\n}\n' > "$NFT"
+MAIL_SETUP_NFT_RULESET="$NFT" "$S/configure-sieve.sh" --firewall-plan > "$OUT" 2>&1
+check "odd interface names are never put in a command" '[ ! -s "$OUT" ]'
+MAIL_SETUP_NFT_RULESET="$SANDBOX/no-such-file" "$S/configure-sieve.sh" --firewall-plan > "$OUT" 2>&1
+check "no ruleset: nothing to add, exit 0" '[ $? = 0 ] && [ ! -s "$OUT" ]'
+check "-h documents --open-firewall / --firewall-plan" '"$S/configure-sieve.sh" -h | grep -q -e "--open-firewall" && "$S/configure-sieve.sh" -h | grep -q -e "--firewall-plan"'
+
+# --------------------------------------------------------------------------
 t "mail-setup.sh"
 "$M/mail-setup.sh" --role client --assume-no --caller tvmail > "$OUT" 2>&1
 check "client, --assume-no: exits 0" '[ $? = 0 ] && has "$OUT" "mail-setup done (role: client)"'
