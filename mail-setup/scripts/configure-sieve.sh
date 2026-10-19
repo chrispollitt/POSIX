@@ -1,0 +1,262 @@
+#!/usr/bin/env bash
+#
+# configure-sieve.sh
+#
+# Let a mail client edit a Sieve "vacation" (out-of-office) script on the master
+# over ManageSieve - tvmail's  File > Out of office...  is the user.  A reply
+# has to be sent by the machine that receives the mail, so the script lives on
+# the master and runs there when mail is delivered.
+#
+# Linux only, on the master (the box that runs Postfix + Dovecot - see
+# configure-sendmail-relay.sh and configure-dovecot.sh).  Does four things:
+#
+#   1. installs Dovecot's Sieve parts (Pigeonhole: sieve + managesieve);
+#   2. writes ONE drop-in, /etc/dovecot/conf.d/95-mail-setup-sieve.conf, that
+#      turns on managesieve (port 4190, STARTTLS) and the Sieve plugin in the
+#      LDA.  It is checked with doveconf before Dovecot is reloaded; if the
+#      check fails, the previous drop-in is put back.  Handles both config
+#      syntaxes (Dovecot 2.3 and 2.4);
+#   3. makes Postfix deliver local mail through dovecot-lda (mailbox_command),
+#      because Sieve only runs for mail Dovecot delivers.  Postfix local(8)
+#      writing /var/mail directly bypasses it.  pop-pull, getmail and the
+#      sendmail shim all hand mail to Postfix, so this one setting covers them,
+#      and mail still lands in the same /var/mail/<user> that IMAP reads;
+#   4. opens port 4190 in ufw if ufw is active, then reloads both daemons.
+#
+# TLS: the distro's self-signed Dovecot cert is left as is, as in
+# configure-dovecot.sh.
+#
+# Re-runnable.  An older tvmail-era drop-in (95-tvmail-sieve.conf) is replaced.
+#
+# Usage:
+#   sudo ./configure-sieve.sh [options]
+#
+# Options:
+#   --listen all|local  managesieve on every interface (LAN clients such as
+#                       tvmail on another machine; default) or localhost only
+#   --force             replace an existing Postfix mailbox_command
+#   --print VERSION     just print the drop-in for Dovecot VERSION (2.3 / 2.4)
+#                       to stdout - no root, no Linux, nothing changed (tests)
+#   -h | --help         show this header
+#
+set -euo pipefail
+
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+. "$here/../lib/common.sh"
+
+LISTEN=all
+FORCE=0
+PRINT=""
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --listen)  LISTEN="${2:?}"; shift 2 ;;
+    --force)   FORCE=1; shift ;;
+    --print)   PRINT="${2:?}"; shift 2 ;;
+    -h|--help) usage "$0"; exit 0 ;;
+    *) echo "unknown argument: $1" >&2; exit 2 ;;
+  esac
+done
+case "$LISTEN" in all|local) : ;; *) die "--listen must be all or local" ;; esac
+
+syntax_of() {   # syntax_of VERSION -> 23 | 24, or fail
+  case "$1" in
+    2.3*|2.2*) echo 23 ;;
+    2.4*|2.5*) echo 24 ;;
+    *) return 1 ;;
+  esac
+}
+
+# dropin SYNTAX(23|24) VERSION [NEED_PROTOCOL NEED_PRIV NEED_POSTMASTER]
+#   -> the 95-mail-setup-sieve.conf text on stdout.  The NEED_* flags (default
+#   1) say whether this box's other config already sets that, so we don't
+#   repeat it; --print always shows the full set.
+dropin() {
+  local syn=$1 ver=$2 needproto=${3:-1} needpriv=${4:-1} needpm=${5:-1} svc
+  svc='service managesieve-login {
+  inet_listener sieve {
+    port = 4190'
+  [ "$LISTEN" = local ] && svc="$svc
+    address = 127.0.0.1, ::1"
+  svc="$svc
+  }
+}"
+  cat <<EOF
+# 95-mail-setup-sieve.conf - generated $(date) by mail-setup's configure-sieve.sh
+# (Dovecot $ver).  Re-run that script rather than editing this by hand.
+#
+# managesieve (port 4190, STARTTLS) so a client can edit the vacation script,
+# and the Sieve plugin in the LDA so it runs when Postfix hands mail over.
+
+EOF
+  if [ "$syn" = 23 ]; then
+    [ "$needproto" = 1 ] && printf 'protocols = $protocols sieve\n\n'
+    [ "$needpriv" = 1 ] && printf '# lets the LDA dot-lock /var/mail (as the user, it is group mail only)\nmail_privileged_group = mail\n\n'
+    [ "$needpm" = 1 ] && printf 'postmaster_address = postmaster@%s\n\n' "$(hostname -f 2>/dev/null || hostname)"
+    cat <<EOF
+$svc
+
+protocol lda {
+  mail_plugins = \$mail_plugins sieve
+}
+
+plugin {
+  sieve = file:~/sieve;active=~/.dovecot.sieve
+}
+EOF
+  else
+    [ "$needproto" = 1 ] && printf 'protocols {\n  sieve = yes\n}\n\n'
+    [ "$needpriv" = 1 ] && printf 'mail_privileged_group = mail\n\n'
+    [ "$needpm" = 1 ] && printf 'postmaster_address = postmaster@%s\n\n' "$(hostname -f 2>/dev/null || hostname)"
+    cat <<EOF
+$svc
+
+protocol lda {
+  mail_plugins {
+    sieve = yes
+  }
+}
+
+sieve_script personal {
+  driver = file
+  path = ~/sieve
+  active_path = ~/.dovecot.sieve
+}
+EOF
+  fi
+}
+
+if [ -n "$PRINT" ]; then
+  syn=$(syntax_of "$PRINT") || die "unsupported Dovecot version '$PRINT' (need 2.3 or 2.4)"
+  dropin "$syn" "$PRINT"
+  exit 0
+fi
+
+[ "$IS_LINUX" = 1 ] || die "Linux only - run this on the mail master (Postfix + Dovecot)"
+if [ "$(id -u)" != 0 ] && [ -z "$SUDO" ]; then die "run as root (no sudo found)"; fi
+command -v dovecot >/dev/null 2>&1 \
+  || die "Dovecot is not installed here - this is for the mail master (run configure-dovecot.sh first)"
+command -v postconf >/dev/null 2>&1 \
+  || die "Postfix (postconf) is not installed here (run configure-sendmail-relay.sh first)"
+
+# --------------------------------------------------------------------------
+# 1. packages
+# --------------------------------------------------------------------------
+have_pigeonhole() {
+  ls /usr/lib/dovecot/modules/lib90_sieve_plugin.so /usr/lib*/dovecot/modules/lib90_sieve_plugin.so \
+     /usr/lib/dovecot/managesieve /usr/lib*/dovecot/managesieve >/dev/null 2>&1
+}
+if ! have_pigeonhole; then
+  log "installing Dovecot Sieve (Pigeonhole) ..."
+  case "$PKG" in
+    apt)       pkg_install dovecot-sieve dovecot-managesieved ;;
+    dnf|yum)   pkg_install dovecot-pigeonhole ;;
+    pacman)    pkg_install pigeonhole ;;
+    *) die "no known package manager - install Pigeonhole (dovecot sieve + managesieve) by hand, then re-run" ;;
+  esac
+fi
+
+# --------------------------------------------------------------------------
+# 2. the Dovecot drop-in
+# --------------------------------------------------------------------------
+VER="$(dovecot --version 2>/dev/null | awk '{print $1}')"
+SYNTAX=$(syntax_of "$VER") || die "unsupported Dovecot version '${VER:-?}' (need 2.3 or 2.4)"
+log "dovecot     : $VER"
+
+CONF=/etc/dovecot/dovecot.conf
+DROPIN=/etc/dovecot/conf.d/95-mail-setup-sieve.conf
+LEGACY=/etc/dovecot/conf.d/95-tvmail-sieve.conf     # tvmail's old enable-managesieve.sh
+$SUDO test -r "$CONF" || die "$CONF not found"
+$SUDO grep -Eq '^[[:space:]]*!include[_try]*[[:space:]]+conf\.d/\*\.conf' "$CONF" \
+  || die "$CONF doesn't !include conf.d/*.conf - add that line, then re-run"
+
+# Judge "already set" without our own earlier drop-ins (current and legacy):
+# move them aside, put them back if the new one is rejected.
+stamp=$(date +%Y%m%d-%H%M%S)
+aside=""      # "orig=backup" pairs, space-separated (paths have no spaces)
+for f in "$DROPIN" "$LEGACY"; do
+  if $SUDO test -e "$f"; then
+    $SUDO cp -p "$f" "$f.bak.$stamp"
+    $SUDO rm -f "$f"
+    aside="$aside $f=$f.bak.$stamp"
+    log "backed up existing $f"
+  fi
+done
+restore() {
+  for p in $aside; do $SUDO cp -p "${p#*=}" "${p%%=*}"; done
+}
+
+needproto=1; $SUDO doveconf -h protocols 2>/dev/null | tr ' ' '\n' | grep -qx sieve && needproto=0
+needpriv=1;  [ -n "$($SUDO doveconf -h mail_privileged_group 2>/dev/null || true)" ] && needpriv=0
+needpm=1;    [ -n "$($SUDO doveconf -h postmaster_address 2>/dev/null || true)" ] && needpm=0
+
+tmp=$(mktemp)
+dropin "$SYNTAX" "$VER" "$needproto" "$needpriv" "$needpm" > "$tmp"
+$SUDO install -m 0644 "$tmp" "$DROPIN"; rm -f "$tmp"
+if ! err="$($SUDO doveconf -n 2>&1 >/dev/null)"; then
+  $SUDO rm -f "$DROPIN"; restore
+  die "doveconf rejected the new config (put the old one back):
+$err"
+fi
+log "wrote $DROPIN  (doveconf: ok)"
+
+# --------------------------------------------------------------------------
+# 3. Postfix -> dovecot-lda
+# --------------------------------------------------------------------------
+LDA=""
+for c in /usr/lib/dovecot/dovecot-lda /usr/libexec/dovecot/dovecot-lda /usr/lib64/dovecot/dovecot-lda; do
+  [ -x "$c" ] && { LDA=$c; break; }
+done
+[ -n "$LDA" ] || LDA="$(command -v dovecot-lda || true)"
+[ -n "$LDA" ] || die "dovecot-lda not found - is the dovecot-core package complete?"
+WANT="$LDA -f \"\$SENDER\" -a \"\$RECIPIENT\""
+CUR="$($SUDO postconf -h mailbox_command)"
+if [ "$CUR" = "$WANT" ]; then
+  log "postfix     : mailbox_command already delivers through dovecot-lda"
+else
+  if [ -n "$CUR" ] && [ "$FORCE" = 0 ]; then
+    die "Postfix already has  mailbox_command = $CUR
+  Replacing it would stop that filter running.  Re-run with --force if that is what you want."
+  fi
+  backup /etc/postfix/main.cf sudo
+  $SUDO postconf -e "mailbox_command = $WANT"
+  log "postfix     : mailbox_command = $WANT"
+fi
+
+# --------------------------------------------------------------------------
+# 4. firewall, reload
+# --------------------------------------------------------------------------
+if command -v ufw >/dev/null 2>&1 && $SUDO ufw status 2>/dev/null | grep -q '^Status: active'; then
+  $SUDO ufw allow 4190/tcp >/dev/null && log "ufw         : allowed 4190/tcp"
+fi
+if [ -d /run/systemd/system ]; then
+  $SUDO systemctl restart dovecot
+  $SUDO systemctl reload postfix 2>/dev/null || $SUDO systemctl restart postfix
+else
+  $SUDO service dovecot restart
+  $SUDO service postfix reload || $SUDO service postfix restart
+fi
+sleep 1
+
+if (ss -ltn 2>/dev/null || netstat -ltn 2>/dev/null) | grep -q ':4190 '; then
+  log "managesieve : listening on 4190"
+else
+  warn "nothing is listening on 4190; check 'journalctl -u dovecot'"
+fi
+
+cat <<'EOF'
+
+Done.  To check it end to end:
+
+  1. From your tvmail machine:   tvmail-backend vacation status
+       -> "state: none"  (it logged in to managesieve and found no script)
+  2. In tvmail:  File > Out of office...  switch it on, Save.
+  3. From another account / address, mail yourself, then watch:
+       sudo journalctl -u dovecot -u postfix -f      (or  tail -f /var/log/mail.log)
+     You should see dovecot-lda run the script and Postfix send the reply.
+
+If a reply never comes: the message was probably not addressed to one of the
+addresses in the dialog's "Addresses" line - mail fetched from a POP account is
+addressed to the public address, not to the local user.  See tvmail's INSTALL.md,
+"Out of office".
+EOF

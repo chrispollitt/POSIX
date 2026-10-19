@@ -340,6 +340,39 @@ LC=$(printf '/^([^@]+)@[^.@]+$/    ${1}@%s\n' cpbee | sed -n 's|^/\(.*\)/ .*|\1|
 check "lan-canonical regex: dotless only" 'grep -Eq "$LC" <<<"chris@cmlaptop" && ! grep -Eq "$LC" <<<"me@gmail.com" && ! grep -Eq "$LC" <<<"chris"'
 
 # --------------------------------------------------------------------------
+t "configure-sieve --print"
+S23=$("$S/configure-sieve.sh" --print 2.3.21)
+S24=$("$S/configure-sieve.sh" --print 2.4.1)
+S23L=$("$S/configure-sieve.sh" --print 2.3.21 --listen local)
+S24L=$("$S/configure-sieve.sh" --print 2.4.1 --listen local)
+check "2.3: sieve protocol added" 'grep -qx "protocols = \$protocols sieve" <<<"$S23"'
+check "2.3: LDA loads the sieve plugin" 'grep -qx "  mail_plugins = \$mail_plugins sieve" <<<"$S23"'
+check "2.3: managesieve on 4190" 'grep -qx "    port = 4190" <<<"$S23"'
+check "2.3: per-user script + active link" 'grep -qx "  sieve = file:~/sieve;active=~/.dovecot.sieve" <<<"$S23"'
+check "2.3: LDA may dot-lock /var/mail" 'grep -qx "mail_privileged_group = mail" <<<"$S23"'
+check "2.3: listens everywhere by default" '! grep -q "^    address = " <<<"$S23"'
+check "2.3: --listen local" 'grep -qx "    address = 127.0.0.1, ::1" <<<"$S23L"'
+check "2.4: protocols block" 'grep -qx "protocols {" <<<"$S24" && grep -qx "  sieve = yes" <<<"$S24"'
+check "2.4: LDA plugin block" 'grep -qx "  mail_plugins {" <<<"$S24"'
+check "2.4: sieve_script personal" 'grep -qx "sieve_script personal {" <<<"$S24" && grep -qx "  path = ~/sieve" <<<"$S24" && grep -qx "  active_path = ~/.dovecot.sieve" <<<"$S24"'
+check "2.4: no 2.3-only settings" '! grep -q "plugin {\|\$protocols\|\$mail_plugins" <<<"$S24"'
+check "2.4: --listen local" 'grep -qx "    address = 127.0.0.1, ::1" <<<"$S24L" && ! grep -q "^    address = " <<<"$S24"'
+check "braces balance (2.3 and 2.4)" '[ "$(tr -cd "{" <<<"$S23L" | wc -c)" = "$(tr -cd "}" <<<"$S23L" | wc -c)" ] && [ "$(tr -cd "{" <<<"$S24L" | wc -c)" = "$(tr -cd "}" <<<"$S24L" | wc -c)" ]'
+check "no blank-line gap inside the service block" '! grep -A1 "port = 4190" <<<"$S24" | grep -q "^$"'
+"$S/configure-sieve.sh" --print 3.0 > /dev/null 2>&1
+check "unknown version rejected" '[ $? != 0 ]'
+"$S/configure-sieve.sh" --listen sideways --print 2.3 > "$OUT" 2>&1
+check "bad --listen rejected" '[ $? != 0 ] && has "$OUT" "--listen must be all or local"'
+"$S/configure-sieve.sh" --bogus > "$OUT" 2>&1
+check "unknown argument: exit 2" '[ $? = 2 ] && has "$OUT" "unknown argument: --bogus"'
+check "-h prints the usage" '"$S/configure-sieve.sh" -h | grep -q "^Usage:"'
+check "--force is accepted" '"$S/configure-sieve.sh" --force --print 2.4.1 >/dev/null'
+if [ "$(uname -s)" != Linux ]; then
+  "$S/configure-sieve.sh" > "$OUT" 2>&1
+  check "refuses to run off Linux" '[ $? != 0 ] && has "$OUT" "Linux only"'
+fi
+
+# --------------------------------------------------------------------------
 t "mail-setup.sh"
 "$M/mail-setup.sh" --role client --assume-no --caller tvmail > "$OUT" 2>&1
 check "client, --assume-no: exits 0" '[ $? = 0 ] && has "$OUT" "mail-setup done (role: client)"'
@@ -348,6 +381,7 @@ check "client offers the shim, not Postfix" 'has "$OUT" "sendmail shim" && ! has
 check "master, --assume-no: exits 0" '[ $? = 0 ] && has "$OUT" "mail-setup done (role: master)"'
 check "master offers Postfix, Dovecot, a puller" 'has "$OUT" "== Postfix" && has "$OUT" "== Dovecot" && has "$OUT" "puller: pop-pull"'
 check "master offers the Webmin watchdog" 'has "$OUT" "== Webmin" && has "$OUT" "configure-webmin.sh now"'
+check "master offers Sieve (default no)" 'has "$OUT" "== Sieve" && has "$OUT" "configure-sieve.sh now?"'
 "$M/mail-setup.sh" --role master --puller none --assume-no > "$OUT" 2>&1
 check "--puller none skips the puller" 'has "$OUT" "puller: none" && ! has "$OUT" "configure-mail-pull.sh now"'
 "$M/mail-setup.sh" --role boss > /dev/null 2>&1

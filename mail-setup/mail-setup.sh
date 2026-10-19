@@ -16,6 +16,7 @@
 # Each step is its own script in scripts/ and can be run alone:
 #   configure-sendmail-relay.sh  Postfix as a send-only smarthost relay
 #   configure-dovecot.sh         Dovecot IMAP over /var/mail + ~/mail
+#   configure-sieve.sh           ManageSieve + Sieve vacation (tvmail Out of office)
 #   configure-mail-pull.sh       pop-pull   (POP3S -> /var/mail)
 #   configure-getmail.sh         getmail    (POP3S/IMAPS -> /var/mail)
 #   configure-webmin.sh          Webmin watchdog: mails you when mail gets stuck
@@ -166,6 +167,14 @@ if [ "$ROLE" = master ]; then
     fi
     log "running: $*"
     bash "$@" || warn "configure-dovecot.sh exited non-zero - see above"
+  fi
+
+  # ------------------------------------------------------------------------
+  step "Sieve (out-of-office replies over ManageSieve, optional)"
+  # ------------------------------------------------------------------------
+  if ask "Run configure-sieve.sh now? (switches Postfix delivery to dovecot-lda)" N; then
+    log "running: $S/configure-sieve.sh"
+    bash "$S/configure-sieve.sh" || warn "configure-sieve.sh exited non-zero - see above"
   fi
 
   # ------------------------------------------------------------------------
