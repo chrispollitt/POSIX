@@ -32,6 +32,12 @@
 #                            (master; default: ask, suggesting 5)
 #   --lan CIDR|auto|off      let LAN clients send through this master's Postfix
 #                            (default: ask; never switched on by --yes alone)
+#   --plus-base ADDR         one shared public mailbox for several local users
+#                            (cwp@u-l.ca): the puller delivers cwp+USER@... to
+#                            USER; see README "Several users, one mailbox"
+#   --plus-users LIST        comma-separated users (chris,miche) that also get
+#                            their own outgoing sender cwp+USER@... (needs
+#                            --plus-base; getmail needs it too)
 #   --caller NAME            name shown in test-message subjects (default:
 #                            mail-setup; tvmail's configure.sh passes tvmail)
 #   -y, --yes                accept every "offer to ..." prompt (unattended)
@@ -49,6 +55,8 @@ PULLER=""
 CALLER=mail-setup
 PULL_EVERY=""
 LAN=""
+PLUS_BASE=""
+PLUS_USERS=""
 ASSUME=""        # "" = ask each time / "yes" / "no"
 
 while [ $# -gt 0 ]; do
@@ -57,6 +65,8 @@ while [ $# -gt 0 ]; do
     --role=*)    ROLE="${1#--role=}"; shift ;;
     --puller)    PULLER="${2:?}"; shift 2 ;;
     --puller=*)  PULLER="${1#--puller=}"; shift ;;
+    --plus-base) PLUS_BASE="${2:?}"; shift 2 ;;
+    --plus-users) PLUS_USERS="${2:?}"; shift 2 ;;
     --caller)    CALLER="${2:?}"; shift 2 ;;
     --pull-every) PULL_EVERY="${2:?}"; shift 2 ;;
     --lan)       LAN="${2:?}"; shift 2 ;;
@@ -71,6 +81,8 @@ done
 case "$ROLE" in ""|master|client) : ;; *) die "--role must be master or client" ;; esac
 case "$PULLER" in ""|pop-pull|getmail|none) : ;; *) die "--puller must be pop-pull, getmail or none" ;; esac
 case "$PULL_EVERY" in ""|[0-9]|[0-9][0-9]|[0-9][0-9][0-9]) : ;; *) die "--pull-every must be minutes (0 = on demand)" ;; esac
+[ -z "$PLUS_USERS" ] || [ -n "$PLUS_BASE" ] || die "--plus-users needs --plus-base"
+[ "$PULLER" != getmail ] || [ -z "$PLUS_BASE" ] || [ -n "$PLUS_USERS" ] || die "getmail needs --plus-users with --plus-base"
 export ASSUME     # the step scripts' ask() honours it too
 
 log "OS: $OS   package manager: ${PKG:-none found}"
@@ -133,6 +145,7 @@ if [ "$ROLE" = master ]; then
       [ -n "$relay_file" ] && set -- "$@" --relay-file "$relay_file"
       [ -n "$test_addr" ]  && set -- "$@" --test "$test_addr"
       case "$LAN" in "") : ;; off) set -- "$@" --no-lan ;; *) set -- "$@" --lan "$LAN" ;; esac
+      [ -n "$PLUS_USERS" ] && set -- "$@" --plus-users "$PLUS_USERS" --plus-base "$PLUS_BASE"
       log "running: $*"
       bash "$@" || warn "configure-sendmail-relay.sh exited non-zero - see above"
     fi
@@ -184,6 +197,8 @@ if [ "$ROLE" = master ]; then
       [ -n "$relay_file" ] && set -- "$@" --relay-file "$relay_file"
       [ -n "$do_test" ]    && set -- "$@" --test
       [ "${PULL_EVERY:-0}" -gt 0 ] 2>/dev/null && set -- "$@" --timer "$PULL_EVERY"
+      [ -n "$PLUS_BASE" ]  && set -- "$@" --plus-base "$PLUS_BASE"
+      [ -n "$PLUS_BASE" ] && [ "$PULLER" = getmail ] && set -- "$@" --plus-users "$PLUS_USERS"
       log "running: $*"
       bash "$@" || warn "$(basename "$script") exited non-zero - see above"
     fi

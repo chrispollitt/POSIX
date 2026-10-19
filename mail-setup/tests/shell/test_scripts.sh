@@ -104,6 +104,172 @@ MAIL_SETUP_GETMAIL="" ASSUME=no "$S/configure-getmail.sh" --pwfile "$PW" > "$OUT
 check "no getmail + declined -> fails cleanly" '[ $? != 0 ] && has "$OUT" "getmail is required"'
 
 # --------------------------------------------------------------------------
+t "plus routing: configure-mail-pull"
+"$S/configure-mail-pull.sh" --pwfile "$PW" --relay-file "$RELAY" --plus-base me@example.org > "$OUT" 2>&1
+check "exits 0" '[ $? = 0 ]'
+check "plus_base recorded" 'has "$C" "plus_base  = me@example.org"'
+check "announces the routing" 'has "$OUT" "plus routing : me+TAG@example.org"'
+"$S/configure-mail-pull.sh" --pwfile "$PW" --relay-file "$RELAY" > "$OUT" 2>&1
+check "off by default (empty plus_base)" 'grep -qx "plus_base  = " "$C"'
+for bad in 'a+b@c.org' nodomain '@x.org' 'x@' 'a@b@c'; do
+  "$S/configure-mail-pull.sh" --pwfile "$PW" --plus-base "$bad" > "$OUT" 2>&1
+  check "rejects --plus-base '$bad'" '[ $? != 0 ] && has "$OUT" "must be a plain address"'
+done
+CF2="$SANDBOX/etc-mailpull.conf"
+"$S/configure-mail-pull.sh" --pwfile "$PW" --config "$CF2" --plus-base me@example.org --local-user zed > "$OUT" 2>&1
+check "--config writes the config there" 'has "$CF2" "plus_base  = me@example.org" && has "$CF2" "local_user = zed"'
+check "mail-pull passes --config to pop-pull" 'has "$HOME/bin/mail-pull" "--config \"$CF2\""'
+"$S/configure-mail-pull.sh" --pwfile "$PW" > /dev/null 2>&1
+check "without --config the wrapper is plain again" '! has "$HOME/bin/mail-pull" "--config"'
+
+# --------------------------------------------------------------------------
+t "plus routing: configure-getmail"
+# prints the local users getmail would deliver ADDR to, per the written getmailrc
+RCR="$SANDBOX/rc_route.py"
+cat > "$RCR" <<'EOF'
+import ast, configparser, re, sys
+c = configparser.RawConfigParser()
+c.read(sys.argv[1])
+d = c["destination"]
+hits = [dest for pat, dest in ast.literal_eval(d["locals"]) if re.search(pat, sys.argv[2])] or [d["default"]]
+print(",".join(ast.literal_eval(c[h.strip("[]")]["arguments"])[-1] for h in hits))
+EOF
+route() { "$PY" "$RCR" "$RC" "$1"; }
+"$S/configure-getmail.sh" --pwfile "$PW" --relay-file "$RELAY" --plus-base cwp@u-l.ca --plus-users chris,miche --local-user zed > "$OUT" 2>&1
+check "exits 0" '[ $? = 0 ]'
+check "MultiGuesser with a default" 'has "$RC" "type = MultiGuesser" && has "$RC" "default = [dest-default]"'
+check "a destination section per user + default" 'has "$RC" "[dest-chris]" && has "$RC" "[dest-miche]" && has "$RC" "[dest-default]"'
+check "cwp+chris@ -> chris" '[ "$(route cwp+chris@u-l.ca)" = chris ]'
+check "cwp+miche@ -> miche, any case" '[ "$(route CWP+Miche@U-L.CA)" = miche ]'
+check "untagged -> --local-user" '[ "$(route cwp@u-l.ca)" = zed ]'
+check "unlisted tag -> --local-user" '[ "$(route cwp+bob@u-l.ca)" = zed ]'
+check "patterns are anchored and dots escaped" '[ "$(route cwp+chrisx@u-l.ca)$(route xcwp+chris@u-l.ca)$(route cwp+chris@u-lxca)$(route cwp+chris@u-l.ca.evil.org)" = zedzedzedzed ]'
+check "still no password in getmailrc" '! has "$RC" "p4ss"'
+check_mode "getmailrc is mode 600" "$RC"
+"$S/configure-getmail.sh" --pwfile "$PW" --relay-file "$RELAY" > "$OUT" 2>&1
+check "re-run without --plus-* is a single MDA again" 'has "$RC" "type = MDA_external" && ! has "$RC" "MultiGuesser"'
+"$S/configure-getmail.sh" --pwfile "$PW" --plus-base cwp@u-l.ca > "$OUT" 2>&1
+check "--plus-base alone rejected" '[ $? != 0 ] && has "$OUT" "go together"'
+"$S/configure-getmail.sh" --pwfile "$PW" --plus-users chris > "$OUT" 2>&1
+check "--plus-users alone rejected" '[ $? != 0 ] && has "$OUT" "go together"'
+"$S/configure-getmail.sh" --pwfile "$PW" --plus-base cwp@u-l.ca --plus-users 'chris,Bob' > "$OUT" 2>&1
+check "bad user name rejected" '[ $? != 0 ] && has "$OUT" "plain lower-case login name"'
+"$S/configure-getmail.sh" --pwfile "$PW" --plus-base 'cwp+x@u-l.ca' --plus-users chris > "$OUT" 2>&1
+check "tagged base rejected" '[ $? != 0 ] && has "$OUT" "must be a plain address"'
+"$S/configure-mail-pull.sh" --pwfile "$PW" > /dev/null 2>&1      # leave pop-pull as the puller
+
+# --------------------------------------------------------------------------
+t "configure-sendmail-relay --print (generic map)"
+R="$S/configure-sendmail-relay.sh"
+gv() { awk -v k="$2" '!/^#/ && $1 == k { print $2 }' <<<"$1"; }       # gv MAP KEY -> value
+G0=$("$R" --print --fqdn mx.lan.example --user zed --relay-file "$RELAY")
+check "default: the shared catch-all for the host" '[ "$(gv "$G0" @mx.lan.example)" = me@example.org ] && [ "$(gv "$G0" @mx)" = me@example.org ]'
+check "default: root and admin@localhost too" '[ "$(gv "$G0" root@localhost)" = me@example.org ] && [ "$(gv "$G0" zed@localhost)" = me@example.org ]'
+check "default: no per-user lines" '! grep -q "+" <<<"$G0"'
+G1=$("$R" --print --fqdn mx.lan.example --user zed --relay-file "$RELAY" --plus-users chris,miche)
+check "per-user: chris@host -> base+chris@domain" '[ "$(gv "$G1" chris@mx.lan.example)" = me+chris@example.org ] && [ "$(gv "$G1" chris@mx)" = me+chris@example.org ] && [ "$(gv "$G1" chris@localhost)" = me+chris@example.org ]'
+check "per-user: miche too" '[ "$(gv "$G1" miche@mx.lan.example)" = me+miche@example.org ]'
+check "per-user: catch-all kept for root/system" '[ "$(gv "$G1" @mx.lan.example)" = me@example.org ] && [ "$(gv "$G1" root@localhost)" = me@example.org ] && [ "$(gv "$G1" zed@localhost)" = me@example.org ]'
+check "per-user: no duplicate keys" '[ -z "$(awk "!/^#/ && NF { print \$1 }" <<<"$G1" | sort | uniq -d)" ]'
+G2=$("$R" --print --fqdn mx.lan.example --user chris --relay-file "$RELAY" --plus-users chris)
+check "admin user in the list: its @localhost line is the per-user one, once" '[ "$(gv "$G2" chris@localhost)" = me+chris@example.org ] && [ "$(awk "\$1 == \"chris@localhost\"" <<<"$G2" | wc -l)" = 1 ]'
+G3=$("$R" --print --fqdn mx.lan.example --relay-file "$RELAY" --plus-users chris,chris --plus-base shared@example.net)
+check "--plus-base overrides the login; repeated users collapse" '[ "$(gv "$G3" chris@mx)" = shared+chris@example.net ] && [ "$(awk "\$1 == \"chris@mx\"" <<<"$G3" | wc -l)" = 1 ]'
+"$R" --print --relay-file "$RELAY" --plus-users root > "$OUT" 2>&1
+check "root can't be a per-user sender" '[ $? != 0 ] && has "$OUT" "root'\''s mail stays"'
+"$R" --print --relay-file "$RELAY" --plus-users 'chris,Bob' > "$OUT" 2>&1
+check "bad user name rejected" '[ $? != 0 ] && has "$OUT" "plain lower-case login name"'
+"$R" --print --relay-file "$RELAY" --plus-users chris --plus-base 'a+b@c.org' > "$OUT" 2>&1
+check "tagged base rejected" '[ $? != 0 ] && has "$OUT" "must be a plain address"'
+"$R" --print --relay-file "$RELAY" --plus-base cwp@u-l.ca > "$OUT" 2>&1
+check "--plus-base without --plus-users rejected" '[ $? != 0 ] && has "$OUT" "only makes sense with --plus-users"'
+
+# --------------------------------------------------------------------------
+t "configure-sendmail-relay (sandboxed Postfix)"
+# fake postfix tools + a Linux-looking uname, first on PATH for these runs only;
+# /etc/postfix and /etc/aliases are replaced by sandbox paths
+PFAKE="$SANDBOX/pfake"; mkdir -p "$PFAKE"
+export FAKE_CALLS="$SANDBOX/calls"
+cat > "$PFAKE/uname" <<'EOF'
+#!/bin/sh
+[ "$1" = -s ] && { echo Linux; exit 0; }
+exec /usr/bin/uname "$@"
+EOF
+cat > "$PFAKE/postmap" <<'EOF'
+#!/bin/sh
+echo "postmap $*" >> "$FAKE_CALLS"
+case "${FAKE_POSTMAP_FAIL:-}:$*" in
+  outside:*/pf*/*) ;;                   # building inside the fake /etc/postfix is fine
+  outside:*) exit 1 ;;                  # ... the temp-dir test build is what fails
+  inside:*/pf*/generic*) exit 1 ;;
+esac
+if [ "$1" = -q ]; then                  # postmap -q KEY hash:FILE
+  f=${3#hash:}
+  awk -v k="$2" '!/^#/ && $1 == k { print $2; found = 1 } END { exit !found }' "$f"
+  exit
+fi
+f=${1#hash:}; [ -f "$f" ] || exit 1; touch "$f.db"
+EOF
+cat > "$PFAKE/postfix" <<'EOF'
+#!/bin/sh
+echo "postfix $*" >> "$FAKE_CALLS"
+case "$1" in
+  check)  [ "${FAKE_POSTFIX_CHECK_RC:-0}" = 0 ] || { echo "postfix: fatal: fake check failure" >&2; exit 1; } ;;
+  status) exit 1 ;;
+esac
+exit 0
+EOF
+for n in postconf newaliases systemctl; do
+  printf '#!/bin/sh\necho "%s $*" >> "$FAKE_CALLS"\nexit 0\n' "$n" > "$PFAKE/$n"
+done
+chmod 755 "$PFAKE"/*
+PF="$SANDBOX/pf"; mkdir -p "$PF"
+relay() {   # relay ARGS... (extra env comes from the caller)
+  PATH="$PFAKE:$PATH" MAIL_SETUP_POSTFIX_DIR="$PF" MAIL_SETUP_ALIASES="$SANDBOX/aliases" \
+    SMARTHOST_PASS_ENV=sekrit "$R" --relay-file "$RELAY" --user zed --service systemd \
+    --fqdn mx.lan.example "$@"
+}
+: > "$FAKE_CALLS"
+relay > "$OUT" 2>&1
+check "plain run exits 0" '[ $? = 0 ]'
+check "generic written + postmapped" 'has "$PF/generic" "@mx.lan.example" && [ -f "$PF/generic.db" ]'
+check "smtp_generic_maps points at it" 'has "$FAKE_CALLS" "smtp_generic_maps = hash:$PF/generic"'
+check "sasl_passwd line, mode 600" 'has "$PF/sasl_passwd" "[out.example.org]:587 me@example.org:sekrit"'
+check_mode "sasl_passwd is mode 600" "$PF/sasl_passwd"
+check "root alias added" 'has "$SANDBOX/aliases" "root: zed"'
+check "no per-user lines by default" '! grep -q "+" "$PF/generic"'
+relay --plus-users chris,miche > "$OUT" 2>&1
+check "--plus-users run exits 0" '[ $? = 0 ]'
+check "per-user lines installed" 'has "$PF/generic" "chris@mx.lan.example" && has "$PF/generic" "me+miche@example.org"'
+check "announced" 'has "$OUT" "per-user   : chris, miche -> me+USER@example.org"'
+check "old map backed up (and its .db)" 'ls "$PF"/generic.bak.* >/dev/null 2>&1 && ls "$PF"/generic.bak.*.db >/dev/null 2>&1'
+check "installed map was looked up and checked" 'has "$FAKE_CALLS" "postmap -q chris@mx.lan.example hash:$PF/generic" && has "$FAKE_CALLS" "postfix check"'
+GOOD="$SANDBOX/generic.good"; cp "$PF/generic" "$GOOD"
+
+: > "$FAKE_CALLS"
+FAKE_POSTFIX_CHECK_RC=1 relay --plus-users chris > "$OUT" 2>&1
+check "failed 'postfix check': non-zero, says so" '[ $? != 0 ] && has "$OUT" "new generic map rejected"'
+check "... and the previous map is back" 'cmp -s "$PF/generic" "$GOOD"'
+check "... and Postfix was not started/reloaded" '! has "$FAKE_CALLS" "systemctl enable" && ! has "$FAKE_CALLS" "postfix reload"'
+
+: > "$FAKE_CALLS"
+FAKE_POSTMAP_FAIL=outside relay --plus-users chris > "$OUT" 2>&1
+check "map postmap rejects up front: non-zero" '[ $? != 0 ] && has "$OUT" "nothing was changed"'
+check "... before main.cf or anything else is touched" '! has "$FAKE_CALLS" "postconf" && cmp -s "$PF/generic" "$GOOD"'
+
+FAKE_POSTMAP_FAIL=inside relay --plus-users chris > "$OUT" 2>&1
+check "postmap failing on the installed map: non-zero, rolled back" '[ $? != 0 ] && cmp -s "$PF/generic" "$GOOD" && [ -f "$PF/generic.db" ]'
+
+rm -rf "$PF"; mkdir -p "$PF"
+FAKE_POSTFIX_CHECK_RC=1 relay > "$OUT" 2>&1
+check "first-ever install that fails leaves no generic behind" '[ $? != 0 ] && [ ! -e "$PF/generic" ] && [ ! -e "$PF/generic.db" ]'
+rm -rf "$PF"; mkdir -p "$PF"
+if [ "$(uname -s)" != Linux ]; then
+  "$R" --relay-file "$RELAY" > "$OUT" 2>&1
+  check "refuses to run off Linux" '[ $? != 0 ] && has "$OUT" "Linux only"'
+fi
+
+# --------------------------------------------------------------------------
 t "configure-mailutils"
 printf 'mhost\n143\nme\nmhost\n25\np@ss:w/rd\n' \
   | ASSUME=yes "$S/configure-mailutils.sh" --role client > "$OUT" 2>&1
@@ -189,6 +355,13 @@ check "bad --role rejected" '[ $? != 0 ]'
 "$M/mail-setup.sh" --puller fetchmail > /dev/null 2>&1
 check "bad --puller rejected" '[ $? != 0 ]'
 check "-h prints the usage" '"$M/mail-setup.sh" -h | grep -q "^Usage:"'
+"$M/mail-setup.sh" --plus-users chris > "$OUT" 2>&1
+check "--plus-users needs --plus-base" '[ $? != 0 ] && has "$OUT" "--plus-users needs --plus-base"'
+"$M/mail-setup.sh" --role master --puller getmail --plus-base cwp@u-l.ca --assume-no > "$OUT" 2>&1
+check "getmail + --plus-base needs --plus-users" '[ $? != 0 ] && has "$OUT" "getmail needs --plus-users"'
+"$M/mail-setup.sh" --role master --plus-base cwp@u-l.ca --plus-users chris,miche --assume-no > "$OUT" 2>&1
+check "--plus-base/--plus-users accepted" '[ $? = 0 ] && has "$OUT" "mail-setup done (role: master)"'
+check "-h documents them" '"$M/mail-setup.sh" -h | grep -q -- "--plus-base ADDR"'
 
 # --------------------------------------------------------------------------
 t "pull timer (cron fallback)"
@@ -238,8 +411,8 @@ for f in "$M"/mail-setup.sh "$S"/*.sh "$M"/lib/*.sh; do
   bash -n "$f" || bad "bash -n $f"
 done
 ok "bash -n on every script"
-for f in "$M"/bin/*; do [ -f "$f" ] || continue; pycheck "$f" || bad "compile $f"; done
-ok "python compiles bin/*"
+for f in "$M"/bin/* "$M"/tests/live/*.py; do [ -f "$f" ] || continue; pycheck "$f" || bad "compile $f"; done
+ok "python compiles bin/* and tests/live/*.py"
 
 echo
 echo "shell tests: $PASS passed, $FAIL failed"

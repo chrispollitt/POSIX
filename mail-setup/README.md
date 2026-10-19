@@ -51,10 +51,10 @@ Every step is a yes/no offer. Each one is also its own script you can run alone:
 
 | script | does |
 |---|---|
-| `scripts/configure-sendmail-relay.sh` | Postfix: local delivery + an authenticated TLS smarthost relay; rewrites local senders on the way out. Addresses that LAN clients qualify with their own hostname (`chris@laptop`, i.e. any domain without a dot) are treated as the master's, so they deliver locally and go out as the real mailbox. `--lan CIDR\|auto` lets LAN clients send through it, `--no-lan` (or `--lan off`) goes back to loopback-only; a re-run with neither keeps the current setting, and a re-run without `--relay-file` keeps the current smarthost. Linux only. |
+| `scripts/configure-sendmail-relay.sh` | Postfix: local delivery + an authenticated TLS smarthost relay; rewrites local senders on the way out. Addresses that LAN clients qualify with their own hostname (`chris@laptop`, i.e. any domain without a dot) are treated as the master's, so they deliver locally and go out as the real mailbox. `--lan CIDR\|auto` lets LAN clients send through it, `--no-lan` (or `--lan off`) goes back to loopback-only; a re-run with neither keeps the current setting, and a re-run without `--relay-file` keeps the current smarthost. `--plus-users` adds per-user `cwp+chris@` senders; the new map is test-built and verified before Postfix is reloaded. Linux only. |
 | `scripts/configure-dovecot.sh` | Dovecot IMAP: INBOX = `/var/mail/<user>`, other folders in `~/mail`, with Drafts/Sent/Trash/Junk/Archive auto-created. Writes one drop-in (`conf.d/99-mail-setup.conf`), checks it with `doveconf`, and rolls back if that fails. Handles both Dovecot 2.3 and 2.4 syntax. Linux only. |
-| `scripts/configure-mail-pull.sh` | installs `bin/pop-pull` (stdlib-Python POP3S puller) + `~/.config/mailpull.conf` |
-| `scripts/configure-getmail.sh` | installs getmail6 if missing (distro package, else `pip --user`) and writes a `getmailrc` (POP3S, or `--imap`) |
+| `scripts/configure-mail-pull.sh` | installs `bin/pop-pull` (stdlib-Python POP3S puller) + `~/.config/mailpull.conf`; `--plus-base` routes `cwp+TAG@` mail to local user TAG |
+| `scripts/configure-getmail.sh` | installs getmail6 if missing (distro package, else `pip --user`) and writes a `getmailrc` (POP3S, or `--imap`); `--plus-base/--plus-users` fan out by tag |
 | `scripts/configure-webmin.sh` | installs Webmin (official apt repo) if missing and sets its System and Server Status module to check, every 5 min (`--every`), the Postfix mail queue plus Postfix/Dovecot running. You get a local email when a check fails and another when it recovers. `--queue-max` / `--fails` set the queue alarm, `--webhook URL` adds an HTTP call, and `--allow CIDR\|auto\|all` limits who can reach port 10000. The wizard offers it on a master (under `--yes` only when Webmin is already installed). Linux only. |
 | `scripts/install-sendmail-shim.sh` | client: installs `bin/sendmail-shim` as `/usr/sbin/sendmail`, forwarding to the master |
 | `scripts/configure-mailutils.sh` | installs GNU Mailutils and writes `~/.mail` + `~/.mu-tickets` |
@@ -98,6 +98,87 @@ gets it through `password_command` = `bin/sasl-pass`. Neither `mailpull.conf`
 nor `getmailrc` contains it. Client passwords live in `~/.mu-tickets`
 (mode 600). None of the files in this project hold credentials.
 
+## Several users, one mailbox (plus-addresses)
+
+A web host often gives you one POP mailbox (say `cwp@u-l.ca`) while the master
+has several users (`chris`, `miche`). Plus-addresses let that one public mailbox
+serve all of them, each kept apart:
+
+```
+ outbound   chris@cpbee --Postfix generic map--> cwp+chris@u-l.ca --smarthost--> world
+            miche@cpbee                          cwp+miche@u-l.ca
+            root@cpbee                           cwp@u-l.ca            (shared catch-all)
+
+ inbound    world --> cwp+chris@u-l.ca --\                  /--> /var/mail/chris
+            world --> cwp+miche@u-l.ca ---+-> ONE POP box --+--> /var/mail/miche
+            world --> cwp@u-l.ca ---------/    (pop-pull)   \--> /var/mail/<--local-user>
+```
+
+**Check the host first.** This only works if the host (a) delivers
+`cwp+x@u-l.ca` into `cwp@u-l.ca` and (b) lets the smarthost send as
+`cwp+chris@u-l.ca` while you're logged in as `cwp@u-l.ca`. cPanel/Exim hosts
+usually do (a); (b) depends on the host's sender-verification settings. Test
+both with the live probe (it isn't part of `run-tests.sh`; it sends one real
+message to yourself and deletes it again):
+
+```bash
+tests/live/check-plus-addressing.py --relay-file smtp-relay.txt --tag chris
+```
+
+It reports three things: `1.` the smarthost accepts the `+tag` sender, `2.`
+mail to `cwp+chris@...` reaches the mailbox, `3.` which header
+(`Delivered-To`, `X-Original-To`, `To`, `Cc`) names the tagged address. If `1`
+fails, skip `--plus-users` (outbound stays the shared address); if `3` fails,
+the host strips the tag and inbound routing can't tell users apart.
+
+**Set it up on the master**, as root (or a service account) so one puller can
+deliver for everyone:
+
+```bash
+# outbound: per-user senders; root/system mail keeps the shared address
+sudo scripts/configure-sendmail-relay.sh --relay-file smtp-relay.txt --plus-users chris,miche
+# inbound: route cwp+TAG@... to user TAG (pop-pull: any local account)
+sudo scripts/configure-mail-pull.sh   --relay-file smtp-relay.txt --plus-base cwp@u-l.ca --local-user chris
+#   or getmail (it needs the user list):
+sudo scripts/configure-getmail.sh     --relay-file smtp-relay.txt --plus-base cwp@u-l.ca --plus-users chris,miche --local-user chris
+# or all in the wizard
+sudo ./mail-setup.sh --role master --plus-base cwp@u-l.ca --plus-users chris,miche
+```
+
+- **Outbound** (`configure-sendmail-relay.sh --plus-users`): the generic map gets
+  `chris@HOST cwp+chris@u-l.ca` (for the FQDN, short name and `localhost`) next to
+  the unchanged `@HOST cwp@u-l.ca` catch-all. Postfix tries `user@host` before
+  `@host`, so users get their own address and root, cron and other system mail
+  keep the shared one. `--plus-base` overrides which address is tagged (default:
+  the smarthost login); `root` can't be listed. `--print` shows the map without
+  touching anything.
+- **Inbound, pop-pull** (`--plus-base`): for each message the first address in
+  `Delivered-To`, `X-Original-To`, `To`, `Cc` (in that order) that looks like
+  `cwp+TAG@u-l.ca` decides the recipient: `TAG` if the system has that account
+  (`getpwnam`, uid >= `plus_min_uid`, default 1000), else `--local-user`. Tags are
+  taken from mail headers, so only plain login-name tags are accepted. Delivery is
+  `sendmail -oi -- TAG`. Options in `mailpull.conf`: `plus_base`, `plus_sep`
+  (default `+`), `plus_min_uid`. A message addressed to several tags goes to the
+  first one only.
+- **Inbound, getmail** (`--plus-base` + `--plus-users`): the `[destination]`
+  becomes a getmail **MultiGuesser** (not MultiSorter, which needs a multidrop
+  retriever and a trustworthy envelope-recipient header; MultiGuesser works with
+  the plain retriever). It checks `Delivered-To`, `Envelope-To`, `To`/`Cc` and
+  sends `cwp+chris@` to chris, `cwp+miche@` to miche, everything else to
+  `--local-user`. A message addressed to several tags is delivered to each of them.
+- **Running it for everyone:** run the puller as root (it reads
+  `/etc/postfix/sasl_passwd` directly) or as a service account with `--pwfile` to a
+  copy that account can read. Use `--config /etc/mailpull.conf` to keep the
+  config out of a home directory; `mail-pull` passes it on. Cron example:
+  `*/5 * * * * root /root/.local/bin/mail-pull`. The `--timer` option installs a
+  per-user systemd timer, so for root or a service account use cron or write
+  your own system unit.
+- **Safe to re-run:** the new generic map is test-built with `postmap` in a temp
+  dir before anything in `/etc/postfix` changes; after install each user's key is
+  looked up and `postfix check` must pass before Postfix is reloaded. If either
+  fails, the previous map (and `.db`) is put back. Old maps are kept as
+  `generic.bak.<stamp>`.
+
 ## Platforms
 
 | | master | client |
@@ -119,11 +200,18 @@ nor `getmailrc` contains it. Client passwords live in `~/.mu-tickets`
 - **unit** (`tests/unit/`): `pop-pull` (keep/delete/dry-run, dot-stuffing,
   bad login, failed delivery, password file parsing), `sasl-pass`, and
   `sendmail-shim` (`-t`, Bcc stripping, `-f`, exit codes 66/71), all against
-  the in-process servers in `tests/lib/fakeservers.py`.
+  the in-process servers in `tests/lib/fakeservers.py`. Plus-routing: tag
+  matching, header order, unknown/system/hostile tags, `--config`, and the live
+  probe `tests/live/check-plus-addressing.py` against the fake servers.
 - **shell** (`tests/shell/test_scripts.sh`): runs every configure script for
   real in a throwaway `$HOME` with fake `getmail`/`mail`/MDA, and checks the
   generated files, modes, backups, wrapper switching, Dovecot drop-ins for both
-  syntaxes (`configure-dovecot.sh --print`), and both wizard roles.
+  syntaxes (`configure-dovecot.sh --print`), both wizard roles, the per-user
+  generic map (`configure-sendmail-relay.sh --print`), the getmail MultiGuesser
+  rules (evaluated against sample addresses), and the relay script end to end
+  against fake `postmap`/`postfix`/`postconf` in a sandbox `/etc/postfix`
+  (install, backup, lookup check, and rollback when `postmap` or
+  `postfix check` fails).
 - **e2e** (`tests/e2e/`):
   - `test_pull_e2e.py`: `configure-*.sh` → `mail-pull` → pop-pull / real
     getmail → POP3S with a verified self-signed cert (openssl) → MDA,
@@ -140,7 +228,8 @@ nor `getmailrc` contains it. Client passwords live in `~/.mu-tickets`
 The tests only change a temp dir. Environment hooks they use (also handy for
 dry runs): `MAIL_SETUP_SUDO=` (never escalate), `MAIL_SETUP_MDA`,
 `MAIL_SETUP_GETMAIL`, `MAIL_SETUP_NO_SYSTEMD=1` (schedule with cron),
-`SENDMAIL_DEST`.
+`SENDMAIL_DEST`, `MAIL_SETUP_POSTFIX_DIR` and `MAIL_SETUP_ALIASES` (where
+`configure-sendmail-relay.sh` writes).
 
 ## Layout
 
@@ -149,5 +238,5 @@ mail-setup.sh        the wizard
 scripts/             one configure script per program
 bin/                 pop-pull, sasl-pass, sendmail-shim (installed by scripts/)
 lib/                 common.sh (prompts, package managers), pull.sh (mail-pull, timer)
-tests/               unit/  shell/  e2e/  lib/  run-tests.sh
+tests/               unit/  shell/  e2e/  lib/  live/ (opt-in, real servers)  run-tests.sh
 ```

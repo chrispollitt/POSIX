@@ -31,7 +31,8 @@ def msg(n, extra=""):
     return ("From: a@example.org\r\nSubject: test %d\r\n\r\nbody %d\r\n%s" % (n, n, extra)).encode()
 
 
-class PopPullTest(unittest.TestCase):
+class PullBase(unittest.TestCase):
+    """fixture + helpers shared by the pop-pull test classes (no tests of its own)"""
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
@@ -64,8 +65,8 @@ class PopPullTest(unittest.TestCase):
         os.chmod(p, 0o755)
         return p
 
-    def config(self, keep=True, mda=None):
-        with open(self.mod.CFG, "w") as f:
+    def config(self, keep=True, mda=None, extra="", path=None):
+        with open(path or self.mod.CFG, "w") as f:
             f.write(textwrap.dedent("""\
                 [mailpull]
                 server     = pop.example.org
@@ -77,7 +78,7 @@ class PopPullTest(unittest.TestCase):
                 cafile     =
                 mda        = %s
                 pwfile     = %s
-                """ % ("true" if keep else "false", mda or self.mda, self.pw)))
+                """ % ("true" if keep else "false", mda or self.mda, self.pw) + extra))
 
     def run_pull(self, server, *argv):
         """-> (exit code, stdout, stderr)"""
@@ -100,6 +101,9 @@ class PopPullTest(unittest.TestCase):
             return b""
         with open(self.mbox, "rb") as f:
             return f.read()
+
+
+class PopPullTest(PullBase):
 
     # ------------------------------------------------------------------
     def test_keep_mode_delivers_then_remembers(self):
@@ -181,6 +185,145 @@ class PopPullTest(unittest.TestCase):
         code, _, err = self.run_pull(None)
         self.assertEqual(code, 2)
         self.assertIn("missing config", err)
+
+
+class FakePwd:
+    """stand-in for the pwd module: chris 1001, miche 1002, root 0, daemon 1"""
+    UIDS = {"chris": 1001, "miche": 1002, "root": 0, "daemon": 1}
+
+    class Entry:
+        def __init__(self, uid):
+            self.pw_uid = uid
+
+    def getpwnam(self, name):
+        if name in self.UIDS:
+            return self.Entry(self.UIDS[name])
+        raise KeyError(name)
+
+
+def mail_to(headers, n=1):
+    """a message with the given (name, value) headers"""
+    hdr = "".join("%s: %s\r\n" % kv for kv in headers)
+    return ("From: a@example.org\r\n%sSubject: test %d\r\n\r\nbody %d\r\n" % (hdr, n, n)).encode()
+
+
+class PlusRoutingTest(PullBase):
+    """plus_base = cwp@u-l.ca: cwp+TAG@u-l.ca goes to local user TAG, else chris"""
+
+    PLUS = "plus_base  = cwp@u-l.ca\n"
+
+    def routed(self, msgs, extra=None):
+        """pull MSGS -> the recipients the MDA was given, in order"""
+        self.config(extra=self.PLUS if extra is None else extra)
+        self.mod.pwd = FakePwd()
+        with FakePOP3(msgs, user="me@example.org", password="pa:ss") as s:
+            self.code, self.out, self.err = self.run_pull(s, "-v")
+        if not os.path.exists(self.argsf):
+            return []
+        with open(self.argsf) as f:
+            return [ln.split()[-1] for ln in f.read().splitlines()]
+
+    def test_routes_by_tag_with_default_for_the_rest(self):
+        got = self.routed([
+            mail_to([("To", "cwp+miche@u-l.ca")], 1),
+            mail_to([("To", "Chris <cwp+chris@u-l.ca>"), ("Cc", "x@y.org")], 2),
+            mail_to([("To", "cwp@u-l.ca")], 3),                    # untagged -> default
+            mail_to([("To", "cwp+nobody@u-l.ca")], 4),             # no such account -> default
+            mail_to([("To", "cwp+root@u-l.ca")], 5),               # uid 0 < plus_min_uid -> default
+            mail_to([("To", "cwp+miche@evil.example")], 6),        # wrong domain -> default
+            mail_to([("To", "cwp+miche@u-l.ca.evil.example")], 7),
+            mail_to([("To", "xcwp+miche@u-l.ca")], 8),             # wrong base -> default
+            mail_to([("To", "CWP+Miche@U-L.CA")], 9),              # case-insensitive
+            mail_to([("Cc", "list@x.org, cwp+miche@u-l.ca")], 10), # Cc counts
+        ])
+        self.assertEqual(self.code, 0, self.err)
+        self.assertEqual(got, ["miche", "chris", "chris", "chris", "chris", "chris",
+                               "chris", "chris", "miche", "miche"])
+        self.assertIn("10 new message(s) -> /var/mail/chris (7), /var/mail/miche (3)", self.out)
+        self.assertIn("delivered msg 1 uid uid-1", self.out)
+        self.assertIn("-> miche", self.out)
+
+    def test_header_order_delivered_to_beats_to(self):
+        got = self.routed([
+            mail_to([("To", "cwp+chris@u-l.ca"), ("Delivered-To", "cwp+miche@u-l.ca")]),
+            mail_to([("To", "cwp+chris@u-l.ca"), ("X-Original-To", "cwp+miche@u-l.ca")]),
+            mail_to([("To", "cwp+miche@u-l.ca, cwp+chris@u-l.ca")]),   # first address wins
+        ])
+        self.assertEqual(got, ["miche", "miche", "miche"])
+
+    def test_hostile_tags_never_reach_sendmail(self):
+        got = self.routed([
+            mail_to([("To", "cwp+-oX@u-l.ca")]),
+            mail_to([("To", "cwp+../miche@u-l.ca")]),
+            mail_to([("To", "cwp+miche;id@u-l.ca")]),
+            mail_to([("To", "cwp+@u-l.ca")]),
+        ])
+        self.assertEqual(got, ["chris"] * 4)
+
+    def test_off_when_plus_base_is_empty(self):
+        got = self.routed([mail_to([("To", "cwp+miche@u-l.ca")])], extra="plus_base  =\n")
+        self.assertEqual(got, ["chris"])
+        self.assertIn("1 new message(s) -> /var/mail/chris\n", self.out)
+
+    def test_custom_sep_and_min_uid(self):
+        got = self.routed([mail_to([("To", "cwp-miche@u-l.ca")]), mail_to([("To", "cwp-chris@u-l.ca")])],
+                          extra="plus_base = cwp@u-l.ca\nplus_sep = -\nplus_min_uid = 1002\n")
+        self.assertEqual(got, ["miche", "chris"])      # chris (1001) is below the floor -> default
+
+    def test_dry_run_shows_the_route(self):
+        self.config(extra=self.PLUS)
+        self.mod.pwd = FakePwd()
+        with FakePOP3([mail_to([("To", "cwp+miche@u-l.ca")])], user="me@example.org", password="pa:ss") as s:
+            code, out, _ = self.run_pull(s, "-n", "-v")
+        self.assertEqual(code, 0)
+        self.assertIn("[dry-run] msg 1 uid uid-1", out)
+        self.assertIn("-> miche", out)
+        self.assertEqual(self.delivered(), b"")
+
+    def test_bad_plus_base_is_an_error(self):
+        for bad in ("cwp+x@u-l.ca", "cwp", "a@b@c"):
+            self.routed([mail_to([])], extra="plus_base = %s\n" % bad)
+            self.assertEqual(self.code, 2, bad)
+            self.assertIn("plus_base must be a plain address", self.err)
+
+    def test_no_account_database_falls_back_to_default(self):
+        self.config(extra=self.PLUS)
+        self.mod.pwd = None
+        with FakePOP3([mail_to([("To", "cwp+miche@u-l.ca")])], user="me@example.org", password="pa:ss") as s:
+            self.assertEqual(self.run_pull(s)[0], 0)
+        with open(self.argsf) as f:
+            self.assertEqual(f.read().split()[-1], "chris")
+
+    def test_failed_delivery_stops_and_is_not_marked_seen(self):
+        bad = self.script("badmda", "import sys; sys.stdin.read(); sys.exit(75)\n")
+        self.config(mda=bad, extra=self.PLUS)
+        self.mod.pwd = FakePwd()
+        with FakePOP3([mail_to([("To", "cwp+miche@u-l.ca")])], user="me@example.org", password="pa:ss") as s:
+            code, _, err = self.run_pull(s)
+        self.assertNotEqual(code, 0)
+        self.assertIn("delivery failed on msg 1", err)
+
+    def test_config_option_and_seen_key(self):
+        other = os.path.join(self.tmp, "etc-mailpull.conf")
+        seen = os.path.join(self.tmp, "svc", "seen")
+        self.config(path=other, extra=self.PLUS + "seen       = %s\n" % seen)
+        self.mod.pwd = FakePwd()
+        with FakePOP3([mail_to([("To", "cwp+miche@u-l.ca")])], user="me@example.org", password="pa:ss") as s:
+            code, out, _ = self.run_pull(s, "--config", other)
+        self.assertEqual(code, 0)
+        self.assertIn("/var/mail/miche (1)", out)
+        with open(seen) as f:
+            self.assertEqual(f.read().split(), ["uid-1"])
+        self.assertFalse(os.path.exists(self.mod.SEEN))
+
+
+class PlusTagTest(unittest.TestCase):
+    def test_plus_tag(self):
+        mod = load()
+        raw = mail_to([("To", 'a@b.org, "Chris, C" <cwp+chris@u-l.ca>')])
+        self.assertEqual(mod.plus_tag(raw, "cwp@u-l.ca"), "chris")
+        self.assertIsNone(mod.plus_tag(raw, "other@u-l.ca"))
+        self.assertIsNone(mod.plus_tag(mail_to([("To", "cwp@u-l.ca")]), "cwp@u-l.ca"))
 
 
 class PasswordTest(unittest.TestCase):

@@ -16,6 +16,24 @@
 # meant for a Linux/Pi box.  If Postfix isn't installed, apt-installs it.
 # You're asked whether to run it as a service (systemd / sysv / none).
 #
+# Per-user senders (--plus-users): by default EVERY local sender is rewritten
+# to the one mailbox address, so replies to chris and to miche both land in the
+# shared inbox with nothing to tell them apart.  With --plus-users chris,miche
+# the generic map also gets one line per user, using plus-addresses of the
+# shared mailbox:
+#     chris@HOST   cwp+chris@u-l.ca
+#     miche@HOST   cwp+miche@u-l.ca
+# while root and other system/local senders keep the shared catch-all
+# (@HOST -> cwp@u-l.ca).  Postfix tries user@domain before @domain, so the
+# specific lines win.  The inbound half is getmail --imap --plus-base (see
+# configure-getmail.sh), which fetches each user's tag folder.  This needs the
+# smarthost to accept a +tag sender - check with
+# tests/live/check-plus-addressing.py before relying on it.
+#
+# The new map is test-built (postmap) in a temp dir before anything under
+# /etc/postfix is touched; after install it is looked up and `postfix check`ed
+# before Postfix is reloaded, and the previous map is put back if that fails.
+#
 # Re-runnable.
 #
 # Usage:
@@ -33,6 +51,13 @@
 #                       send through here on port 25 with no password.
 #   --no-lan            back to loopback-only (the default on a fresh setup;
 #                       a re-run without either flag keeps what's there)
+#   --plus-users LIST   comma-separated local users that get their own sender
+#                       address BASE+USER@domain (see above)
+#   --plus-base ADDR    plain shared address to tag (default: the smarthost
+#                       login, e.g. cwp@u-l.ca)
+#   --print             just print the generic map to stdout - no root, no
+#                       Linux, nothing changed (used by the tests)
+#   --fqdn NAME         use NAME instead of `hostname -f` (mainly with --print)
 #   --cron              add a 15-minute queue-runner cron entry (send-only mode)
 #   --test ADDR         after configuring, send a test message to ADDR and you
 #   -h | --help         show this header.
@@ -46,6 +71,13 @@ TEST_ADDR=""
 SERVICE=""
 SMTP_PORT=""
 LAN=""           # "" = keep / fresh default, CIDR, or "off"
+PLUS_USERS=""
+PLUS_BASE=""
+PRINT=0
+FQDN_OPT=""
+# tests point these into a sandbox
+PF_DIR="${MAIL_SETUP_POSTFIX_DIR:-/etc/postfix}"
+ALIASES="${MAIL_SETUP_ALIASES:-$ALIASES}"
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -56,6 +88,10 @@ while [ $# -gt 0 ]; do
     --rewrite-all) shift ;;   # deprecated no-op: outbound From is always rewritten now
     --lan)         LAN="${2:?}"; shift 2 ;;
     --no-lan)      LAN=off; shift ;;
+    --plus-users)  PLUS_USERS="${2:?}"; shift 2 ;;
+    --plus-base)   PLUS_BASE="${2:?}";  shift 2 ;;
+    --print)       PRINT=1; shift ;;
+    --fqdn)        FQDN_OPT="${2:?}";   shift 2 ;;
     --cron)        ADD_CRON=1; shift ;;
     --test)        TEST_ADDR="${2:?}"; shift 2 ;;
     -h|--help)     sed -n '2,/^set -euo/p' "$0" | sed 's/^# \{0,1\}//; $d'; exit 0 ;;
@@ -66,7 +102,7 @@ done
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 . "$here/../lib/common.sh"      # log/warn/die, lan_cidr
 
-[ "$(uname -s 2>/dev/null)" = Linux ] || die \
+[ "$PRINT" = 1 ] || [ "$(uname -s 2>/dev/null)" = Linux ] || die \
 "Linux only - Postfix isn't available on $(uname -s 2>/dev/null || echo 'this OS').
   The mail master role (the box that owns /var/mail) is meant for a Linux/Pi
   box; point a client at it instead with:  mail-setup.sh --role client"
@@ -103,16 +139,112 @@ _cfg_lan() {   # who may submit mail without a password: loopback, or + the LAN
     fi
 }
 
+_names() {   # sets hn / fqdn / mh
+    mh=""
+    if [ -n "$FQDN_OPT" ]; then fqdn="$FQDN_OPT"; hn="${FQDN_OPT%%.*}"
+    else
+        hn="$(hostname 2>/dev/null || echo localhost)"
+        fqdn="$(hostname -f 2>/dev/null || echo "$hn")"
+        # LAN clients qualify addresses with their own hostname (see _cfg_postfix);
+        # Postfix's own idea of this box's name gets a catch-all line too
+        mh="$($SUDO postconf -h myhostname 2>/dev/null || true)"
+    fi
+}
+
+# gen_generic -> the $PF_DIR/generic text on stdout.  Needs hn fqdn mh U
+# ADMIN_USER, and PLUS_LIST / PLUS_LOCAL / PLUS_DOM from _plus_setup.
+gen_generic() {
+    echo "# generic - written $(date) by configure-sendmail-relay.sh; re-run it, don't edit"
+    if [ -n "$PLUS_LIST" ]; then
+        echo "# per-user senders (more specific than the @host lines below, so they win)"
+        for u in $PLUS_LIST; do
+            for d in "$fqdn" "$hn" localhost; do
+                printf '%-36s %s\n' "${u}@${d}" "${PLUS_LOCAL}+${u}@${PLUS_DOM}"
+            done | awk '!seen[$1]++'
+        done
+        echo "# everything else (root, system mail) shares the one mailbox address"
+    fi
+    { printf '@%-22s %s\n' "$hn" "$U"
+      printf '@%-22s %s\n' "$fqdn" "$U"
+      [ -z "$mh" ] || printf '@%-22s %s\n' "$mh" "$U"
+      printf '@%-22s %s\n' localhost "$U"
+      printf '@%-22s %s\n' localhost.localdomain "$U"
+      printf '%-23s %s\n' root@localhost "$U"
+    } | awk '!seen[$1]++'
+    case " $PLUS_LIST " in
+      *" $ADMIN_USER "*) : ;;     # already has its own line above
+      *) printf '%-23s %s\n' "${ADMIN_USER}@localhost" "$U" ;;
+    esac
+}
+
+# validate --plus-users / --plus-base -> PLUS_LIST (space separated), PLUS_LOCAL, PLUS_DOM
+_plus_setup() {
+    PLUS_LIST=""; PLUS_LOCAL=""; PLUS_DOM=""
+    [ -n "$PLUS_USERS" ] || { [ -z "$PLUS_BASE" ] || die "--plus-base only makes sense with --plus-users"; return 0; }
+    b="${PLUS_BASE:-$U}"
+    case "$b" in
+      *+*|*[[:space:]]*|*@*@*|@*|*@) die "plus base '$b' must be a plain address like cwp@u-l.ca (use --plus-base)" ;;
+      *@*) : ;;
+      *)   die "plus base '$b' must be a plain address like cwp@u-l.ca (use --plus-base)" ;;
+    esac
+    PLUS_LOCAL="${b%@*}"; PLUS_DOM="${b#*@}"
+    for u in $(echo "$PLUS_USERS" | tr ',' ' '); do
+        case "$u" in
+          root) die "--plus-users: root's mail stays on the shared address - leave it out" ;;
+          *[!a-z0-9._-]*|-*) die "--plus-users: '$u' isn't a plain lower-case login name" ;;
+        esac
+        case " $PLUS_LIST " in *" $u "*) : ;; *) PLUS_LIST="$PLUS_LIST $u" ;; esac
+    done
+    PLUS_LIST="${PLUS_LIST# }"
+}
+
+# _prebuild_generic - build the new map in a temp dir first; a map postmap
+# rejects aborts the run before anything under $PF_DIR has been touched
+_prebuild_generic() {
+    gdir="$(mktemp -d)"; trap 'rm -rf "$gdir"' EXIT
+    gen_generic > "$gdir/generic"
+    postmap "hash:$gdir/generic" || die "postmap rejected the new generic map - nothing was changed"
+}
+
+# _install_generic - install the prebuilt map, verify it, roll back on failure
+_install_generic() {
+    g="$PF_DIR/generic"; old=""
+    if $SUDO test -e "$g"; then
+        old="$g.bak.$(date +%Y%m%d-%H%M%S)"
+        $SUDO cp -p "$g" "$old"
+        $SUDO test -e "$g.db" && $SUDO cp -p "$g.db" "$old.db"
+        log "backed up existing $g"
+    fi
+    $SUDO install -m 0644 "$gdir/generic" "$g"
+    bad=""
+    $SUDO postmap "hash:$g" || bad="postmap failed on $g"
+    if [ -z "$bad" ]; then
+        for u in $PLUS_LIST; do
+            got="$($SUDO postmap -q "${u}@${fqdn}" "hash:$g" 2>/dev/null || true)"
+            [ "$got" = "${PLUS_LOCAL}+${u}@${PLUS_DOM}" ] || bad="lookup of ${u}@${fqdn} gave '${got}'"
+        done
+    fi
+    [ -n "$bad" ] || { err="$($SUDO postfix check 2>&1)" || bad="postfix check: $err"; }
+    if [ -n "$bad" ]; then
+        if [ -n "$old" ]; then
+            $SUDO cp -p "$old" "$g"; $SUDO test -e "$old.db" && $SUDO cp -p "$old.db" "$g.db"
+        else
+            $SUDO rm -f "$g" "$g.db"
+        fi
+        die "new generic map rejected ($bad) - put the old one back"
+    fi
+}
+
 _cfg_postfix() {   # configure an already-installed Postfix as a smarthost relay
-    hn="$(hostname 2>/dev/null || echo localhost)"
-    fqdn="$(hostname -f 2>/dev/null || echo "$hn")"
+    _names
+    _prebuild_generic
     # installed but never configured (debconf "No configuration"): no main.cf,
     # and postconf -e refuses to create one
-    if [ ! -e /etc/postfix/main.cf ]; then
+    if [ ! -e $PF_DIR/main.cf ]; then
         if [ -r /usr/share/postfix/main.cf.debian ]; then
-            $SUDO cp /usr/share/postfix/main.cf.debian /etc/postfix/main.cf
+            $SUDO cp /usr/share/postfix/main.cf.debian $PF_DIR/main.cf
         else
-            $SUDO touch /etc/postfix/main.cf
+            $SUDO touch $PF_DIR/main.cf
         fi
         log "postfix: had no main.cf - started from the distro default"
     fi
@@ -124,17 +256,17 @@ _cfg_postfix() {   # configure an already-installed Postfix as a smarthost relay
     $SUDO postconf -e \
       "relayhost = [${H}]:${PORT}" \
       "smtp_sasl_auth_enable = yes" \
-      "smtp_sasl_password_maps = hash:/etc/postfix/sasl_passwd" \
+      "smtp_sasl_password_maps = hash:$PF_DIR/sasl_passwd" \
       "smtp_sasl_security_options = noanonymous" \
       "smtp_sasl_tls_security_options = noanonymous" \
       "smtp_tls_security_level = encrypt" \
       "smtp_tls_wrappermode = ${WRAP}" \
       "smtp_use_tls = yes" \
-      "smtp_generic_maps = hash:/etc/postfix/generic" \
+      "smtp_generic_maps = hash:$PF_DIR/generic" \
       "mydestination = \$myhostname, localhost.\$mydomain, localhost" \
       "myorigin = \$myhostname" \
-      "alias_maps = hash:/etc/aliases" \
-      "alias_database = hash:/etc/aliases"
+      "alias_maps = hash:$ALIASES" \
+      "alias_database = hash:$ALIASES"
     # Failure notices, all delivered locally (postmaster -> root -> you), so
     # they still arrive when the smarthost is the thing that's broken:
     #  - senders hear after 1h that a message is stuck, not after the 5-day
@@ -145,37 +277,29 @@ _cfg_postfix() {   # configure an already-installed Postfix as a smarthost relay
       "delay_warning_time = 1h" \
       "notify_classes = resource, software, bounce, delay, 2bounce"
     if [ "$reuse" = 0 ]; then
-        printf '[%s]:%s %s:%s\n' "$H" "$PORT" "$U" "$P" | $SUDO tee /etc/postfix/sasl_passwd >/dev/null
-        $SUDO chmod 600 /etc/postfix/sasl_passwd
-    elif ! $SUDO grep -q "^\[${H}\]:${PORT}[[:space:]]" /etc/postfix/sasl_passwd; then
+        printf '[%s]:%s %s:%s\n' "$H" "$PORT" "$U" "$P" | $SUDO tee $PF_DIR/sasl_passwd >/dev/null
+        $SUDO chmod 600 $PF_DIR/sasl_passwd
+    elif ! $SUDO grep -q "^\[${H}\]:${PORT}[[:space:]]" $PF_DIR/sasl_passwd; then
         # reusing the stored password, but the host/port changed: Postfix
         # looks it up by the exact "[host]:port" key, so re-key that line
         $SUDO sed -i "s|^\[[^]]*\]:[0-9]*\([[:space:]][[:space:]]*${U}:\)|[${H}]:${PORT}\1|" \
-            /etc/postfix/sasl_passwd
-        $SUDO grep -q "^\[${H}\]:${PORT}[[:space:]]" /etc/postfix/sasl_passwd \
+            $PF_DIR/sasl_passwd
+        $SUDO grep -q "^\[${H}\]:${PORT}[[:space:]]" $PF_DIR/sasl_passwd \
             && log "sasl_passwd: ${U} now keyed to [${H}]:${PORT}" \
             || warn "sasl_passwd has no line for ${U} - re-run with the password (it'll ask)"
     fi
-    $SUDO postmap /etc/postfix/sasl_passwd
+    $SUDO postmap $PF_DIR/sasl_passwd
     # The pullers (pop-pull, getmail via sasl-pass) run as you and read the
     # mailbox password from this same file - so it's root:<your group> 0640,
     # not root-only.  On Debian-style systems that group is just you.
     grp="$(id -gn "$ADMIN_USER" 2>/dev/null || echo root)"
-    $SUDO chown "root:$grp" /etc/postfix/sasl_passwd /etc/postfix/sasl_passwd.db
-    $SUDO chmod 640 /etc/postfix/sasl_passwd /etc/postfix/sasl_passwd.db
+    $SUDO chown "root:$grp" $PF_DIR/sasl_passwd $PF_DIR/sasl_passwd.db
+    $SUDO chmod 640 $PF_DIR/sasl_passwd $PF_DIR/sasl_passwd.db
     log "sasl_passwd: root:$grp 0640 (readable by $ADMIN_USER's pullers)"
-    # one-way rewrite: every locally originated address -> the real mailbox,
-    # applied only on outbound (smtp_generic_maps)
-    { printf '@%-22s %s\n' "$hn" "$U"
-      [ "$fqdn" = "$hn" ] || printf '@%-22s %s\n' "$fqdn" "$U"
-    } | $SUDO tee /etc/postfix/generic >/dev/null
-    $SUDO tee -a /etc/postfix/generic >/dev/null <<EOF
-@localhost              ${U}
-@localhost.localdomain  ${U}
-root@localhost          ${U}
-${ADMIN_USER}@localhost ${U}
-EOF
-    $SUDO postmap /etc/postfix/generic
+    # one-way rewrite: every locally originated address -> the real mailbox
+    # (or, per user, its plus-address), applied only on outbound
+    # (smtp_generic_maps).  Tested + verified, rolled back on failure.
+    _install_generic
     # LAN clients qualify addresses with their own hostname: "chris" sent
     # from the laptop arrives as chris@laptop - both as recipient (relayed
     # out, bounced) and as sender (the smarthost's sender verify rejects it).
@@ -184,27 +308,28 @@ EOF
     # delivered here, and on the way out the generic map turns it into the
     # real mailbox.  Headers are rewritten for LAN clients too (by default
     # only for local submissions).
-    mh="$($SUDO postconf -h myhostname)"
-    $SUDO grep -q "^@${mh}[[:space:]]" /etc/postfix/generic || {
-        printf '@%-22s %s\n' "$mh" "$U" | $SUDO tee -a /etc/postfix/generic >/dev/null
-        $SUDO postmap /etc/postfix/generic; }
-    printf '/^([^@]+)@[^.@]+$/    ${1}@%s\n' "$mh" | $SUDO tee /etc/postfix/lan-canonical >/dev/null
+    printf '/^([^@]+)@[^.@]+$/    ${1}@%s\n' "$mh" | $SUDO tee $PF_DIR/lan-canonical >/dev/null
     $SUDO postconf -e \
-      "canonical_maps = regexp:/etc/postfix/lan-canonical" \
+      "canonical_maps = regexp:$PF_DIR/lan-canonical" \
       "local_header_rewrite_clients = permit_inet_interfaces, permit_mynetworks"
-    $SUDO grep -qs '^root:' /etc/aliases \
-      || printf 'root: %s\n' "$ADMIN_USER" | $SUDO tee -a /etc/aliases >/dev/null
-    $SUDO grep -qs '^postmaster:' /etc/aliases \
-      || printf 'postmaster: root\n' | $SUDO tee -a /etc/aliases >/dev/null
+    $SUDO grep -qs '^root:' $ALIASES \
+      || printf 'root: %s\n' "$ADMIN_USER" | $SUDO tee -a $ALIASES >/dev/null
+    $SUDO grep -qs '^postmaster:' $ALIASES \
+      || printf 'postmaster: root\n' | $SUDO tee -a $ALIASES >/dev/null
     $SUDO newaliases 2>/dev/null || true
     _cfg_lan
     log "postfix: relayhost=[${H}]:${PORT}, SASL+TLS, generic rewrite -> ${U}"
+    [ -z "$PLUS_LIST" ] || log "  per-user senders: $(for u in $PLUS_LIST; do printf '%s ' "${PLUS_LOCAL}+${u}@${PLUS_DOM}"; done)"
     log "postfix: failure notices -> postmaster -> root -> ${ADMIN_USER} (stuck > 1h, bounces)"
     _enable_service postfix
+    # pick up main.cf / map changes if it was already running
+    if $SUDO postfix status >/dev/null 2>&1; then $SUDO postfix reload >/dev/null 2>&1 || true; fi
 }
 
 SUDO=""
-if [ "$(id -u)" != 0 ]; then
+if [ "${MAIL_SETUP_SUDO+set}" = set ]; then
+    SUDO="$MAIL_SETUP_SUDO"      # tests set it empty so nothing ever escalates
+elif [ "$PRINT" = 0 ] && [ "$(id -u)" != 0 ]; then
     command -v sudo >/dev/null 2>&1 || die "run as root (no sudo found)"
     SUDO="sudo"
 fi
@@ -224,7 +349,7 @@ if [ -z "$H" ] && command -v postconf >/dev/null 2>&1; then
         H="${cur#[}"; H="${H%%]*}"
         case "$cur" in *]:*) PORT="${cur##*]:}" ;; esac
         U="$($SUDO awk -v k="$cur" '$1==k {split($2,a,":"); print a[1]; exit}' \
-               /etc/postfix/sasl_passwd 2>/dev/null || true)"
+               $PF_DIR/sasl_passwd 2>/dev/null || true)"
         REUSED=1
         log "no relay file - keeping the current smarthost $cur${U:+ ($U)}"
     fi
@@ -237,6 +362,9 @@ fi
 # 587/25 = plain connect, then STARTTLS.  Some networks block one of them -
 # check with:  timeout 5 bash -c 'exec 3<>/dev/tcp/HOST/PORT' && echo open
 WRAP=no; [ "$PORT" = 465 ] && WRAP=yes
+
+_plus_setup
+if [ "$PRINT" = 1 ]; then _names; gen_generic; exit 0; fi
 
 LAN_NET=""
 case "$LAN" in
@@ -255,7 +383,7 @@ if ! command -v postfix >/dev/null 2>&1; then
 fi
 log "MTA       : postfix"
 
-PW_STORE=/etc/postfix/sasl_passwd
+PW_STORE=$PF_DIR/sasl_passwd
 reuse=0
 if [ -z "$P" ] || [ "$P" = SECRET ]; then
     if [ -n "${SMARTHOST_PASS_ENV:-}" ]; then P="$SMARTHOST_PASS_ENV"
@@ -292,6 +420,7 @@ echo
 log "smarthost : ${H}:${PORT}  ($( [ "$WRAP" = yes ] && echo 'TLS from connect' || echo STARTTLS ), AUTH)"
 log "auth user : ${U}"
 log "rewrite   : local senders -> ${U}   (on outbound only)"
+[ -z "$PLUS_LIST" ] || log "per-user   : ${PLUS_LIST// /, } -> ${PLUS_LOCAL}+USER@${PLUS_DOM}"
 log "service   : ${svc}"
 log "root mail : ${ADMIN_USER}"
 log "LAN       : $( [ -n "$LAN_NET" ] && echo "accept from $LAN_NET" || { [ "$LAN" = off ] && echo 'loopback-only' || echo 'unchanged (loopback-only on a fresh setup)'; } )"

@@ -16,6 +16,16 @@
 # Also (re)writes the mail-pull wrapper to run pop-pull - see lib/pull.sh.
 # (configure-getmail.sh is the alternative: same job, done by getmail.)
 #
+# Plus-address routing (--plus-base): one shared public mailbox, several local
+# users.  With --plus-base cwp@u-l.ca, a message addressed to cwp+chris@u-l.ca
+# (first match in Delivered-To / X-Original-To / To / Cc) is delivered to local
+# user "chris" if the system has that account, else to --local-user.  Run the
+# puller as root or a service account so it can deliver for everyone, e.g.
+#   sudo ./configure-mail-pull.sh --plus-base cwp@u-l.ca --local-user chris
+# (root reads /etc/postfix/sasl_passwd directly; a service account needs
+# --pwfile to a copy it can read).  Pair it with
+# configure-sendmail-relay.sh --plus-users chris,miche for the outbound side.
+#
 # On-demand by default: run 'mail-pull' (or 'pop-pull') when you want mail.
 # --timer N installs a systemd --user timer that pulls every N minutes.
 #
@@ -28,6 +38,11 @@
 #   --pwfile PATH       override the password file (default: Postfix's own
 #                       /etc/postfix/sasl_passwd, format "[host]:port user:pass").  0600.
 #   --local-user NAME   deliver into this account            (default: you)
+#   --plus-base ADDR    route cwp+TAG@domain mail to local user TAG (ADDR is
+#                       the plain shared address, normally the POP login)
+#   --config FILE       write/read the config here instead of
+#                       ~/.config/mailpull.conf (e.g. /etc/mailpull.conf);
+#                       mail-pull then passes it to pop-pull
 #   --delete            delete messages from the server after delivery
 #   --no-verify         skip TLS certificate verification
 #   --timer N           systemd --user timer: pull every N minutes
@@ -48,6 +63,8 @@ VERIFY=1
 DO_TEST=0
 PWFILE_OPT=""
 TIMER_MIN=0
+PLUS_BASE=""
+CFG="$HOME/.config/mailpull.conf"; CFG_GIVEN=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -55,6 +72,8 @@ while [ $# -gt 0 ]; do
     --pop-user)   POP_USER="${2:?}";   shift 2 ;;
     --pwfile)     PWFILE_OPT="${2:?}"; shift 2 ;;
     --local-user) LOCAL_USER="${2:?}"; shift 2 ;;
+    --plus-base)  PLUS_BASE="${2:?}"; shift 2 ;;
+    --config)     CFG="${2:?}"; CFG_GIVEN=1; shift 2 ;;
     --delete)     KEEP=0; shift ;;
     --no-verify)  VERIFY=0; shift ;;
     --test)       DO_TEST=1; shift ;;
@@ -68,6 +87,14 @@ case "$OS" in
   Linux|CYGWIN*|MSYS*|MINGW*|Darwin|*BSD|DragonFly|SunOS) : ;;
   *) warn "untested OS - continuing anyway" ;;
 esac
+
+if [ -n "$PLUS_BASE" ]; then
+  case "$PLUS_BASE" in
+    *+*|*[[:space:]]*|*@*@*|@*|*@) die "--plus-base must be a plain address like cwp@u-l.ca, not '$PLUS_BASE'" ;;
+    *@*) : ;;
+    *)   die "--plus-base must be a plain address like cwp@u-l.ca, not '$PLUS_BASE'" ;;
+  esac
+fi
 
 PY="$(find_python || true)"
 [ -n "$PY" ] && "$PY" -c 'import ssl,poplib' 2>/dev/null \
@@ -109,13 +136,13 @@ done
 log "python      : $PY"
 log "remote      : ${POP_USER} @ ${IN_SERVER}  POP3S:995"
 log "deliver to  : ${LOCAL_USER}  ->  /var/mail/${LOCAL_USER}   (via ${MDA})"
+[ -z "$PLUS_BASE" ] || log "plus routing : ${PLUS_BASE%@*}+TAG@${PLUS_BASE#*@} -> local user TAG (else ${LOCAL_USER})"
 log "server copy : $( [ "$KEEP" = 1 ] && echo 'KEEP + remember seen UIDs' || echo 'DELETE after delivery' )"
 log "TLS verify  : $( [ "$VERIFY" = 1 ] && echo "yes (${CA:-system})" || echo 'NO' )"
 
 # --------------------------------------------------------------------------
 # ~/.config/mailpull.conf
 # --------------------------------------------------------------------------
-CFG="$HOME/.config/mailpull.conf"
 install -d -m 0755 "$(dirname "$CFG")"
 backup "$CFG"
 cat > "$CFG" <<EOF
@@ -128,6 +155,7 @@ local_user = ${LOCAL_USER}
 keep       = $( [ "$KEEP" = 1 ] && echo true || echo false )
 verify     = $( [ "$VERIFY" = 1 ] && echo true || echo false )
 cafile     = ${CA}
+plus_base  = ${PLUS_BASE}
 mda        = ${MDA}
 pwfile     = ${PWFILE}
 EOF
@@ -145,7 +173,11 @@ log "installed $POP"
 # keep the earlier name working too
 ln -sf pop-pull "$BIN/pull-mail" 2>/dev/null && log "linked $BIN/pull-mail -> pop-pull" || true
 
-write_mail_pull "$BIN" "exec \"$POP\" \"\$@\""
+if [ "$CFG_GIVEN" = 1 ]; then
+  write_mail_pull "$BIN" "exec \"$POP\" --config \"$CFG\" \"\$@\""
+else
+  write_mail_pull "$BIN" "exec \"$POP\" \"\$@\""
+fi
 
 case ":$PATH:" in
   *":$BIN:"*) : ;;
@@ -161,7 +193,7 @@ if [ "$DO_TEST" = 1 ]; then
   echo
   log "running one fetch ..."
   before="$(wc -c < "/var/mail/${LOCAL_USER}" 2>/dev/null || echo 0)"
-  "$POP" -v || true
+  if [ "$CFG_GIVEN" = 1 ]; then "$POP" --config "$CFG" -v || true; else "$POP" -v || true; fi
   after="$(wc -c < "/var/mail/${LOCAL_USER}" 2>/dev/null || echo 0)"
   log "mailbox /var/mail/${LOCAL_USER}: ${before} -> ${after} bytes"
   log "read it with:  mail"

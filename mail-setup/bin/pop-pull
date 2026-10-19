@@ -1,17 +1,65 @@
 #!/usr/bin/env python3
 """pop-pull - on-demand POP3S fetch into the local mailbox via sendmail.
 
-Config: ~/.config/mailpull.conf   Password: read live from Postfix's own
-/etc/postfix/sasl_passwd (format "[host]:port user:pass"), or pwfile= if set.
-Seen-UID cache (keep mode): ~/.local/state/mailpull.seen
+Config: ~/.config/mailpull.conf (or --config FILE / $MAILPULL_CONF)
+Password: read live from Postfix's own /etc/postfix/sasl_passwd (format
+"[host]:port user:pass"), or pwfile= if set.
+Seen-UID cache (keep mode): ~/.local/state/mailpull.seen (or seen= in the config)
+
+Plus-address routing (optional): with  plus_base = cwp@u-l.ca  in the config,
+one shared mailbox can serve several local users.  For each message the first
+address in Delivered-To / X-Original-To / To / Cc that looks like
+cwp+TAG@u-l.ca is taken; the message goes to local user TAG if the system
+knows that account (getpwnam, uid >= plus_min_uid, default 1000), else to
+local_user.  Run it as root or a service account to serve everyone.
 """
-import os, sys, ssl, poplib, argparse, configparser, subprocess
+import os, re, sys, ssl, poplib, argparse, configparser, subprocess
+import email.parser, email.utils
+try:
+    import pwd
+except ImportError:                  # no account database (plain Windows)
+    pwd = None
 
 CFG  = os.path.expanduser("~/.config/mailpull.conf")
 SEEN = os.path.expanduser("~/.local/state/mailpull.seen")
 
+# headers searched for the tagged address, most trustworthy first
+PLUS_HEADERS = ("Delivered-To", "X-Original-To", "To", "Cc")
+# a tag is untrusted mail-header text: only login-name-looking tags get through
+TAG_RE = re.compile(r"^[a-z0-9_][a-z0-9._-]*$")
+
 def die(m, code=2):
     print("pop-pull: " + m, file=sys.stderr); sys.exit(code)
+
+def plus_tag(raw, base, sep="+"):
+    """TAG of the first cwp+TAG@domain address in RAW's headers, else None."""
+    want_local, _, want_dom = base.lower().rpartition("@")
+    prefix = want_local + sep
+    msg = email.parser.BytesHeaderParser().parsebytes(raw)
+    for h in PLUS_HEADERS:
+        for val in msg.get_all(h, []):
+            for _, addr in email.utils.getaddresses([str(val)]):
+                local, _, dom = addr.lower().rpartition("@")
+                if dom == want_dom and local.startswith(prefix) and len(local) > len(prefix):
+                    return local[len(prefix):]
+    return None
+
+def local_account(name, min_uid):
+    if pwd is None:
+        return False
+    try:
+        return pwd.getpwnam(name).pw_uid >= min_uid
+    except KeyError:
+        return False
+
+def route(raw, default, base, sep="+", min_uid=1000):
+    """local user to deliver RAW to: the tagged account if there is one."""
+    if not base:
+        return default
+    tag = plus_tag(raw, base, sep)
+    if tag and TAG_RE.match(tag) and local_account(tag, min_uid):
+        return tag
+    return default
 
 def password(pwfile, login):
     # Postfix sasl_passwd lines look like:  [host]:port  user:pass
@@ -35,15 +83,23 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("-v", "--verbose", action="store_true")
     ap.add_argument("-n", "--dry-run", action="store_true")
+    ap.add_argument("-c", "--config", default=os.environ.get("MAILPULL_CONF") or CFG,
+                    help="config file (default %s)" % CFG)
     a = ap.parse_args()
 
     c = configparser.ConfigParser()
-    if not c.read(CFG):
-        die("missing config %s (run mail-setup.sh or scripts/configure-mail-pull.sh)" % CFG)
+    if not c.read(a.config):
+        die("missing config %s (run mail-setup.sh or scripts/configure-mail-pull.sh)" % a.config)
     s = c["mailpull"]
     server, login = s["server"], s["user"]
     port = s.getint("port", 995)
     local_user = s["local_user"]
+    plus_base = s.get("plus_base", "").strip()
+    plus_sep = s.get("plus_sep", "+").strip() or "+"
+    plus_min_uid = s.getint("plus_min_uid", 1000)
+    seen_file = os.path.expanduser(s.get("seen", "").strip()) or SEEN
+    if plus_base and (plus_base.count("@") != 1 or plus_sep in plus_base.split("@")[0]):
+        die("plus_base must be a plain address like cwp@u-l.ca, not %r" % plus_base)
     keep = s.getboolean("keep", True)
     verify = s.getboolean("verify", True)
     cafile = s.get("cafile", "").strip()
@@ -58,8 +114,8 @@ def main():
         ctx.verify_mode = ssl.CERT_NONE
 
     seen = set()
-    if keep and os.path.exists(SEEN):
-        with open(SEEN) as f:
+    if keep and os.path.exists(seen_file):
+        with open(seen_file) as f:
             seen = set(f.read().split())
 
     try:
@@ -73,30 +129,33 @@ def main():
         for line in M.uidl()[1]:
             i, u = line.decode().split(None, 1)
             uidl[int(i)] = u
-        got = 0; new = set(seen)
+        got = 0; new = set(seen); per_user = {}
         for i in range(1, n + 1):
             u = uidl.get(i, str(i))
             if keep and u in seen:
                 continue
             raw = b"\r\n".join(M.retr(i)[1]) + b"\r\n"
+            to = route(raw, local_user, plus_base, plus_sep, plus_min_uid)
+            dest = " -> " + to if plus_base else ""
             if a.dry_run:
                 if a.verbose:
-                    print("[dry-run] msg %d uid %s (%d bytes)" % (i, u, len(raw)))
+                    print("[dry-run] msg %d uid %s (%d bytes)%s" % (i, u, len(raw), dest))
             else:
-                r = subprocess.run([mda, "-oi", "--", local_user], input=raw)
+                r = subprocess.run([mda, "-oi", "--", to], input=raw)
                 if r.returncode != 0:
                     print("pop-pull: delivery failed on msg %d" % i, file=sys.stderr)
                     break
                 if a.verbose:
-                    print("delivered msg %d uid %s (%d bytes)" % (i, u, len(raw)))
+                    print("delivered msg %d uid %s (%d bytes)%s" % (i, u, len(raw), dest))
+            per_user[to] = per_user.get(to, 0) + 1
             got += 1
             if keep:
                 new.add(u)
             elif not a.dry_run:
                 M.dele(i)
         if keep and not a.dry_run:
-            os.makedirs(os.path.dirname(SEEN), exist_ok=True)
-            with open(SEEN, "w") as f:
+            os.makedirs(os.path.dirname(seen_file), exist_ok=True)
+            with open(seen_file, "w") as f:
                 f.write("\n".join(sorted(new)) + "\n")
         M.quit()
     except Exception as e:
@@ -105,8 +164,12 @@ def main():
         die(str(e))
 
     if got:
-        print("pop-pull: %d new message(s) %s /var/mail/%s"
-              % (got, "would go to" if a.dry_run else "->", local_user))
+        if plus_base:
+            where = ", ".join("/var/mail/%s (%d)" % kv for kv in sorted(per_user.items()))
+        else:
+            where = "/var/mail/" + local_user
+        print("pop-pull: %d new message(s) %s %s"
+              % (got, "would go to" if a.dry_run else "->", where))
         sys.exit(0)
     print("pop-pull: no new mail")
     sys.exit(1)

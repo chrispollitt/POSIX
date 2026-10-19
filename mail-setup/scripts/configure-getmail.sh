@@ -16,6 +16,18 @@
 #     seen in its oldmail-* file); --delete removes it after delivery
 #   * (re)writes the mail-pull wrapper to run getmail - see lib/pull.sh
 #
+# Plus-address routing: with  --plus-base cwp@u-l.ca --plus-users chris,miche
+# the [destination] becomes a getmail MultiGuesser: a message whose
+# Delivered-To / Envelope-To / To / Cc (getmail checks them in that order, the
+# first header that has addresses wins) names cwp+chris@u-l.ca goes to chris,
+# cwp+miche@... to miche, anything else to --local-user.  (MultiSorter would
+# need a multidrop retriever and an envelope-recipient header; MultiGuesser
+# works with the plain retriever.)  Unlike pop-pull, a message addressed to
+# several tags is delivered to each of them.  Run it as root or a service
+# account so it can deliver for every user, e.g.
+#   sudo ./configure-getmail.sh --plus-base cwp@u-l.ca --plus-users chris,miche \
+#        --local-user chris
+#
 # Usage:
 #   ./configure-getmail.sh --relay-file /path/to/smtp-relay.txt [options]
 #
@@ -25,8 +37,10 @@
 #   --imap              IMAPS:993 (INBOX) instead of POP3S:995
 #   --pwfile PATH       password file (default /etc/postfix/sasl_passwd)
 #   --local-user NAME   deliver into this account     (default: you)
+#   --plus-base ADDR    plain shared address (cwp@u-l.ca) for tag routing
+#   --plus-users LIST   comma-separated local users that get cwp+USER@... mail
 #   --delete            delete messages from the server after delivery
-#   --timer N           systemd --user timer: pull every N minutes
+#   --timer N          systemd --user timer: pull every N minutes
 #   --test              run one fetch right after configuring
 #   -y, --yes           install getmail without asking
 #   -h | --help         show this header
@@ -44,6 +58,8 @@ PWFILE="/etc/postfix/sasl_passwd"
 LOCAL_USER="$(id -un)"
 KEEP=1
 TIMER_MIN=0
+PLUS_BASE=""
+PLUS_USERS=""
 DO_TEST=0
 ASSUME="${ASSUME:-}"
 
@@ -54,6 +70,8 @@ while [ $# -gt 0 ]; do
     --imap)       PROTO=imap; shift ;;
     --pwfile)     PWFILE="${2:?}"; shift 2 ;;
     --local-user) LOCAL_USER="${2:?}"; shift 2 ;;
+    --plus-base)  PLUS_BASE="${2:?}"; shift 2 ;;
+    --plus-users) PLUS_USERS="${2:?}"; shift 2 ;;
     --delete)     KEEP=0; shift ;;
     --timer)      TIMER_MIN="${2:?}"; shift 2 ;;
     --test)       DO_TEST=1; shift ;;
@@ -62,6 +80,22 @@ while [ $# -gt 0 ]; do
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
+
+PLUS_LIST=""
+if [ -n "$PLUS_BASE$PLUS_USERS" ]; then
+  [ -n "$PLUS_BASE" ] && [ -n "$PLUS_USERS" ] || die "--plus-base and --plus-users go together"
+  case "$PLUS_BASE" in
+    *+*|*[[:space:]]*|*@*@*|@*|*@) die "--plus-base must be a plain address like cwp@u-l.ca, not '$PLUS_BASE'" ;;
+    *@*) : ;;
+    *)   die "--plus-base must be a plain address like cwp@u-l.ca, not '$PLUS_BASE'" ;;
+  esac
+  for u in $(echo "$PLUS_USERS" | tr ',' ' '); do
+    case "$u" in
+      *[!a-z0-9._-]*|-*) die "--plus-users: '$u' isn't a plain lower-case login name" ;;
+    esac
+    PLUS_LIST="$PLUS_LIST $u"
+  done
+fi
 
 PY="$(find_python || true)"
 [ -n "$PY" ] || die "need a python3 (>= 3.6) with ssl"
@@ -128,10 +162,42 @@ STATE="$HOME/.local/state"; install -d -m 0755 "$STATE"
 
 log "remote      : ${REMOTE_USER} @ ${IN_SERVER}  ${PROTO^^}S:${PORT}"
 log "deliver to  : ${LOCAL_USER}  ->  /var/mail/${LOCAL_USER}   (via ${MDA})"
+[ -z "$PLUS_LIST" ] || log "plus routing: ${PLUS_BASE%@*}+{${PLUS_LIST# }}@${PLUS_BASE#*@} -> that user (else ${LOCAL_USER})"
 log "server copy : $( [ "$KEEP" = 1 ] && echo 'KEEP (getmail remembers seen mail)' || echo 'DELETE after delivery' )"
 
+# regex-escape a literal for a getmail `locals` pattern
+re_esc() { printf '%s' "$1" | sed 's/[][+*?(){}|^$.\\]/\\&/g'; }
+
+# the [destination] section(s): one MDA, or a MultiGuesser fanning out by tag
+destinations() {
+  if [ -z "$PLUS_LIST" ]; then
+    cat <<EOF
+[destination]
+type = MDA_external
+path = ${MDA}
+arguments = ("-oi", "--", "${LOCAL_USER}")
+EOF
+    return
+  fi
+  pl="$(re_esc "${PLUS_BASE%@*}")"; pd="$(re_esc "${PLUS_BASE#*@}")"
+  echo "# plus routing: ${PLUS_BASE%@*}+USER@${PLUS_BASE#*@} -> USER, anything else -> ${LOCAL_USER}"
+  echo "[destination]"
+  echo "type = MultiGuesser"
+  echo "default = [dest-default]"
+  echo "locals = ("
+  for u in $PLUS_LIST; do
+    printf '    (r"(?i)^%s\\+%s@%s$", "[dest-%s]"),\n' "$pl" "$(re_esc "$u")" "$pd" "$u"
+  done
+  echo "  )"
+  for u in default $PLUS_LIST; do
+    to="$u"; [ "$u" = default ] && to="$LOCAL_USER"
+    printf '\n[dest-%s]\ntype = MDA_external\npath = %s\narguments = ("-oi", "--", "%s")\n' "$u" "$MDA" "$to"
+  done
+}
+
 backup "$RC"
-cat > "$RC" <<EOF
+{
+cat <<EOF
 # getmailrc - generated $(date) by configure-getmail.sh
 # No password here: password_command reads it from ${PWFILE}.
 [retriever]
@@ -142,10 +208,9 @@ username = ${REMOTE_USER}
 password_command = ("${SASL}", "--file", "${PWFILE}", "${REMOTE_USER}")
 $( [ "$PROTO" = imap ] && echo 'mailboxes = ("INBOX",)' )
 
-[destination]
-type = MDA_external
-path = ${MDA}
-arguments = ("-oi", "--", "${LOCAL_USER}")
+EOF
+destinations
+cat <<EOF
 
 [options]
 read_all = false
@@ -153,6 +218,7 @@ delete = $( [ "$KEEP" = 1 ] && echo false || echo true )
 verbose = 1
 message_log = ${STATE}/getmail.log
 EOF
+} > "$RC"
 chmod 600 "$RC"
 log "wrote $RC"
 
