@@ -47,6 +47,9 @@ EOF
 cat > "$FAKE/getmail" <<'EOF'
 #!/bin/sh
 echo "fake-getmail $*"
+# FAKE_GETMAIL_FAIL=<text>: fail the runs whose arguments contain it
+[ -n "${FAKE_GETMAIL_FAIL:-}" ] && case "$*" in *"$FAKE_GETMAIL_FAIL"*) exit 1 ;; esac
+exit 0
 EOF
 cat > "$FAKE/mail" <<'EOF'
 #!/bin/sh
@@ -156,6 +159,53 @@ check "--plus-users alone rejected" '[ $? != 0 ] && has "$OUT" "go together"'
 check "bad user name rejected" '[ $? != 0 ] && has "$OUT" "plain lower-case login name"'
 "$S/configure-getmail.sh" --pwfile "$PW" --plus-base 'cwp+x@u-l.ca' --plus-users chris > "$OUT" 2>&1
 check "tagged base rejected" '[ $? != 0 ] && has "$OUT" "must be a plain address"'
+"$S/configure-getmail.sh" --pwfile "$PW" --plus-base cwp@u-l.ca --plus-users chris > "$OUT" 2>&1
+check "POP3 + plus warns that a TAG folder host needs --imap" 'has "$OUT" "needs --imap"'
+check "POP3 + plus: one rc, no folder rcs" '! [ -e "$HOME/.config/getmail/plus-chris" ]'
+
+# --------------------------------------------------------------------------
+t "plus routing: configure-getmail --imap (cPanel-style tag folders)"
+GM="$HOME/.config/getmail"
+"$S/configure-getmail.sh" --imap --pwfile "$PW" --relay-file "$RELAY" --plus-base cwp@u-l.ca --plus-users chris,miche --local-user zed > "$OUT" 2>&1
+check "exits 0" '[ $? = 0 ]'
+check "announces the folder -> user map" 'has "$OUT" "INBOX.chris -> chris;  INBOX.miche -> miche;  INBOX -> zed"'
+check "INBOX rc: plain MDA to --local-user, no header guessing" 'has "$RC" "mailboxes = (\"INBOX\",)" && has "$RC" "arguments = (\"-oi\", \"--\", \"zed\")" && ! has "$RC" "MultiGuesser"'
+for u in chris miche; do
+  check "folder rc for $u: IMAP, INBOX.$u, delivers to $u" \
+    'has "$GM/plus-$u/getmailrc" "type = SimpleIMAPSSLRetriever" && has "$GM/plus-$u/getmailrc" "mailboxes = (\"INBOX.$u\",)" && has "$GM/plus-$u/getmailrc" "arguments = (\"-oi\", \"--\", \"$u\")"'
+  check "folder rc for $u: same server/login, password via sasl-pass, KEEP" \
+    'has "$GM/plus-$u/getmailrc" "server = in.example.org" && has "$GM/plus-$u/getmailrc" "username = me@example.org" && has "$GM/plus-$u/getmailrc" "password_command = (\"$HOME/bin/sasl-pass\"" && has "$GM/plus-$u/getmailrc" "delete = false" && ! has "$GM/plus-$u/getmailrc" "p4ss"'
+  check_mode "plus-$u/getmailrc is mode 600" "$GM/plus-$u/getmailrc"
+done
+check "each folder has its own getmaildir (separate oldmail state)" '[ -d "$GM/plus-chris" ] && [ -d "$GM/plus-miche" ]'
+out=$("$HOME/bin/mail-pull" -v 2>&1)
+check "mail-pull runs getmail for INBOX and each folder" \
+  'grep -q "fake-getmail --getmaildir $GM --rcfile getmailrc -v" <<<"$out" && grep -q "fake-getmail --getmaildir $GM/plus-chris --rcfile getmailrc -v" <<<"$out" && grep -q "fake-getmail --getmaildir $GM/plus-miche --rcfile getmailrc -v" <<<"$out"'
+"$HOME/bin/mail-pull" > /dev/null 2>&1
+check "all runs fine -> exit 0" '[ $? = 0 ]'
+out=$(FAKE_GETMAIL_FAIL=plus-miche "$HOME/bin/mail-pull" 2>&1); rc=$?
+check "a missing tag folder is reported but not fatal" '[ $rc = 0 ] && grep -q "folder INBOX.miche: getmail failed" <<<"$out"'
+out=$(FAKE_GETMAIL_FAIL="getmail --rcfile" "$HOME/bin/mail-pull" 2>&1); rc=$?
+check "an INBOX failure still fails the run (and the folders still run)" '[ $rc = 1 ] && grep -q "plus-chris" <<<"$out"'
+"$HOME/bin/mail-pull" -n > /dev/null 2>&1
+check "-n still refused" '[ $? = 2 ]'
+"$S/configure-getmail.sh" --imap --pwfile "$PW" --relay-file "$RELAY" --plus-base cwp@u-l.ca --plus-users chris --plus-prefix 'INBOX/' > "$OUT" 2>&1
+check "--plus-prefix: INBOX/chris" 'has "$GM/plus-chris/getmailrc" "mailboxes = (\"INBOX/chris\",)"'
+"$S/configure-getmail.sh" --imap --pwfile "$PW" --relay-file "$RELAY" --plus-base cwp@u-l.ca --plus-users chris --plus-prefix '' > "$OUT" 2>&1
+check "--plus-prefix '' : folder chris" 'has "$GM/plus-chris/getmailrc" "mailboxes = (\"chris\",)"'
+"$S/configure-getmail.sh" --imap --pwfile "$PW" --relay-file "$RELAY" --plus-base cwp@u-l.ca --plus-users chris --plus-headers --local-user zed > "$OUT" 2>&1
+check "--plus-headers: INBOX rc becomes a MultiGuesser, folder rc stays plain" \
+  'has "$RC" "type = MultiGuesser" && has "$RC" "mailboxes = (\"INBOX\",)" && ! has "$GM/plus-chris/getmailrc" "MultiGuesser"'
+check "... and routes by header like the POP3 mode" '[ "$(route cwp+chris@u-l.ca)" = chris ] && [ "$(route cwp@u-l.ca)" = zed ]'
+"$S/configure-getmail.sh" --imap --pwfile "$PW" --relay-file "$RELAY" > "$OUT" 2>&1
+check "re-run without --plus-*: single rc, wrapper execs getmail once" \
+  '! has "$HOME/bin/mail-pull" "plus-chris" && has "$HOME/bin/mail-pull" "exec " && ! has "$RC" "MultiGuesser"'
+"$S/configure-getmail.sh" --imap --pwfile "$PW" --plus-base cwp@u-l.ca --plus-users chris --plus-prefix "IN'BOX." > "$OUT" 2>&1
+check "odd --plus-prefix rejected" '[ $? != 0 ] && has "$OUT" "--plus-prefix"'
+"$S/configure-getmail.sh" --imap --pwfile "$PW" --plus-headers > "$OUT" 2>&1
+check "--plus-headers needs the plus options" '[ $? != 0 ] && has "$OUT" "--plus-headers needs"'
+"$S/configure-mail-pull.sh" --pwfile "$PW" --plus-base me@example.org > "$OUT" 2>&1
+check "pop-pull --plus-base warns about cPanel tag folders" 'has "$OUT" "pop-pull only sees the POP inbox" && has "$OUT" "configure-getmail.sh --imap"'
 "$S/configure-mail-pull.sh" --pwfile "$PW" > /dev/null 2>&1      # leave pop-pull as the puller
 
 # --------------------------------------------------------------------------

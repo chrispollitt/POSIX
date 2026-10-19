@@ -16,17 +16,37 @@
 #     seen in its oldmail-* file); --delete removes it after delivery
 #   * (re)writes the mail-pull wrapper to run getmail - see lib/pull.sh
 #
-# Plus-address routing: with  --plus-base cwp@u-l.ca --plus-users chris,miche
-# the [destination] becomes a getmail MultiGuesser: a message whose
-# Delivered-To / Envelope-To / To / Cc (getmail checks them in that order, the
-# first header that has addresses wins) names cwp+chris@u-l.ca goes to chris,
-# cwp+miche@... to miche, anything else to --local-user.  (MultiSorter would
-# need a multidrop retriever and an envelope-recipient header; MultiGuesser
-# works with the plain retriever.)  Unlike pop-pull, a message addressed to
-# several tags is delivered to each of them.  Run it as root or a service
-# account so it can deliver for every user, e.g.
-#   sudo ./configure-getmail.sh --plus-base cwp@u-l.ca --plus-users chris,miche \
-#        --local-user chris
+# Plus-address routing (one shared mailbox cwp@u-l.ca for chris, miche, ...):
+#
+#   --imap  (use this on cPanel-style hosts)  cPanel/Dovecot files mail for
+#     cwp+chris@u-l.ca in an IMAP FOLDER named "chris" (INBOX.chris to IMAP
+#     clients; created on first delivery), NOT in the inbox, so POP3 never sees
+#     it.  With --plus-base cwp@u-l.ca --plus-users chris,miche this script
+#     writes one getmailrc per folder, each in its own getmaildir
+#     (<getmaildir>/plus-chris/, ...) so their seen-mail state stays apart:
+#         INBOX        -> --local-user
+#         INBOX.chris  -> chris        INBOX.miche -> miche
+#     The folder name is the routing key; no header parsing.  The mail-pull
+#     wrapper runs getmail once per rc; a missing tag folder (no tagged mail
+#     yet) is reported but doesn't fail the run.  --plus-prefix sets the IMAP
+#     prefix+separator (default "INBOX."; "INBOX/" or "" on other servers) -
+#     tests/live/check-plus-addressing.py shows what your host uses.  The tag's
+#     case matters to Dovecot: only lower-case tags land in these folders.
+#     --plus-headers additionally routes tagged mail found in INBOX by header.
+#
+#   POP3 (default)  POP only sees the inbox, so this suits hosts that deliver
+#     tagged mail INTO the inbox.  The [destination] becomes a getmail
+#     MultiGuesser: a message whose Delivered-To / Envelope-To / To / Cc
+#     (getmail checks them in that order, the first header that has addresses
+#     wins) names cwp+chris@u-l.ca goes to chris, cwp+miche@... to miche,
+#     anything else to --local-user.  (MultiSorter would need a multidrop
+#     retriever and an envelope-recipient header; MultiGuesser works with the
+#     plain retriever.)  A message addressed to several tags is delivered to
+#     each of them.  On a cPanel-style host this finds nothing: use --imap.
+#
+# Run it as root or a service account so it can deliver for every user, e.g.
+#   sudo ./configure-getmail.sh --imap --plus-base cwp@u-l.ca \
+#        --plus-users chris,miche --local-user chris
 #
 # Usage:
 #   ./configure-getmail.sh --relay-file /path/to/smtp-relay.txt [options]
@@ -39,8 +59,10 @@
 #   --local-user NAME   deliver into this account     (default: you)
 #   --plus-base ADDR    plain shared address (cwp@u-l.ca) for tag routing
 #   --plus-users LIST   comma-separated local users that get cwp+USER@... mail
+#   --plus-prefix P     with --imap: the tag folders are P<user>   (default INBOX.)
+#   --plus-headers      with --imap: also route tagged mail in INBOX by header
 #   --delete            delete messages from the server after delivery
-#   --timer N          systemd --user timer: pull every N minutes
+#   --timer N           systemd --user timer: pull every N minutes
 #   --test              run one fetch right after configuring
 #   -y, --yes           install getmail without asking
 #   -h | --help         show this header
@@ -60,6 +82,8 @@ KEEP=1
 TIMER_MIN=0
 PLUS_BASE=""
 PLUS_USERS=""
+PLUS_PREFIX="INBOX."
+PLUS_HEADERS=0
 DO_TEST=0
 ASSUME="${ASSUME:-}"
 
@@ -72,7 +96,9 @@ while [ $# -gt 0 ]; do
     --local-user) LOCAL_USER="${2:?}"; shift 2 ;;
     --plus-base)  PLUS_BASE="${2:?}"; shift 2 ;;
     --plus-users) PLUS_USERS="${2:?}"; shift 2 ;;
-    --delete)     KEEP=0; shift ;;
+    --plus-prefix) PLUS_PREFIX="${2-}"; [ $# -ge 2 ] || die "--plus-prefix needs a value (\"\" for none)"; shift 2 ;;
+    --plus-headers) PLUS_HEADERS=1; shift ;;
+    --delete)    KEEP=0; shift ;;
     --timer)      TIMER_MIN="${2:?}"; shift 2 ;;
     --test)       DO_TEST=1; shift ;;
     -y|--yes)     ASSUME=yes; shift ;;
@@ -95,6 +121,17 @@ if [ -n "$PLUS_BASE$PLUS_USERS" ]; then
     esac
     PLUS_LIST="$PLUS_LIST $u"
   done
+  case "$PLUS_PREFIX" in
+    *[!A-Za-z0-9._/-]*) die "--plus-prefix '$PLUS_PREFIX': use letters, digits and . _ / - only" ;;
+  esac
+elif [ "$PLUS_HEADERS" = 1 ]; then
+  die "--plus-headers needs --plus-base and --plus-users"
+fi
+# folders (IMAP) or headers (POP3) pick the user; the guesser needs the headers
+PLUS_FOLDERS=0; DEST_GUESS=0
+if [ -n "$PLUS_LIST" ]; then
+  if [ "$PROTO" = imap ]; then PLUS_FOLDERS=1; DEST_GUESS=$PLUS_HEADERS
+  else DEST_GUESS=1; fi
 fi
 
 PY="$(find_python || true)"
@@ -162,7 +199,13 @@ STATE="$HOME/.local/state"; install -d -m 0755 "$STATE"
 
 log "remote      : ${REMOTE_USER} @ ${IN_SERVER}  ${PROTO^^}S:${PORT}"
 log "deliver to  : ${LOCAL_USER}  ->  /var/mail/${LOCAL_USER}   (via ${MDA})"
-[ -z "$PLUS_LIST" ] || log "plus routing: ${PLUS_BASE%@*}+{${PLUS_LIST# }}@${PLUS_BASE#*@} -> that user (else ${LOCAL_USER})"
+if [ "$PLUS_FOLDERS" = 1 ]; then
+  log "plus folders: $(for u in $PLUS_LIST; do printf '%s%s -> %s;  ' "$PLUS_PREFIX" "$u" "$u"; done)INBOX -> ${LOCAL_USER}"
+  [ "$DEST_GUESS" = 0 ] || log "plus headers: tagged mail found in INBOX is also routed by header"
+elif [ -n "$PLUS_LIST" ]; then
+  log "plus routing: ${PLUS_BASE%@*}+{${PLUS_LIST# }}@${PLUS_BASE#*@} -> that user by header (else ${LOCAL_USER})"
+  warn "POP3 only sees the inbox: a host that files cwp+TAG@ mail in a TAG folder (cPanel) needs --imap"
+fi
 log "server copy : $( [ "$KEEP" = 1 ] && echo 'KEEP (getmail remembers seen mail)' || echo 'DELETE after delivery' )"
 
 # regex-escape a literal for a getmail `locals` pattern
@@ -170,7 +213,7 @@ re_esc() { printf '%s' "$1" | sed 's/[][+*?(){}|^$.\\]/\\&/g'; }
 
 # the [destination] section(s): one MDA, or a MultiGuesser fanning out by tag
 destinations() {
-  if [ -z "$PLUS_LIST" ]; then
+  if [ "$DEST_GUESS" != 1 ]; then
     cat <<EOF
 [destination]
 type = MDA_external
@@ -195,8 +238,11 @@ EOF
   done
 }
 
-backup "$RC"
-{
+# write_rc FILE MAILBOX DESTFN - one getmailrc: the retriever (IMAP: MAILBOX),
+# then whatever DESTFN prints for [destination]
+write_rc() {
+  backup "$1"
+  {
 cat <<EOF
 # getmailrc - generated $(date) by configure-getmail.sh
 # No password here: password_command reads it from ${PWFILE}.
@@ -206,10 +252,10 @@ server = ${IN_SERVER}
 port = ${PORT}
 username = ${REMOTE_USER}
 password_command = ("${SASL}", "--file", "${PWFILE}", "${REMOTE_USER}")
-$( [ "$PROTO" = imap ] && echo 'mailboxes = ("INBOX",)' )
+$( [ "$PROTO" = imap ] && echo "mailboxes = (\"$2\",)" )
 
 EOF
-destinations
+"$3"
 cat <<EOF
 
 [options]
@@ -218,18 +264,49 @@ delete = $( [ "$KEEP" = 1 ] && echo false || echo true )
 verbose = 1
 message_log = ${STATE}/getmail.log
 EOF
-} > "$RC"
-chmod 600 "$RC"
-log "wrote $RC"
+  } > "$1"
+  chmod 600 "$1"
+  log "wrote $1"
+}
 
-write_mail_pull "$BIN" "v=\"\"
+write_rc "$RC" INBOX destinations
+
+# IMAP tag folders: <prefix><user> -> that user.  Each rc gets its own
+# getmaildir so its seen-mail (oldmail) state can't be mixed up with INBOX's.
+plain_dest() {
+  printf '[destination]\ntype = MDA_external\npath = %s\narguments = ("-oi", "--", "%s")\n' "$MDA" "$DEST_USER"
+}
+if [ "$PLUS_FOLDERS" = 1 ]; then
+  for u in $PLUS_LIST; do
+    install -d -m 0700 "$GMDIR/plus-$u"
+    DEST_USER="$u"
+    write_rc "$GMDIR/plus-$u/getmailrc" "${PLUS_PREFIX}$u" plain_dest
+  done
+fi
+
+GM_HEAD="v=\"\"
 for a in \"\$@\"; do
   case \"\$a\" in
     -v|--verbose) v=-v ;;
     -n|--dry-run) echo 'mail-pull: getmail has no dry run (use pop-pull -n)' >&2; exit 2 ;;
   esac
-done
-exec \"$GETMAIL\" --getmaildir \"$GMDIR\" --rcfile getmailrc \$v"
+done"
+if [ "$PLUS_FOLDERS" = 1 ]; then
+  # INBOX decides the exit status; a tag folder only exists after its first
+  # tagged mail, so a failing folder run is reported, not fatal
+  GM_BODY="rc=0
+\"$GETMAIL\" --getmaildir \"$GMDIR\" --rcfile getmailrc \$v || rc=\$?"
+  for u in $PLUS_LIST; do
+    GM_BODY="$GM_BODY
+\"$GETMAIL\" --getmaildir \"$GMDIR/plus-$u\" --rcfile getmailrc \$v || echo 'mail-pull: folder ${PLUS_PREFIX}$u: getmail failed (not created yet? the first ${PLUS_BASE%@*}+$u@ mail creates it)' >&2"
+  done
+  GM_BODY="$GM_BODY
+exit \$rc"
+else
+  GM_BODY="exec \"$GETMAIL\" --getmaildir \"$GMDIR\" --rcfile getmailrc \$v"
+fi
+write_mail_pull "$BIN" "$GM_HEAD
+$GM_BODY"
 
 case ":$PATH:" in
   *":$BIN:"*) : ;;

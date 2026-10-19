@@ -12,6 +12,13 @@ address in Delivered-To / X-Original-To / To / Cc that looks like
 cwp+TAG@u-l.ca is taken; the message goes to local user TAG if the system
 knows that account (getpwnam, uid >= plus_min_uid, default 1000), else to
 local_user.  Run it as root or a service account to serve everyone.
+
+This only works on hosts that deliver cwp+TAG@ mail INTO THE INBOX.  POP3 sees
+nothing but the inbox, and cPanel-style hosts (Dovecot plus-addressing) file
+cwp+TAG@ mail in an IMAP folder named TAG instead - there pop-pull never sees
+tagged mail, so use  getmail --imap  (configure-getmail.sh --imap --plus-base
+... --plus-users ...), which fetches the tag folders.  Check which kind of
+host you have with tests/live/check-plus-addressing.py.
 """
 import os, re, sys, ssl, poplib, argparse, configparser, subprocess
 import email.parser, email.utils

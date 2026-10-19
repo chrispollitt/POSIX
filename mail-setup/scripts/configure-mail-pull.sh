@@ -19,7 +19,11 @@
 # Plus-address routing (--plus-base): one shared public mailbox, several local
 # users.  With --plus-base cwp@u-l.ca, a message addressed to cwp+chris@u-l.ca
 # (first match in Delivered-To / X-Original-To / To / Cc) is delivered to local
-# user "chris" if the system has that account, else to --local-user.  Run the
+# user "chris" if the system has that account, else to --local-user.
+# CAVEAT: this only sees mail that is in the POP inbox.  cPanel-style hosts
+# (Dovecot plus-addressing) file cwp+chris@ mail in an IMAP folder "chris"
+# instead, which POP can't see - there use  configure-getmail.sh --imap
+# --plus-base ... --plus-users ...  (see its header).  Run the
 # puller as root or a service account so it can deliver for everyone, e.g.
 #   sudo ./configure-mail-pull.sh --plus-base cwp@u-l.ca --local-user chris
 # (root reads /etc/postfix/sasl_passwd directly; a service account needs
@@ -136,7 +140,10 @@ done
 log "python      : $PY"
 log "remote      : ${POP_USER} @ ${IN_SERVER}  POP3S:995"
 log "deliver to  : ${LOCAL_USER}  ->  /var/mail/${LOCAL_USER}   (via ${MDA})"
-[ -z "$PLUS_BASE" ] || log "plus routing : ${PLUS_BASE%@*}+TAG@${PLUS_BASE#*@} -> local user TAG (else ${LOCAL_USER})"
+if [ -n "$PLUS_BASE" ]; then
+  log "plus routing : ${PLUS_BASE%@*}+TAG@${PLUS_BASE#*@} -> local user TAG (else ${LOCAL_USER})"
+  warn "pop-pull only sees the POP inbox; a host that files cwp+TAG@ mail in a TAG folder (cPanel) needs configure-getmail.sh --imap instead"
+fi
 log "server copy : $( [ "$KEEP" = 1 ] && echo 'KEEP + remember seen UIDs' || echo 'DELETE after delivery' )"
 log "TLS verify  : $( [ "$VERIFY" = 1 ] && echo "yes (${CA:-system})" || echo 'NO' )"
 

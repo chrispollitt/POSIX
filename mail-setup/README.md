@@ -55,7 +55,7 @@ Every step is a yes/no offer. Each one is also its own script you can run alone:
 | `scripts/configure-dovecot.sh` | Dovecot IMAP: INBOX = `/var/mail/<user>`, other folders in `~/mail`, with Drafts/Sent/Trash/Junk/Archive auto-created. Writes one drop-in (`conf.d/99-mail-setup.conf`), checks it with `doveconf`, and rolls back if that fails. Handles both Dovecot 2.3 and 2.4 syntax. Linux only. |
 | `scripts/configure-sieve.sh` | optional, on the master: ManageSieve (port 4190) + the Sieve plugin, so a client can keep an out-of-office (`vacation`) script there - tvmail's *File > Out of office*. Installs Pigeonhole, writes one drop-in (`conf.d/95-mail-setup-sieve.conf`, checked with `doveconf`, rolled back on failure; 2.3 and 2.4 syntax), points Postfix's `mailbox_command` at `dovecot-lda` (Sieve only runs on mail Dovecot delivers; another `mailbox_command` is kept unless `--force`; pop-pull, getmail and the sendmail shim all deliver via Postfix, so they are covered), and opens 4190 in ufw if active. `--listen all` or `local`. Linux only. |
 | `scripts/configure-mail-pull.sh` | installs `bin/pop-pull` (stdlib-Python POP3S puller) + `~/.config/mailpull.conf`; `--plus-base` routes `cwp+TAG@` mail to local user TAG |
-| `scripts/configure-getmail.sh` | installs getmail6 if missing (distro package, else `pip --user`) and writes a `getmailrc` (POP3S, or `--imap`); `--plus-base/--plus-users` fan out by tag |
+| `scripts/configure-getmail.sh` | installs getmail6 if missing (distro package, else `pip --user`) and writes a `getmailrc` (POP3S, or `--imap`); `--imap --plus-base/--plus-users` fetches the host's per-user tag folders (cPanel) |
 | `scripts/configure-webmin.sh` | installs Webmin (official apt repo) if missing and sets its System and Server Status module to check, every 5 min (`--every`), the Postfix mail queue plus Postfix/Dovecot running. You get a local email when a check fails and another when it recovers. `--queue-max` / `--fails` set the queue alarm, `--webhook URL` adds an HTTP call, and `--allow CIDR\|auto\|all` limits who can reach port 10000. The wizard offers it on a master (under `--yes` only when Webmin is already installed). Linux only. |
 | `scripts/install-sendmail-shim.sh` | client: installs `bin/sendmail-shim` as `/usr/sbin/sendmail`, forwarding to the master |
 | `scripts/configure-mailutils.sh` | installs GNU Mailutils and writes `~/.mail` + `~/.mu-tickets` |
@@ -110,27 +110,41 @@ serve all of them, each kept apart:
             miche@cpbee                          cwp+miche@u-l.ca
             root@cpbee                           cwp@u-l.ca            (shared catch-all)
 
- inbound    world --> cwp+chris@u-l.ca --\                  /--> /var/mail/chris
-            world --> cwp+miche@u-l.ca ---+-> ONE POP box --+--> /var/mail/miche
-            world --> cwp@u-l.ca ---------/    (pop-pull)   \--> /var/mail/<--local-user>
+ inbound    cPanel-style host (Dovecot plus-addressing), fetched with getmail --imap:
+            world --> cwp+chris@u-l.ca --> folder INBOX.chris --\
+            world --> cwp+miche@u-l.ca --> folder INBOX.miche --+-> getmail --> /var/mail/chris
+            world --> cwp@u-l.ca ---------> INBOX --------------/               /var/mail/miche
+                                                                                 /var/mail/<--local-user>
 ```
 
-**Check the host first.** This only works if the host (a) delivers
-`cwp+x@u-l.ca` into `cwp@u-l.ca` and (b) lets the smarthost send as
-`cwp+chris@u-l.ca` while you're logged in as `cwp@u-l.ca`. cPanel/Exim hosts
-usually do (a); (b) depends on the host's sender-verification settings. Test
-both with the live probe (it isn't part of `run-tests.sh`; it sends one real
-message to yourself and deletes it again):
+**Where does the host put tagged mail? Check first.** Two kinds of host exist,
+and they need different pullers:
+
+- **cPanel / Dovecot** (u-l.ca): mail for `cwp+chris@u-l.ca` is filed in an **IMAP
+  folder named `chris`** (shown to IMAP clients as `INBOX.chris`; the host creates
+  it on the first such message). It is **not** in the inbox, and POP3 only
+  exposes the inbox, so **`pop-pull` never sees it**. Use **`getmail --imap`**,
+  which fetches the folders.
+- A host that delivers `cwp+chris@...` into the plain inbox keeps the tag in the
+  headers (`Delivered-To`, `To`, ...). There `pop-pull --plus-base` (or getmail
+  over POP3, by header) works.
+
+Outbound needs the smarthost to accept `cwp+chris@u-l.ca` as sender while you're
+logged in as `cwp@u-l.ca` (depends on the host's sender-verification settings).
+Test all of it with the live probe (not part of `run-tests.sh`; it sends one real
+message to yourself and cleans up after itself):
 
 ```bash
 tests/live/check-plus-addressing.py --relay-file smtp-relay.txt --tag chris
 ```
 
-It reports three things: `1.` the smarthost accepts the `+tag` sender, `2.`
-mail to `cwp+chris@...` reaches the mailbox, `3.` which header
-(`Delivered-To`, `X-Original-To`, `To`, `Cc`) names the tagged address. If `1`
-fails, skip `--plus-users` (outbound stays the shared address); if `3` fails,
-the host strips the tag and inbound routing can't tell users apart.
+It reports `1.` whether the smarthost accepts the `+tag` sender, `2.` where the
+probe landed (`IMAP folder INBOX.chris`, or the inbox via IMAP/POP3), and `3.`
+the routing key (the folder name and its prefix, or the header that names the
+tag), then recommends `getmail --imap --plus-prefix ...` or `pop-pull`. It
+deletes the probe, and the tag folder too if the probe's delivery created it.
+If `1` fails, skip `--plus-users` (outbound stays the shared address); if `3`
+fails the host strips the tag and inbound routing can't tell users apart.
 
 **Set it up on the master**, as root (or a service account) so one puller can
 deliver for everyone:
@@ -138,12 +152,13 @@ deliver for everyone:
 ```bash
 # outbound: per-user senders; root/system mail keeps the shared address
 sudo scripts/configure-sendmail-relay.sh --relay-file smtp-relay.txt --plus-users chris,miche
-# inbound: route cwp+TAG@... to user TAG (pop-pull: any local account)
-sudo scripts/configure-mail-pull.sh   --relay-file smtp-relay.txt --plus-base cwp@u-l.ca --local-user chris
-#   or getmail (it needs the user list):
-sudo scripts/configure-getmail.sh     --relay-file smtp-relay.txt --plus-base cwp@u-l.ca --plus-users chris,miche --local-user chris
-# or all in the wizard
-sudo ./mail-setup.sh --role master --plus-base cwp@u-l.ca --plus-users chris,miche
+# inbound, cPanel-style host: getmail over IMAP, one tag folder per user
+sudo scripts/configure-getmail.sh --imap --relay-file smtp-relay.txt \
+     --plus-base cwp@u-l.ca --plus-users chris,miche --local-user chris
+# inbound, host that delivers tagged mail into the inbox: pop-pull by header
+sudo scripts/configure-mail-pull.sh --relay-file smtp-relay.txt --plus-base cwp@u-l.ca --local-user chris
+# or all in the wizard (with getmail it implies --imap)
+sudo ./mail-setup.sh --role master --puller getmail --plus-base cwp@u-l.ca --plus-users chris,miche
 ```
 
 - **Outbound** (`configure-sendmail-relay.sh --plus-users`): the generic map gets
@@ -153,7 +168,22 @@ sudo ./mail-setup.sh --role master --plus-base cwp@u-l.ca --plus-users chris,mic
   keep the shared one. `--plus-base` overrides which address is tagged (default:
   the smarthost login); `root` can't be listed. `--print` shows the map without
   touching anything.
-- **Inbound, pop-pull** (`--plus-base`): for each message the first address in
+- **Inbound, getmail --imap** (`--plus-base` + `--plus-users`, the cPanel way):
+  one `getmailrc` per folder, each in its own getmaildir
+  (`~/.config/getmail/plus-chris/`, ...) so their seen-mail state stays apart:
+  `INBOX` -> `--local-user`, `INBOX.chris` -> chris, `INBOX.miche` -> miche.
+  The folder name is the routing key, no header parsing, and keep/`--delete`
+  and the `sasl-pass` password_command work as for any getmail setup.
+  `mail-pull` runs getmail once per rc. INBOX decides the exit status; a tag
+  folder only exists after its first tagged message, so a failing folder run is
+  reported but not fatal. `--plus-prefix` sets the folder prefix and separator
+  (default `INBOX.`; use `INBOX/` or `''` for other servers; the probe prints
+  what your host uses). Dovecot folder names are case-sensitive, so only
+  lower-case tags (`cwp+chris@`, not `cwp+Chris@`) land in these folders.
+  `--plus-headers` additionally routes tagged mail found in INBOX by header
+  (the POP3 behaviour below).
+- **Inbound, pop-pull** (`--plus-base`; **only for hosts that deliver tagged mail
+  into the inbox**, not cPanel-style ones): for each message the first address in
   `Delivered-To`, `X-Original-To`, `To`, `Cc` (in that order) that looks like
   `cwp+TAG@u-l.ca` decides the recipient: `TAG` if the system has that account
   (`getpwnam`, uid >= `plus_min_uid`, default 1000), else `--local-user`. Tags are
@@ -161,7 +191,8 @@ sudo ./mail-setup.sh --role master --plus-base cwp@u-l.ca --plus-users chris,mic
   `sendmail -oi -- TAG`. Options in `mailpull.conf`: `plus_base`, `plus_sep`
   (default `+`), `plus_min_uid`. A message addressed to several tags goes to the
   first one only.
-- **Inbound, getmail** (`--plus-base` + `--plus-users`): the `[destination]`
+- **Inbound, getmail over POP3** (no `--imap`; same limitation as pop-pull, it
+  only sees the inbox): the `[destination]`
   becomes a getmail **MultiGuesser** (not MultiSorter, which needs a multidrop
   retriever and a trustworthy envelope-recipient header; MultiGuesser works with
   the plain retriever). It checks `Delivered-To`, `Envelope-To`, `To`/`Cc` and
@@ -203,13 +234,15 @@ sudo ./mail-setup.sh --role master --plus-base cwp@u-l.ca --plus-users chris,mic
   `sendmail-shim` (`-t`, Bcc stripping, `-f`, exit codes 66/71), all against
   the in-process servers in `tests/lib/fakeservers.py`. Plus-routing: tag
   matching, header order, unknown/system/hostile tags, `--config`, and the live
-  probe `tests/live/check-plus-addressing.py` against the fake servers.
+  probe `tests/live/check-plus-addressing.py` against fake SMTP/POP3/IMAP servers
+  (a cPanel-style one that files `cwp+TAG@` mail in `INBOX.TAG`, and an inbox-only one).
 - **shell** (`tests/shell/test_scripts.sh`): runs every configure script for
   real in a throwaway `$HOME` with fake `getmail`/`mail`/MDA, and checks the
   generated files, modes, backups, wrapper switching, Dovecot drop-ins for both
   syntaxes (`configure-dovecot.sh --print`, `configure-sieve.sh --print`), both wizard roles, the per-user
   generic map (`configure-sendmail-relay.sh --print`), the getmail MultiGuesser
-  rules (evaluated against sample addresses), and the relay script end to end
+  rules (evaluated against sample addresses), the `--imap` per-folder rcs and the
+  `mail-pull` wrapper that runs them, and the relay script end to end
   against fake `postmap`/`postfix`/`postconf` in a sandbox `/etc/postfix`
   (install, backup, lookup check, and rollback when `postmap` or
   `postfix check` fails).

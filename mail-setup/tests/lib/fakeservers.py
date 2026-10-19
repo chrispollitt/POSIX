@@ -201,6 +201,142 @@ class FakeSMTP(_Base):
                 h.send("502 not implemented")
 
 
+class FakeIMAP(_Base):
+    """Just enough IMAP4rev1 for imaplib and the live probe: CAPABILITY LOGIN
+    LIST SELECT SEARCH SUBJECT FETCH (HEADER) STORE EXPUNGE CLOSE UNSUBSCRIBE
+    DELETE NOOP LOGOUT.
+
+        FakeIMAP(folders={"INBOX": [msg, ...], "INBOX.test": [msg]}, user=, password=)
+
+    With smtp=<FakeSMTP> it behaves like a cPanel host: every message the SMTP
+    fake has accepted shows up on the next command, filed in the folder
+    <prefix><tag> for a cwp+tag@... recipient (the folder is created on the spot)
+    and in INBOX otherwise, with a Delivered-To header added.  Set
+    plus_folders=False for a host that delivers everything to INBOX.
+
+        imap.folders          {name: [message bytes, ...]}
+        imap.deleted_folders  names removed with DELETE
+    """
+
+    def __init__(self, folders=None, user="user", password="secret", smtp=None,
+                 delimiter=".", prefix="INBOX.", plus_folders=True, ssl_context=None):
+        super().__init__(ssl_context)
+        self.folders = {"INBOX": []}
+        for k, v in (folders or {}).items():
+            self.folders[k] = [m if isinstance(m, bytes) else m.encode() for m in v]
+        self.user, self.password = user, password
+        self.smtp, self.delimiter, self.prefix, self.plus_folders = smtp, delimiter, prefix, plus_folders
+        self.deleted_folders = []
+        self._seen_smtp = 0
+        self._lock = threading.Lock()
+
+    def _sync(self):
+        """file the SMTP fake's new messages, like the host's delivery would"""
+        if self.smtp is None:
+            return
+        with self._lock:
+            while self._seen_smtp < len(self.smtp.messages):
+                _, rcpts, data = self.smtp.messages[self._seen_smtp]
+                self._seen_smtp += 1
+                for rcpt in rcpts:
+                    local = rcpt.rpartition("@")[0]
+                    folder = "INBOX"
+                    if "+" in local and self.plus_folders:
+                        folder = self.prefix + local.partition("+")[2]
+                    self.folders.setdefault(folder, []).append(
+                        ("Delivered-To: %s\r\n" % rcpt).encode() + data)
+
+    @staticmethod
+    def _header(msg):
+        return msg.split(b"\r\n\r\n", 1)[0] + b"\r\n\r\n"
+
+    def session(self, h):
+        import shlex
+        h.send("* OK fake imap ready")
+        authed, cur, gone = False, None, set()
+        while True:
+            raw = h.rfile.readline()
+            if not raw:
+                return
+            line = raw.decode("utf-8", "replace").rstrip("\r\n")
+            parts = line.split(" ", 2)
+            if len(parts) < 2:
+                continue
+            tag, cmd = parts[0], parts[1].upper()
+            rest = parts[2] if len(parts) > 2 else ""
+            self.commands.append(cmd)
+            self._sync()
+            if cmd == "CAPABILITY":
+                h.send("* CAPABILITY IMAP4rev1")
+                h.send("%s OK done" % tag)
+            elif cmd == "LOGIN":
+                args = shlex.split(rest)
+                if args == [self.user, self.password]:
+                    authed = True
+                    h.send("%s OK logged in" % tag)
+                else:
+                    h.send("%s NO [AUTHENTICATIONFAILED] bad login" % tag)
+            elif cmd == "LOGOUT":
+                h.send("* BYE bye")
+                h.send("%s OK done" % tag)
+                return
+            elif not authed:
+                h.send("%s NO not logged in" % tag)
+            elif cmd == "NOOP":
+                h.send("%s OK done" % tag)
+            elif cmd == "LIST":
+                for name in sorted(self.folders):
+                    h.send('* LIST (\\HasNoChildren) "%s" "%s"' % (self.delimiter, name))
+                h.send("%s OK done" % tag)
+            elif cmd in ("SELECT", "EXAMINE"):
+                name = shlex.split(rest)[0]
+                if name not in self.folders:
+                    h.send("%s NO mailbox does not exist" % tag)
+                    continue
+                cur, gone = name, set()
+                h.send("* %d EXISTS" % len(self.folders[cur]))
+                h.send("%s OK [READ-WRITE] selected" % tag)
+            elif cmd == "UNSUBSCRIBE":
+                h.send("%s OK done" % tag)
+            elif cmd == "DELETE":
+                name = shlex.split(rest)[0]
+                if name in self.folders and name != "INBOX" and name != cur:
+                    del self.folders[name]
+                    self.deleted_folders.append(name)
+                    h.send("%s OK deleted" % tag)
+                else:
+                    h.send("%s NO cannot delete" % tag)
+            elif cur is None:
+                h.send("%s NO no mailbox selected" % tag)
+            elif cmd == "SEARCH":
+                words = shlex.split(rest)
+                want = words[words.index("SUBJECT") + 1].lower() if "SUBJECT" in words else ""
+                hits = []
+                for i, m in enumerate(self.folders[cur], 1):
+                    subj = [ln for ln in self._header(m).split(b"\r\n") if ln.lower().startswith(b"subject:")]
+                    if any(want.encode() in s.lower() for s in subj):
+                        hits.append(str(i))
+                h.send("* SEARCH " + " ".join(hits))
+                h.send("%s OK done" % tag)
+            elif cmd == "FETCH":
+                n = int(rest.split()[0])
+                hdr = self._header(self.folders[cur][n - 1])
+                h.wfile.write(("* %d FETCH (BODY[HEADER] {%d}\r\n" % (n, len(hdr))).encode() + hdr + b")\r\n")
+                h.wfile.flush()
+                h.send("%s OK done" % tag)
+            elif cmd == "STORE":
+                gone.add(int(rest.split()[0]))
+                h.send("%s OK stored" % tag)
+            elif cmd in ("EXPUNGE", "CLOSE"):
+                self.folders[cur] = [m for i, m in enumerate(self.folders[cur], 1) if i not in gone]
+                gone = set()
+                if cmd == "CLOSE":
+                    cur = None
+                h.send("%s OK done" % tag)
+            else:
+                h.send("%s BAD unknown command" % tag)
+
+
 def self_signed_cert(dirpath, host="localhost"):
     """(certfile, keyfile) for HOST made with openssl, or None if it can't."""
     exe = shutil.which("openssl")

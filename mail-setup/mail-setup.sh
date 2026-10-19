@@ -35,7 +35,10 @@
 #                            (default: ask; never switched on by --yes alone)
 #   --plus-base ADDR         one shared public mailbox for several local users
 #                            (cwp@u-l.ca): the puller delivers cwp+USER@... to
-#                            USER; see README "Several users, one mailbox"
+#                            USER; see README "Several users, one mailbox".
+#                            With getmail this uses IMAP and the host's tag
+#                            folders (INBOX.USER, as cPanel files them); pop-pull
+#                            only works if the host puts tagged mail in the inbox
 #   --plus-users LIST        comma-separated users (chris,miche) that also get
 #                            their own outgoing sender cwp+USER@... (needs
 #                            --plus-base; getmail needs it too)
@@ -207,7 +210,7 @@ if [ "$ROLE" = master ]; then
       [ -n "$do_test" ]    && set -- "$@" --test
       [ "${PULL_EVERY:-0}" -gt 0 ] 2>/dev/null && set -- "$@" --timer "$PULL_EVERY"
       [ -n "$PLUS_BASE" ]  && set -- "$@" --plus-base "$PLUS_BASE"
-      [ -n "$PLUS_BASE" ] && [ "$PULLER" = getmail ] && set -- "$@" --plus-users "$PLUS_USERS"
+      [ -n "$PLUS_BASE" ] && [ "$PULLER" = getmail ] && set -- "$@" --imap --plus-users "$PLUS_USERS"
       log "running: $*"
       bash "$@" || warn "$(basename "$script") exited non-zero - see above"
     fi
