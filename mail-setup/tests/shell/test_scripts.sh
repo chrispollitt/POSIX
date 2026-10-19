@@ -93,6 +93,7 @@ check "server/user from relay file" 'has "$RC" "server = in.example.org" && has 
 check "delivers through the MDA to you" 'has "$RC" "path = $FAKE/mda" && has "$RC" "arguments = (\"-oi\", \"--\", \"$(id -un)\")"'
 check "keeps mail on the server" 'has "$RC" "delete = false"'
 check "no password in getmailrc" '! has "$RC" "p4ss"'
+check "no getmail 'Delivered-To: unknown' header" 'has "$RC" "delivered_to = false"'
 check_mode "getmailrc is mode 600" "$RC"
 check "password_command works" '[ "$("$HOME/bin/sasl-pass" --file "$PW" me@example.org)" = p4ss ]'
 check "mail-pull runs getmail with its dir" '"$HOME/bin/mail-pull" -v | grep -q "fake-getmail --getmaildir $HOME/.config/getmail --rcfile getmailrc -v"'

@@ -262,6 +262,9 @@ cat <<EOF
 read_all = false
 delete = $( [ "$KEEP" = 1 ] && echo false || echo true )
 verbose = 1
+# a plain retriever has no envelope recipient, so getmail's own Delivered-To:
+# header would just say "Delivered-To: unknown"
+delivered_to = false
 message_log = ${STATE}/getmail.log
 EOF
   } > "$1"
