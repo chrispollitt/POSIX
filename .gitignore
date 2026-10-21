@@ -1,3 +1,4 @@
 BAK/
 __pycache__/
+tmp/
 *.pyc
