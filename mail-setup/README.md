@@ -94,7 +94,8 @@ getmail only ever returns 0 or an error.
 ### Passwords
 
 There's only ever one copy of the mailbox password: Postfix's own
-`/etc/postfix/sasl_passwd` (mode 600). `pop-pull` reads it live, and getmail
+`/etc/postfix/sasl_passwd` (root:your group, mode 640, so the pullers - which
+run as you - can read it; nobody else can). `pop-pull` reads it live, and getmail
 gets it through `password_command` = `bin/sasl-pass`. Neither `mailpull.conf`
 nor `getmailrc` contains it. Client passwords live in `~/.mu-tickets`
 (mode 600). None of the files in this project hold credentials.

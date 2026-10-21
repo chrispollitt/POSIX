@@ -40,7 +40,8 @@
 #   --relay-file FILE   cPanel-style config text -> Incoming Server / Username.
 #   --pop-user NAME     remote mailbox login  (default: from file / sasl_passwd)
 #   --pwfile PATH       override the password file (default: Postfix's own
-#                       /etc/postfix/sasl_passwd, format "[host]:port user:pass").  0600.
+#                       /etc/postfix/sasl_passwd, format "[host]:port user:pass",
+#                       root:<your group> 0640).
 #   --local-user NAME   deliver into this account            (default: you)
 #   --plus-base ADDR    route cwp+TAG@domain mail to local user TAG (ADDR is
 #                       the plain shared address, normally the POP login)

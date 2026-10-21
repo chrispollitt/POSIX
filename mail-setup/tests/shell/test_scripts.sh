@@ -34,9 +34,9 @@ PY=$(command -v python3)
 mode() { stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"; }
 touch "$SANDBOX/probe"; chmod 600 "$SANDBOX/probe"
 MODES=0; [ "$(mode "$SANDBOX/probe")" = 600 ] && MODES=1
-check_mode() {   # check_mode "what" FILE
-  _f=$2   # check() evals in its own scope, where $2 is the expression
-  if [ "$MODES" = 1 ]; then check "$1" '[ "$(mode "$_f")" = 600 ]'
+check_mode() {   # check_mode "what" FILE [MODE]   (MODE defaults to 600)
+  _f=$2 _m=${3:-600}   # check() evals in its own scope, where $2 is the expression
+  if [ "$MODES" = 1 ]; then check "$1" '[ "$(mode "$_f")" = "$_m" ]'
   else ok "$1 (skipped: this filesystem ignores chmod)"; fi
 }
 
@@ -317,8 +317,10 @@ relay > "$OUT" 2>&1
 check "plain run exits 0" '[ $? = 0 ]'
 check "generic written + postmapped" 'has "$PF/generic" "@mx.lan.example" && [ -f "$PF/generic.db" ]'
 check "smtp_generic_maps points at it" 'has "$FAKE_CALLS" "smtp_generic_maps = hash:$PF/generic"'
-check "sasl_passwd line, mode 600" 'has "$PF/sasl_passwd" "[out.example.org]:465 me@example.org:sekrit"'    # the relay file says 465: SMTPS is kept
-check_mode "sasl_passwd is mode 600" "$PF/sasl_passwd"
+check "sasl_passwd line" 'has "$PF/sasl_passwd" "[out.example.org]:465 me@example.org:sekrit"'    # the relay file says 465: SMTPS is kept
+# root:<your group> 0640, not 600: the pullers run as you and read it
+check_mode "sasl_passwd is mode 640" "$PF/sasl_passwd" 640
+check_mode "sasl_passwd.db is mode 640" "$PF/sasl_passwd.db" 640
 check "root alias added" 'has "$SANDBOX/aliases" "root: zed"'
 check "header_checks table installed + added to header_checks" 'has "$PF/header_checks" "PREPEND X-Relayed-By:" && has "$FAKE_CALLS" "header_checks = regexp:$PF/header_checks"'
 check "no per-user lines by default" '! grep -q "+" "$PF/generic"'
