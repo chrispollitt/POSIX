@@ -543,18 +543,21 @@ cat <<EOF
 == for a client (tvmail's chat) ==
   The server's CA, to verify it - copy it to the client machine:
       scp $host:$TLS_DIR/ca.pem ~/.config/tvmail/$host-ca.pem
-  then add to ~/.config/tvmail/tvchat.conf (cafile needs the full path):
+  then add to ~/.config/tvmail/tvchat.conf (cafile needs the full path;
+  comments go on lines of their own - one after a value becomes part of it):
 
       [account:$host]
       protocol = irc
       display  = $NETWORK ($host)
-      host     = $host            # must match the certificate: $host, or $LISTEN
+      # must match the certificate: $host, or $LISTEN
+      host     = $host
       port     = $PORT
       tls      = true
       verify   = true
       cafile   = /home/YOU/.config/tvmail/$host-ca.pem
       nick     = YOURNICK
-      sasl     = YOURNICK         # once registered: --register YOURNICK
+      # once registered (--register YOURNICK); omit to connect unauthenticated
+      sasl     = YOURNICK
       channels = #test
 
   and the SASL password in ~/.netrc (machine $host login YOURNICK password ...)
