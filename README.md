@@ -5,4 +5,4 @@ Portable shell/Python tooling for Unix-like systems (Linux, macOS, the BSDs, Cyg
 | project | what |
 |---|---|
 | [mail-setup](mail-setup/) | set up GNU Mailutils, Postfix, Dovecot, and pop-pull or getmail on a master host, or a sendmail shim on thin clients, with unit + end-to-end tests |
-| [chat-setup](chat-setup/) | run an Ergo IRC server for the LAN (TLS, NickServ accounts, systemd, firewall), e.g. to test tvmail's chat |
+| [chat-setup](chat-setup/) | run an Ergo IRC server for the LAN (TLS, NickServ accounts, systemd, firewall), e.g. to test tvmail's chat, and set tvmail up to use it |

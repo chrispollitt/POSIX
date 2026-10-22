@@ -4,7 +4,8 @@
 #
 # Only the parts that need no root, no network and no Linux: the ircd.yaml
 # made from a default.yaml, the systemd unit, the download pin, the firewall
-# plan, the option checks, and ergo-register.py against a fake NickServ.
+# plan, the option checks, ergo-register.py against a fake NickServ, and
+# configure-tvchat.sh's edits of a tvchat.conf and ~/.netrc (offline).
 # Installing Ergo for real is left to a run on the box itself.
 #
 # Exit 0 = all passed, 1 = something failed.
@@ -158,6 +159,75 @@ reg silent
 check "no answer: exit 1" '[ $? = 1 ] && has "$OUT" "no answer from NickServ"'
 CHAT_SETUP_PASS="" "$PY" "$C/scripts/ergo-register.py" 127.0.0.1 1 tester > "$OUT" 2>&1
 check "no password: exit 2" '[ $? = 2 ]'
+
+# --------------------------------------------------------------------------
+t "configure-tvchat.sh"
+V="$C/scripts/configure-tvchat.sh"
+H="$SANDBOX/home"; TC="$H/.config/tvmail/tvchat.conf"
+mkdir -p "$H/.config/tvmail"
+printf '%s\n' "-----BEGIN CERTIFICATE-----" "MIIB" "-----END CERTIFICATE-----" > "$SANDBOX/ca.pem"
+cat > "$TC" <<'EOF'
+# my notes
+[chat]
+# connect these
+autoconnect = libera
+
+[account:libera]
+protocol = irc
+host     = irc.libera.chat
+realname = Some Body
+channels = #tvmail-test
+
+# Delta Chat, later
+#[account:delta]
+EOF
+cp "$TC" "$SANDBOX/before.conf"
+# owner only: 600 (Cygwin may show 700 - it maps chmod onto Windows ACLs)
+private() { case "$(stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1")" in [67]00) return 0 ;; esac; return 1; }
+tv() { env -u TVCHAT_PASS_CPBEE -u TVCHAT_CONF HOME="$H" "$V" --ca "$SANDBOX/ca.pem" --no-check "$@"; }
+CHAT_SETUP_PASS=pw1 tv --nick chris-pollitt --autoconnect > "$OUT" 2>&1
+check "first run: exit 0" '[ $? = 0 ] && has "$OUT" "[account:cpbee] added to"'
+check "  the CA copied" 'cmp -s "$SANDBOX/ca.pem" "$H/.config/tvmail/cpbee-ca.pem"'
+check "  cafile is a full path" 'grep -qx "cafile   = $H/.config/tvmail/cpbee-ca.pem" "$TC"'
+check "  parses, values clean, autoconnect added" '"$PY" -c "
+import configparser, sys
+c = configparser.ConfigParser(interpolation=None); c.read(sys.argv[1])
+a = c[\"account:cpbee\"]
+assert (a[\"host\"], a[\"sasl\"], a[\"channels\"], a[\"display\"]) == (\"cpbee\", \"chris-pollitt\", \"#test\", \"cpbee\"), dict(a)
+assert c[\"chat\"][\"autoconnect\"] == \"libera, cpbee\"
+" "$TC"'
+check "  realname from the libera account" 'grep -qx "realname = Some Body" "$TC"'
+# everything that was there is still there, in order, the new section after it
+check "  the rest of the file kept" '"$PY" -c "
+import sys
+old = [l for l in open(sys.argv[1]) if not l.startswith(\"autoconnect\")]
+new = [l for l in open(sys.argv[2]) if not l.startswith(\"autoconnect\")]
+assert new[:len(old)] == old and new[len(old):len(old) + 2] == [\"\n\", \"[account:cpbee]\n\"], new
+" "$SANDBOX/before.conf" "$TC"'
+check "  password in ~/.netrc, owner only" 'grep -qx "machine cpbee login chris-pollitt password pw1" "$H/.netrc" && private "$H/.netrc"'
+check "  backed up" 'ls "$TC".bak.* >/dev/null 2>&1'
+nbak=$(ls "$TC".bak.* | wc -l)
+tv --nick chris-pollitt --autoconnect > "$OUT" 2>&1
+check "second run: unchanged, no new backup" '[ $? = 0 ] && has "$OUT" "unchanged in" && [ "$(ls "$TC".bak.* | wc -l)" = "$nbak" ]'
+check "  one section, one netrc line, autoconnect once" '[ "$(grep -c "^\[account:cpbee\]" "$TC")" = 1 ] && [ "$(grep -c "machine cpbee" "$H/.netrc")" = 1 ] && grep -qx "autoconnect = libera, cpbee" "$TC"'
+tv --nick chris-pollitt --channels '#a,#b' > "$OUT" 2>&1
+check "a changed option replaces the section" '[ $? = 0 ] && has "$OUT" "replaced in" && grep -qx "channels = #a,#b" "$TC" && [ "$(grep -c "^\[account:cpbee\]" "$TC")" = 1 ]'
+tv --nick someoneelse > "$OUT" 2>&1
+check "~/.netrc for another login: refused" '[ $? != 0 ] && has "$OUT" "for login chris-pollitt, not someoneelse"'
+check "  before tvchat.conf is touched" 'grep -qx "nick     = chris-pollitt" "$TC"'
+tv --nick x --no-sasl --account lan2 --host other.lan > "$OUT" 2>&1
+check "--no-sasl: no sasl line" '[ $? = 0 ] && "$PY" -c "
+import configparser, sys
+c = configparser.ConfigParser(interpolation=None); c.read(sys.argv[1])
+sys.exit(\"sasl\" in c[\"account:lan2\"])" "$TC"'
+check "  display NAME (HOST) when they differ" 'grep -qx "display  = lan2 (other.lan)" "$TC"'
+tv --nick x --channels '#a #b' --no-sasl > "$OUT" 2>&1
+check "a value with \" #\" is refused" '[ $? != 0 ] && has "$OUT" "no newlines"'
+HOME="$H" "$V" > "$OUT" 2>&1
+check "--nick is required" '[ $? != 0 ] && has "$OUT" "--nick is required"'
+rm -rf "$H"; mkdir -p "$H"
+CHAT_SETUP_PASS=pw tv --nick n1 > "$OUT" 2>&1
+check "no tvchat.conf yet: created, owner only" '[ $? = 0 ] && has "$OUT" "created" && private "$TC"'
 
 echo
 echo "chat-setup tests: $PASS passed, $FAIL failed"

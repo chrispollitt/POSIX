@@ -22,7 +22,8 @@
 #      (/etc/ssl/Simple_Inc/certs/HOST.crt + .key + HOST-chain.pem, as
 #      cmpi-router's setup-services.sh leaves them), else a self-signed one
 #      made once.  Installed as /etc/ergo/tls/fullchain.pem + privkey.pem
-#      (root:ergo 0640), and ca.pem - what a client needs to verify it;
+#      (root:ergo 0640), and ca.pem - what a client needs to verify it,
+#      also as /opt/ergo/ca.pem (world-readable: /etc/ergo/tls is not);
 #   4. writes /etc/ergo/ircd.yaml from that release's own default.yaml,
 #      changing only: network and server name, the TLS listener (the LAN
 #      address only, port 6697), the certificate paths, the MOTD and the
@@ -441,6 +442,9 @@ t=$(mktemp)
 install_if_changed "$t" "$TLS_DIR/fullchain.pem" 644 && tls_changed=1
 if [ -n "$CHAIN" ]; then $SUDO cat "$CHAIN" > "$t"; else $SUDO cat "$CERT" > "$t"; fi
 install_if_changed "$t" "$TLS_DIR/ca.pem" 644 || true
+# $TLS_DIR is root:ergo 0750 (the key), so a client fetches this copy instead
+$SUDO install -d -m 755 "$PREFIX"
+$SUDO cmp -s "$t" "$PREFIX/ca.pem" 2>/dev/null || $SUDO install -o root -g root -m 644 "$t" "$PREFIX/ca.pem"
 rm -f "$t"
 install_if_changed "$KEY" "$TLS_DIR/privkey.pem" 640 && tls_changed=1
 
@@ -554,8 +558,10 @@ fqdn=$(hostname -f 2>/dev/null || echo "$host")
 cat <<EOF
 
 == for a client (tvmail's chat) ==
-  The server's CA, to verify it - copy it to the client machine:
-      scp $host:$TLS_DIR/ca.pem ~/.config/tvmail/$host-ca.pem
+  On the client, chat-setup/scripts/configure-tvchat.sh does all of this:
+      ./configure-tvchat.sh --host $host --port $PORT --nick YOURNICK
+  By hand: the server's CA, to verify it - copy it to the client machine:
+      scp $host:$PREFIX/ca.pem ~/.config/tvmail/$host-ca.pem
   then add to ~/.config/tvmail/tvchat.conf (cafile needs the full path;
   comments go on lines of their own - one after a value becomes part of it):
 
