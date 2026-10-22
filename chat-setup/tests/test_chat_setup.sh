@@ -184,7 +184,8 @@ EOF
 cp "$TC" "$SANDBOX/before.conf"
 # owner only: 600 (Cygwin may show 700 - it maps chmod onto Windows ACLs)
 private() { case "$(stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1")" in [67]00) return 0 ;; esac; return 1; }
-tv() { env -u TVCHAT_PASS_CPBEE -u TVCHAT_CONF HOME="$H" "$V" --ca "$SANDBOX/ca.pem" --no-check "$@"; }
+# TVCHAT_BACKEND= : no tvchat-backend, whatever is installed here
+tv() { env -u TVCHAT_PASS_CPBEE -u TVCHAT_CONF TVCHAT_BACKEND="${TVB-}" HOME="$H" "$V" --ca "$SANDBOX/ca.pem" --no-check "$@"; }
 CHAT_SETUP_PASS=pw1 tv --nick chris-pollitt --autoconnect > "$OUT" 2>&1
 check "first run: exit 0" '[ $? = 0 ] && has "$OUT" "[account:cpbee] added to"'
 check "  the CA copied" 'cmp -s "$SANDBOX/ca.pem" "$H/.config/tvmail/cpbee-ca.pem"'
@@ -228,6 +229,20 @@ check "--nick is required" '[ $? != 0 ] && has "$OUT" "--nick is required"'
 rm -rf "$H"; mkdir -p "$H"
 CHAT_SETUP_PASS=pw tv --nick n1 > "$OUT" 2>&1
 check "no tvchat.conf yet: created, owner only" '[ $? = 0 ] && has "$OUT" "created" && private "$TC"'
+# the password as tvmail will find it: the backend's own lookup
+cat > "$SANDBOX/new-backend" <<'EOF2'
+def find_password_where(account, host, login, scheme):
+    return ("t", "~/.mu-tickets") if (account, host, login) == ("cpbee", "cpbee", "n1") else (None, None)
+EOF2
+printf 'def find_password(*a):
+    return "mailpw"
+' > "$SANDBOX/old-backend"
+TVB="$SANDBOX/new-backend" tv --nick n1 > "$OUT" 2>&1
+check "the backend's lookup is the one asked" '[ $? = 0 ] && has "$OUT" "tvmail will use the one in ~/.mu-tickets" && ! has "$OUT" "WARN"'
+TVB="$SANDBOX/old-backend" tv --nick n1 > "$OUT" 2>&1
+check "an old backend: a warning, ~/.netrc used" '[ $? = 0 ] && has "$OUT" "predates bug #46" && has "$OUT" "tvmail will use the one in ~/.netrc"'
+TVB="$SANDBOX/new-backend" CHAT_SETUP_PASS=pw2 tv --nick n2 --host n2.lan > "$OUT" 2>&1
+check "  the backend does not find a password just added: an error" '[ $? != 0 ] && has "$OUT" "does not find the password just added"'
 
 echo
 echo "chat-setup tests: $PASS passed, $FAIL failed"

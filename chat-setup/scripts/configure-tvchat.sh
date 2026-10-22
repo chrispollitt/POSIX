@@ -16,11 +16,12 @@
 #      and comment is kept, and the file is backed up first.  cafile gets the
 #      full path (tvchat-backend does not expand ~).  With --autoconnect the
 #      account joins [chat] autoconnect;
-#   4. the SASL password: kept if $TVCHAT_PASS_<ACCOUNT> is set or ~/.netrc
-#      already has "machine HOST"; else asked for (or $CHAT_SETUP_PASS) and
-#      added to ~/.netrc, mode 600;
-#   5. logs in with SASL PLAIN once (a throwaway nick, quits before
-#      registering) to show the account and password work.
+#   4. the SASL password: looked up the way tvmail will (the installed
+#      tvchat-backend's own lookup: $TVCHAT_PASS_<ACCOUNT>, ~/.mu-tickets,
+#      ~/.netrc - each only for NICK) and kept if found; else asked for (or
+#      $CHAT_SETUP_PASS) and added to ~/.netrc, mode 600;
+#   5. logs in with SASL PLAIN once with that password (a throwaway nick,
+#      quits before registering) to show the account and password work.
 #
 # Re-runnable.  Passwords never go into tvchat.conf or onto a command line.
 #
@@ -283,14 +284,55 @@ log "tvchat.conf : [account:$ACCOUNT] $result $CONF"
 [ "$AUTOCONNECT" = 1 ] && log "autoconnect : $ACCOUNT"
 
 # 4. the password ------------------------------------------------------------
+# Found the way tvmail will find it: the installed tvchat-backend's own
+# find_password_where() ($TVCHAT_BACKEND names another), so the check in 5.
+# sends what tvmail will send.  An older backend without it (before bug #46:
+# ~/.mu-tickets could hand over another user's password) gets a warning and
+# the same order done here: $TVCHAT_PASS_<ACCOUNT>, then ~/.netrc for NICK.
+# ($TVCHAT_BACKEND= empty: none, as in the tests)
+BACKEND="${TVCHAT_BACKEND-$(command -v tvchat-backend 2>/dev/null || true)}"
+export LOOKUP_PY='
+def lookup(account, host, nick, backend, pass_var, netrc_path):
+    """(password, where) or (None, None); "(old)" after where = the backend
+    has no find_password_where()"""
+    import netrc, os
+    old = ""
+    if backend and os.path.exists(backend):
+        import importlib.machinery, importlib.util
+        loader = importlib.machinery.SourceFileLoader("tvchat_backend", backend)
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        mod = importlib.util.module_from_spec(spec)
+        loader.exec_module(mod)
+        if hasattr(mod, "find_password_where"):
+            return mod.find_password_where(account, host, nick, "irc")
+        old = " (old)"
+    if os.environ.get(pass_var):
+        return os.environ[pass_var], "$" + pass_var + old
+    try:
+        a = netrc.netrc(netrc_path).authenticators(host)
+    except (OSError, netrc.NetrcParseError):
+        a = None
+    if a and a[2] and a[0] == nick:
+        return a[2], "~/.netrc" + old
+    return None, None
+'
+find_where() {   # -> where tvmail's lookup finds the password; 1 if nowhere
+  PASS_VAR="$PASS_VAR" "$PY" - "$ACCOUNT" "$HOST" "$NICK" "$BACKEND" "$NETRC" <<'PYEOF'
+import os, sys
+exec(os.environ["LOOKUP_PY"])
+pw, where = lookup(sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], os.environ["PASS_VAR"], sys.argv[5])
+if pw:
+    print(where)
+sys.exit(0 if pw else 1)
+PYEOF
+}
 have_pass=""; where=""
 if [ "$SASL" = 1 ]; then
-  if [ -n "${!PASS_VAR:-}" ]; then
-    log "password    : \$$PASS_VAR is set - using that"
-    have_pass=env; where="\$$PASS_VAR"
-  elif [ "$netrc_has" = 0 ]; then
-    log "password    : ~/.netrc already has machine $HOST"
-    have_pass=netrc; where="~/.netrc"
+  [ -n "$BACKEND" ] || warn "no tvchat-backend on PATH: looking in \$$PASS_VAR and ~/.netrc only"
+  if where=$(find_where); then
+    case "$where" in *"(old)") warn "the installed tvchat-backend predates bug #46's fix: tvmail may send another password (from ~/.mu-tickets) - update it" ;; esac
+    log "password    : tvmail will use the one in ${where%% (*}"
+    where=${where%% (*}; have_pass=1
   else
     pw="${CHAT_SETUP_PASS:-}"
     if [ -z "$pw" ]; then
@@ -305,18 +347,18 @@ if [ "$SASL" = 1 ]; then
     printf 'machine %s login %s password %s\n' "$HOST" "$NICK" "$pw" >> "$NETRC"
     unset pw
     log "password    : added to ~/.netrc (machine $HOST, mode 600)"
-    have_pass=netrc; where="~/.netrc"
+    where=$(find_where) || die "tvmail's lookup does not find the password just added to ~/.netrc"
+    where=${where%% (*}; have_pass=1
   fi
 fi
 
 # 5. a SASL login ------------------------------------------------------------
 if [ "$CHECK" = 1 ] && [ -n "$have_pass" ]; then
-  out=$(PASS_VAR="$PASS_VAR" "$PY" - "$HOST" "$PORT" "$CAFILE" "$NICK" "$NETRC" <<'PYEOF' 2>&1
-import base64, netrc, os, random, socket, ssl, sys
+  out=$(PASS_VAR="$PASS_VAR" "$PY" - "$HOST" "$PORT" "$CAFILE" "$NICK" "$NETRC" "$ACCOUNT" "$BACKEND" <<'PYEOF' 2>&1
+import base64, os, random, socket, ssl, sys
 host, port, cafile, nick, netrc_path = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4], sys.argv[5]
-pw = os.environ.get(os.environ["PASS_VAR"])
-if not pw:
-    pw = netrc.netrc(netrc_path).authenticators(host)[2]
+exec(os.environ["LOOKUP_PY"])
+pw = lookup(sys.argv[6], host, nick, sys.argv[7], os.environ["PASS_VAR"], netrc_path)[0]
 ctx = ssl.create_default_context(cafile=cafile)
 s = ctx.wrap_socket(socket.create_connection((host, port), 10), server_hostname=host)
 s.settimeout(15)
