@@ -54,7 +54,8 @@
 #   --listen ADDR       address for the TLS listener (default: lan0's IPv4,
 #                       else this box's first global IPv4)
 #   --port N            TLS port (default: 6697)
-#   --server-name NAME  the server's name (default: short hostname)
+#   --server-name NAME  the server's name, with a dot (default: the full
+#                       hostname, else the short one + .lan)
 #   --network NAME      the network's name (default: LAN)
 #   --cert FILE --key FILE [--chain FILE]
 #                       use this certificate (+ CA chain, also given to
@@ -134,7 +135,19 @@ DATA=/var/lib/ergo
 UNIT=/etc/systemd/system/ergo.service
 LAN_PORTS_FILE="${CHAT_SETUP_LAN_PORTS:-/etc/router-setup/lan0-tcp-ports}"
 LOCAL_CA_DIR="${CHAT_SETUP_LOCAL_CA_DIR:-/etc/ssl/Simple_Inc/certs}"
-: "${SERVER_NAME:=$(hostname -s 2>/dev/null || hostname)}"
+# Ergo wants a dot in a server name (so it cannot be taken for a nick):
+# the full hostname if it has one, else the short one + .lan
+if [ -z "$SERVER_NAME" ]; then
+  SERVER_NAME=$(hostname -f 2>/dev/null || true)
+  case "$SERVER_NAME" in
+    *.*) ;;
+    *) SERVER_NAME="$(hostname -s 2>/dev/null || hostname).lan" ;;
+  esac
+fi
+case "$SERVER_NAME" in
+  *.*) ;;
+  *) die "--server-name must hold a dot, e.g. $SERVER_NAME.lan (Ergo's rule)" ;;
+esac
 
 # --------------------------------------------------------------------------
 # the release

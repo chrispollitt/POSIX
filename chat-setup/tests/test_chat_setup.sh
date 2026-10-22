@@ -29,7 +29,7 @@ export CHAT_SETUP_IFACE=lan0                 # the box's interfaces don't matter
 export CHAT_SETUP_LAN_PORTS="$SANDBOX/no-ports-file"
 PY=$(command -v python3)
 OUT="$SANDBOX/out"
-ergo() { "$E" --listen 192.168.10.1 --server-name cpbee --network cmnet "$@"; }
+ergo() { "$E" --listen 192.168.10.1 --server-name cpbee.lan --network cmnet "$@"; }
 
 # --------------------------------------------------------------------------
 t "syntax"
@@ -44,7 +44,7 @@ check "exits 0" '[ $? = 0 ]'
 Y="$SANDBOX/ircd.yaml"
 check "says where it came from" 'head -1 "$Y" | grep -q "written by chat-setup/scripts/configure-ergo.sh from Ergo 2.19.1"'
 check "network name" 'grep -qx "    name: cmnet" "$Y"'
-check "server name" 'grep -qx "    name: cpbee" "$Y"'
+check "server name" 'grep -qx "    name: cpbee.lan" "$Y"'
 check "TLS on the LAN address only" 'grep -qx "        \"192.168.10.1:6697\":" "$Y" && ! grep -q "^        \":6697\":" "$Y"'
 check "absolute certificate paths" 'grep -qx "                cert: /etc/ergo/tls/fullchain.pem" "$Y" && grep -qx "                key: /etc/ergo/tls/privkey.pem" "$Y"'
 check "the commented websocket example is untouched" 'grep -qx "        #         cert: fullchain.pem" "$Y"'
@@ -127,6 +127,8 @@ check "--port out of range" '[ $? != 0 ]'
 check "--network with a space" '[ $? != 0 ]'
 "$E" --register '-x' --print-unit > "$OUT" 2>&1
 check "--register a bad nick" '[ $? != 0 ] && has "$OUT" "not a valid nickname"'
+"$E" --server-name cpbee --print-unit > "$OUT" 2>&1
+check "--server-name without a dot" '[ $? != 0 ] && has "$OUT" "must hold a dot"'
 "$E" --cert /x --print-unit > "$OUT" 2>&1
 check "--cert without --key" '[ $? != 0 ] && has "$OUT" "go together"'
 "$E" --bogus > "$OUT" 2>&1

@@ -56,7 +56,8 @@ to re-run. Run `-h` for every option. In order, it:
 8. **Prints what a client needs:** the `scp` command for `ca.pem` and a
    `tvchat.conf` section.
 
-Defaults: the network is `LAN`, the server is the short hostname, and the
+Defaults: the network is `LAN`, the server is the full hostname (Ergo wants
+a dot in a server name, so a bare `cpbee` becomes `cpbee.lan`), and the
 listen address is `lan0`'s IPv4 (else the first global one). Override them
 with `--network`, `--server-name`, `--listen` and `--port`.
 
