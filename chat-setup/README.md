@@ -50,8 +50,12 @@ to re-run. Run `-h` for every option. In order, it:
    and shows the journal.
 6. **Opens the firewall**, but only with `--open-firewall`. On a cmpi-router
    box, the script adds the port to `/etc/router-setup/lan0-tcp-ports` and
-   runs `setup-router.sh fw`, so the rule survives a firewall reload.
-   Elsewhere, it prints (or with `--open-firewall` adds) the `nft` rule. Use
+   runs `setup-router.sh fw`, so the rule survives a firewall reload. That
+   reload rebuilds the whole firewall from the list, which would close any
+   port opened only at runtime (an `nft add rule`). So if the live firewall
+   accepts a TCP port that is in neither `/etc/nftables.conf` nor the list,
+   the script refuses, names the ports, and changes nothing: add them to the
+   list first. Elsewhere, it prints (or with `--open-firewall` adds) the `nft` rule. Use
    `--firewall-plan` to see what it would do, without root.
 7. **Registers NickServ accounts** with `--register NICK`, once per account.
    The script asks for each password, or reads `$CHAT_SETUP_PASS`. Use these

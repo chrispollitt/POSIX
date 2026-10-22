@@ -317,6 +317,8 @@ fi
 if command -v ufw >/dev/null 2>&1 && $SUDO ufw status 2>/dev/null | grep -q '^Status: active'; then
   $SUDO ufw allow 4190/tcp >/dev/null && log "ufw         : allowed 4190/tcp"
 fi
+# on a cmpi-router box: in its port list, so `setup-router.sh fw` keeps it
+lan_ports_keep 4190 "ManageSieve (mail-setup configure-sieve.sh)"
 FW_RULES="$(fw_ruleset | fw_plan | fw_rules)"
 if [ -n "$FW_RULES" ]; then
   while IFS=$'\t' read -r iif cmd; do
@@ -330,9 +332,11 @@ if [ -n "$FW_RULES" ]; then
       warn "  open it now:  $cmd      (or re-run with --open-firewall)"
     fi
   done <<<"$FW_RULES"
-  warn "A runtime rule is lost when nftables reloads.  To keep it, add 4190 to the same rule"
-  warn "  that accepts 143/993 in your ruleset file (often /etc/nftables.conf), check it with"
-  warn "  'nft -c -f FILE', and leave the live rule as it is until the next boot."
+  if [ ! -f "$LAN_PORTS_FILE" ]; then
+    warn "A runtime rule is lost when nftables reloads.  To keep it, add 4190 to the same rule"
+    warn "  that accepts 143/993 in your ruleset file (often /etc/nftables.conf), check it with"
+    warn "  'nft -c -f FILE', and leave the live rule as it is until the next boot."
+  fi
 fi
 if command -v iptables >/dev/null 2>&1 && $SUDO iptables -S INPUT 2>/dev/null | grep -q '^-P INPUT DROP'; then
   warn "iptables drops by default; if clients time out on 4190:  iptables -A INPUT -p tcp --dport 4190 -j ACCEPT"

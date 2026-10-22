@@ -37,7 +37,11 @@
 #      the previous ircd.yaml is put back and the journal is shown;
 #   6. firewall: on a cmpi-router box (/etc/router-setup/lan0-tcp-ports
 #      exists) the port is added to that list and `setup-router.sh fw`
-#      reloads the ruleset, so it survives a reload; elsewhere, if an
+#      reloads the ruleset, so it survives a reload.  That reload rebuilds
+#      /etc/nftables.conf from the list, so a port opened at runtime (an
+#      `nft add rule`, not in the file) would close: if the live firewall
+#      accepts any such port, the script refuses and names them - list them
+#      in lan0-tcp-ports first; elsewhere, if an
 #      nftables input chain drops by default, the rule to add is printed.
 #      Only with --open-firewall - by default it just says what is needed;
 #   7. --register NICK: creates that NickServ account (password asked for,
@@ -135,6 +139,7 @@ TLS_DIR="$CONF_DIR/tls"
 DATA=/var/lib/ergo
 UNIT=/etc/systemd/system/ergo.service
 LAN_PORTS_FILE="${CHAT_SETUP_LAN_PORTS:-/etc/router-setup/lan0-tcp-ports}"
+NFT_CONF="${CHAT_SETUP_NFT_CONF:-/etc/nftables.conf}"   # what setup-router.sh fw loads
 LOCAL_CA_DIR="${CHAT_SETUP_LOCAL_CA_DIR:-/etc/ssl/Simple_Inc/certs}"
 # Ergo wants a dot in a server name (so it cannot be taken for a nick):
 # the full hostname if it has one, else the short one + .lan
@@ -306,6 +311,33 @@ fw_plan() {
     done
 }
 
+# The TCP ports input chains accept, one per line, from an nft ruleset on
+# stdin ("tcp dport 22 accept", "tcp dport { 143, 993 } accept").
+accepted_tcp_ports() {
+  awk '
+    /^[ \t]*chain / { hook = 0; next }
+    /type filter hook input/ { hook = 1; next }
+    hook && /tcp dport/ && /accept/ {
+      s = $0; sub(/.*tcp dport[ \t]*/, "", s)
+      if (s ~ /^\{/) { sub(/^\{/, "", s); sub(/\}.*/, "", s) } else sub(/[ \t].*/, "", s)
+      n = split(s, a, /[ ,\t]+/)
+      for (i = 1; i <= n; i++) if (a[i] ~ /^[0-9]+$/) print a[i]
+    }' | sort -u
+}
+
+# Ports the live firewall accepts that `setup-router.sh fw` would drop: in
+# neither the ruleset file it rebuilds nor its port list - opened at runtime
+# (mail-setup's 143/993/4190 were, until a reload closed them, Oct 2026).
+fw_lost_ports() {
+  local live keep
+  live=$(fw_ruleset | accepted_tcp_ports)
+  keep=$( { if [ -n "${CHAT_SETUP_NFT_CONF:-}" ]; then cat "$NFT_CONF" 2>/dev/null
+            else ${SUDO:-} cat "$NFT_CONF" 2>/dev/null; fi; } | accepted_tcp_ports
+          awk '$1 ~ /^[0-9]+$/ { print $1 }' "$LAN_PORTS_FILE" 2>/dev/null )
+  comm -23 <(printf '%s\n' "$live" | sed '/^$/d' | sort -u) \
+           <(printf '%s\n' "$keep" | sed '/^$/d' | sort -u)
+}
+
 router_script() {   # cmpi-router's setup-router.sh, if it can be found
   local u h
   [ -n "${CHAT_SETUP_ROUTER:-}" ] && { echo "$CHAT_SETUP_ROUTER"; return 0; }
@@ -331,7 +363,10 @@ case "$MODE" in
   firewall-plan)
     fw_plan | while IFS=$'\t' read -r how what; do
       case "$how" in
-        ports-file) echo "add '$PORT  # Ergo IRC (chat-setup)' to $what, then run setup-router.sh fw" ;;
+        ports-file)
+          echo "add '$PORT  # Ergo IRC (chat-setup)' to $what, then run setup-router.sh fw"
+          lost=$(fw_lost_ports)
+          [ -z "$lost" ] || echo "REFUSED: that reload would close tcp $(echo $lost) (opened at runtime, not in $what): list them there first" ;;
         nft)        echo "$what" ;;
         note)       echo "NOTE: $what" ;;
       esac
@@ -515,6 +550,14 @@ if [ -n "$FW" ]; then
     case "$how" in
       ports-file)
         if [ "$OPEN_FW" = 1 ]; then
+          lost=$(fw_lost_ports)
+          if [ -n "$lost" ]; then
+            die "not reloading the firewall: setup-router.sh fw rebuilds it from $what,
+  and these TCP ports are open now only by runtime rules, so they would close:
+      $(echo $lost)
+  Add each to $what first (\"PORT  # what it is\", one per line), then re-run.
+  (Nothing was changed: Ergo runs, but $PORT is not open to the LAN yet.)"
+          fi
           printf '%s  # Ergo IRC (chat-setup)\n' "$PORT" | $SUDO tee -a "$what" >/dev/null
           log "firewall    : added $PORT to $what"
           if sr=$(router_script); then

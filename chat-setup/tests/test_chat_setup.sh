@@ -115,6 +115,21 @@ check "  (and no runtime rule)" '! has "$OUT" "nft add rule"'
 printf '6697  # Ergo IRC (chat-setup)\n' >> "$SANDBOX/lan0-tcp-ports"
 CHAT_SETUP_LAN_PORTS="$SANDBOX/lan0-tcp-ports" CHAT_SETUP_NFT_RULESET="$NFT" ergo --firewall-plan > "$OUT" 2>&1
 check "  already listed: nothing to do" '[ ! -s "$OUT" ]'
+# a reload rebuilds the ruleset from the file: ports open only at runtime
+# (143, 993, 4190 here - live, in neither file) would close
+printf '443  # Apache https\n' > "$SANDBOX/lan0-tcp-ports"
+sed '/143, 993, 4190/d' "$NFT" > "$SANDBOX/nftables.conf"
+CHAT_SETUP_NFT_CONF="$SANDBOX/nftables.conf" CHAT_SETUP_LAN_PORTS="$SANDBOX/lan0-tcp-ports" \
+  CHAT_SETUP_NFT_RULESET="$NFT" ergo --firewall-plan > "$OUT" 2>&1
+check "runtime-only ports: the reload is refused, naming them" 'has "$OUT" "REFUSED: that reload would close tcp 143 4190 993"'
+printf '143  # imap\n993  # imaps\n4190  # sieve\n' >> "$SANDBOX/lan0-tcp-ports"
+CHAT_SETUP_NFT_CONF="$SANDBOX/nftables.conf" CHAT_SETUP_LAN_PORTS="$SANDBOX/lan0-tcp-ports" \
+  CHAT_SETUP_NFT_RULESET="$NFT" ergo --firewall-plan > "$OUT" 2>&1
+check "  listed in lan0-tcp-ports: fine" 'has "$OUT" "then run setup-router.sh fw" && ! has "$OUT" "REFUSED"'
+cp "$NFT" "$SANDBOX/nftables.conf"; printf '443  # Apache https\n' > "$SANDBOX/lan0-tcp-ports"
+CHAT_SETUP_NFT_CONF="$SANDBOX/nftables.conf" CHAT_SETUP_LAN_PORTS="$SANDBOX/lan0-tcp-ports" \
+  CHAT_SETUP_NFT_RULESET="$NFT" ergo --firewall-plan > "$OUT" 2>&1
+check "  in the ruleset file already: fine" '! has "$OUT" "REFUSED"'
 
 # --------------------------------------------------------------------------
 t "options"

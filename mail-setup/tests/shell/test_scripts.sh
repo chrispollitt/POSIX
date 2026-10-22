@@ -597,6 +597,22 @@ check "mail-setup.sh rejects a bad --pull-every" '[ $? != 0 ]'
 check "mail-setup.sh takes --lan= / --pull-every=" '[ $? = 0 ]'
 
 # --------------------------------------------------------------------------
+# cmpi-router's port list: what setup-router.sh fw rebuilds the firewall from
+t "lan_ports_record"
+LP="$SANDBOX/lan0-tcp-ports"
+lp() { ( SUDO=""; MAIL_SETUP_LAN_PORTS="$LP"; . "$M/lib/common.sh"; lan_ports_record "$@" ); }
+lp 993 "Dovecot imaps"
+check "no list (not a cmpi-router box): nothing done" '[ $? = 2 ] && [ ! -e "$LP" ]'
+printf '443  # Apache https\n' > "$LP"
+lp 993 "Dovecot imaps"
+check "added" '[ $? = 0 ] && grep -qx "993  # Dovecot imaps" "$LP"'
+lp 993 "Dovecot imaps"
+check "already there: not twice" '[ $? = 1 ] && [ "$(grep -c "^993 " "$LP")" = 1 ]'
+lp 99 "not 993"
+check "99 is not 993" '[ $? = 0 ] && grep -qx "99  # not 993" "$LP"'
+check "the rest kept" 'grep -qx "443  # Apache https" "$LP"'
+
+# --------------------------------------------------------------------------
 t "syntax"
 for f in "$M"/mail-setup.sh "$S"/*.sh "$M"/lib/*.sh; do
   bash -n "$f" || bad "bash -n $f"

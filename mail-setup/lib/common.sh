@@ -107,6 +107,32 @@ user_bindir() {
   if [ -d "$HOME/bin" ]; then echo "$HOME/bin"; else echo "$HOME/.local/bin"; fi
 }
 
+# cmpi-router's list of TCP ports open to the LAN: its `setup-router.sh fw`
+# rebuilds the firewall from this file, so a port opened only at runtime
+# (`nft add rule`) closes on the next reload - 143/993/4190 did, Oct 2026.
+LAN_PORTS_FILE="${MAIL_SETUP_LAN_PORTS:-/etc/router-setup/lan0-tcp-ports}"
+
+# lan_ports_record PORT COMMENT -> add "PORT  # COMMENT" to that list.
+#   0 added, 1 already there, 2 not a cmpi-router box (no list): nothing done
+lan_ports_record() {
+  [ -f "$LAN_PORTS_FILE" ] || return 2
+  grep -Eq "^[[:space:]]*$1([[:space:]]|\$)" "$LAN_PORTS_FILE" && return 1
+  printf '%s  # %s\n' "$1" "$2" | ${SUDO:-} tee -a "$LAN_PORTS_FILE" >/dev/null || return 2
+  return 0
+}
+
+# lan_ports_keep PORT COMMENT -> lan_ports_record, and say what happened
+lan_ports_keep() {
+  local rc=0
+  lan_ports_record "$1" "$2" || rc=$?
+  case $rc in
+    0) log "firewall    : $1 added to $LAN_PORTS_FILE - kept open across cmpi-router's"
+       log "              'setup-router.sh fw' (run it to open $1 now, if it isn't)" ;;
+    1) log "firewall    : $1 already in $LAN_PORTS_FILE" ;;
+  esac
+  return 0
+}
+
 # backup FILE [sudo] -> copy FILE to FILE.bak.<stamp> if it exists
 backup() {
   [ -e "$1" ] || return 0
