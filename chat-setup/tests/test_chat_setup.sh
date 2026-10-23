@@ -5,7 +5,8 @@
 # Only the parts that need no root, no network and no Linux: the ircd.yaml
 # made from a default.yaml, the systemd unit, the download pin, the firewall
 # plan, the option checks, ergo-register.py against a fake NickServ, and
-# configure-tvchat.sh's edits of a tvchat.conf and ~/.netrc (offline).
+# configure-tvchat.sh's edits of a tvchat.conf and ~/.netrc (offline), and
+# talkd.py's own suite (test_talkd.py: fake terminals, a fake talk client).
 # Installing Ergo for real is left to a run on the box itself.
 #
 # Exit 0 = all passed, 1 = something failed.
@@ -269,6 +270,11 @@ check "  realname from it, the old file untouched" 'grep -qx "realname = Old Nam
 check "  the CA in ~/.config/tvchat" 'grep -qx "cafile   = $H/.config/tvchat/cpbee-ca.pem" "$TC"'
 tv --nick n3 --no-sasl > "$OUT" 2>&1
 check "  not copied again" '[ $? = 0 ] && ! has "$OUT" "copied to" && has "$OUT" "unchanged in"'
+
+# --------------------------------------------------------------------------
+t "talkd"
+"$PY" -m unittest discover -s "$here" -p test_talkd.py > "$OUT" 2>&1
+check "talkd.py unit tests (test_talkd.py)" '[ $? = 0 ]' || sed "s/^/    /" "$OUT"
 
 echo
 echo "chat-setup tests: $PASS passed, $FAIL failed"

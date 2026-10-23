@@ -9,6 +9,7 @@ toward self-hosted chat.
 |---|---|
 | [scripts/configure-ergo.sh](scripts/configure-ergo.sh) | install and run Ergo, LAN-only, TLS, with NickServ accounts |
 | [scripts/ergo-register.py](scripts/ergo-register.py) | create a NickServ account (used by `--register`) |
+| [talkd/talkd.py](talkd/talkd.py) | a talk(1) daemon (ntalk, UDP 518) - in progress, for tvchat's talk support |
 | [scripts/configure-tvchat.sh](scripts/configure-tvchat.sh) | on a client: point tvchat at that server (CA, `tvchat.conf`, password, a test login) |
 
 The shared shell helpers come from [`../mail-setup/lib/common.sh`](../mail-setup/lib/common.sh).
@@ -71,6 +72,25 @@ with `--network`, `--server-name`, `--listen` and `--port`.
 
 `--remove` stops and removes the service and `/opt/ergo`, but keeps
 `/etc/ergo` and `/var/lib/ergo`, so a re-install keeps the accounts.
+
+## talkd (in progress)
+
+[`talkd/talkd.py`](talkd/talkd.py) is a stdlib-Python talk daemon for the
+LAN master, the first step of tvchat's talk(1) support (TUIs `HANDOFF.md`,
+milestone 6). Today it is a drop-in for the stock talkd: it speaks ntalk on
+UDP 518, keeps, looks up and deletes invitations, and rings a user logged
+in on the host with the classic `Message from Talk_Daemon@...` lines. An
+unknown caller is named by address, not refused. Checked against
+inetutils' `talk` (Cygwin): two clients rang, found the invitation,
+connected and talked.
+
+```sh
+talkd/talkd.py --debug --port 518     # as a user in group tty
+```
+
+Next: tvchat users (an invitation goes to tvchat, not a terminal), a relay
+(talkd splices the two streams, so laptops take no inbound connections),
+and `configure-talkd.sh` (service user, systemd unit, UDP 518 on lan0).
 
 ## The client: tvchat
 
