@@ -194,7 +194,30 @@ class TestUtmp(unittest.TestCase):
                       rec(8, "dead", "pts/2") + rec(7, "alice", "tty1"))
         self.assertEqual(td.UTMP.size, 384)
         self.assertEqual(td.utmp_logins(str(f)), [("bob", "pts/1"), ("alice", "tty1")])
-        self.assertEqual(td.utmp_logins(str(tmp / "none")), [])
+        self.assertIsNone(td.utmp_logins(str(tmp / "none")))
+        # utmp there: it is what counts, even when the terminals say more
+        self.assertEqual(td.system_logins(str(tmp), str(f)), [("bob", "pts/1"), ("alice", "tty1")])
+
+    def test_no_utmp_the_terminals_owners(self):
+        # cpbee (Debian 13), Oct 22: no /run/utmp at all - `who` asks
+        # systemd-logind - so every call was "not logged on"
+        import pwd
+        me = pwd.getpwuid(os.getuid()).pw_name
+        dev = Path(tempfile.mkdtemp(prefix="talkd-d-"))
+        self.addCleanup(shutil.rmtree, str(dev), True)
+        (dev / "pts").mkdir()
+        for name in ("pts/1", "pts/12", "pts/ptmx", "tty3", "ttyS0", "console"):
+            (dev / name).write_bytes(b"")
+        self.assertEqual(td.tty_logins(str(dev)), [("%s" % me, "pts/1"), (me, "pts/12"), (me, "tty3")])
+        self.assertEqual(td.system_logins(str(dev), str(dev / "no-utmp")), td.tty_logins(str(dev)))
+        # and a daemon with no logins= given uses exactly that, on a host with
+        # no utmp (this one may have its own: point the lookup at nowhere)
+        self.addCleanup(setattr, td, "UTMP_FILES", td.UTMP_FILES)
+        td.UTMP_FILES = (str(dev / "no-utmp"),)
+        d = td.TalkDaemon(devdir=str(dev), hostname="cpbee")
+        (dev / "pts" / "1").chmod(0o620)
+        self.assertEqual(d.find_user(me)[1], td.SUCCESS)
+        self.assertEqual(td.tty_logins(str(dev / "nowhere")), [])
 
 
 class TestOverUdp(TalkdBase):

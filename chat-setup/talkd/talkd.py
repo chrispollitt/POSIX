@@ -162,7 +162,8 @@ def response(rtype, answer, id_num=0, addr=("0.0.0.0", 0)):
 
 
 # --------------------------------------------------------------------------
-# Who is logged in, and on which terminal (utmp)
+# Who is logged in, and on which terminal: utmp where there is one, else
+# the terminals themselves
 # --------------------------------------------------------------------------
 # glibc's struct utmp (Linux, 64- and 32-bit alike: 384 bytes)
 UTMP = struct.Struct("hhi32s4s32s256shhiii4i20s")
@@ -171,7 +172,8 @@ UTMP_FILES = ("/run/utmp", "/var/run/utmp")
 
 
 def utmp_logins(path=None):
-    """[(user, tty)] of the USER_PROCESS entries in utmp."""
+    """[(user, tty)] of the USER_PROCESS entries in utmp; None when there
+    is no utmp at all."""
     for p in ([path] if path else UTMP_FILES):
         try:
             with open(p, "rb") as f:
@@ -184,7 +186,42 @@ def utmp_logins(path=None):
             if rec[0] == USER_PROCESS:
                 out.append((_name(rec[5]), _name(rec[3])))
         return out
-    return []
+    return None
+
+
+def tty_logins(devdir="/dev"):
+    """[(user, tty)] from the terminals' owners: sshd and login give each
+    session's terminal to its user (/dev/pts/N, the consoles /dev/ttyN), so
+    a terminal miche owns is one she is logged in on - and one `su miche`
+    opened is still its first owner's, as it should be.  Root's are left
+    out: root owns every console nobody is using."""
+    import pwd
+    out = []
+    names = []
+    try:
+        names += ["pts/" + n for n in os.listdir(os.path.join(devdir, "pts")) if n.isdigit()]
+    except OSError:
+        pass
+    try:
+        names += [n for n in os.listdir(devdir) if n.startswith("tty") and n[3:].isdigit()]
+    except OSError:
+        pass
+    for tty in sorted(names):
+        try:
+            uid = os.stat(os.path.join(devdir, tty)).st_uid
+            if uid == 0:
+                continue
+            out.append((pwd.getpwuid(uid).pw_name, tty))
+        except (OSError, KeyError):
+            continue
+    return out
+
+
+def system_logins(devdir="/dev", utmp=None):
+    """utmp's logins; where there is none - Debian 13 dropped it (glibc's
+    utmp is not 2038-safe; `who` asks systemd-logind) - the terminals'."""
+    u = utmp_logins(utmp)
+    return u if u is not None else tty_logins(devdir)
 
 
 # --------------------------------------------------------------------------
@@ -202,9 +239,9 @@ class TalkDaemon:
     logins() -> [(user, tty)] and the tty directory are injectable, and so
     is the clock, so the tests need no real terminals and no waiting."""
 
-    def __init__(self, logins=utmp_logins, devdir="/dev", clock=time.time,
+    def __init__(self, logins=None, devdir="/dev", clock=time.time,
                  hostname=None, resolve=None):
-        self.logins = logins
+        self.logins = logins or (lambda: system_logins(devdir))
         self.devdir = devdir
         self.clock = clock
         self.hostname = hostname or socket.gethostname().split(".")[0]
