@@ -9,7 +9,7 @@ toward self-hosted chat.
 |---|---|
 | [scripts/configure-ergo.sh](scripts/configure-ergo.sh) | install and run Ergo, LAN-only, TLS, with NickServ accounts |
 | [scripts/ergo-register.py](scripts/ergo-register.py) | create a NickServ account (used by `--register`) |
-| [talkd/talkd.py](talkd/talkd.py) | a talk(1) daemon (ntalk, UDP 518) - in progress, for tvchat's talk support |
+| [talkd/talkd.py](talkd/talkd.py) | a talk(1) daemon (ntalk on UDP 518) that also rings and relays for tvchat (TCP 518) - in progress |
 | [scripts/configure-tvchat.sh](scripts/configure-tvchat.sh) | on a client: point tvchat at that server (CA, `tvchat.conf`, password, a test login) |
 
 The shared shell helpers come from [`../mail-setup/lib/common.sh`](../mail-setup/lib/common.sh).
@@ -76,21 +76,33 @@ with `--network`, `--server-name`, `--listen` and `--port`.
 ## talkd (in progress)
 
 [`talkd/talkd.py`](talkd/talkd.py) is a stdlib-Python talk daemon for the
-LAN master, the first step of tvchat's talk(1) support (TUIs `HANDOFF.md`,
-milestone 6). Today it is a drop-in for the stock talkd: it speaks ntalk on
-UDP 518, keeps, looks up and deletes invitations, and rings a user logged
-in on the host with the classic `Message from Talk_Daemon@...` lines. An
-unknown caller is named by address, not refused. Checked against
-inetutils' `talk` (Cygwin): two clients rang, found the invitation,
-connected and talked.
+LAN master - **one** for the LAN; laptops run none. It is tvchat's way into
+talk(1) (TUIs `HANDOFF.md`, milestone 6):
+
+- **For talk:** ntalk on UDP 518 - invitations kept, looked up and deleted,
+  and a user logged in on the host rung on their terminal with the classic
+  `Message from Talk_Daemon@...` lines. An unknown caller is named by
+  address, not refused. A drop-in for the stock talkd.
+- **For tvchat:** TCP 518. tvchat says `HELLO USER`; from then on a call
+  for that user rings tvchat (`RING`), not a terminal. tvchat can `CALL`
+  another tvchat user, someone logged in on the host, or `user@host` (that
+  host's own talkd is asked, the standard way).
+- **The relay:** talkd carries every conversation a tvchat user is in - it
+  connects to the real talk itself, or takes the real talk's connection on
+  a relay port of its own - and splices the bytes, so laptops take no
+  inbound connections. The protocol is in the module's docstring.
+
+Checked against inetutils' `talk` (Cygwin) both ways: a real talk calling a
+tvchat user, and a tvchat user calling someone whose real talk answers.
+(That `talk` took ~10 s before its first request on a laptop whose host
+name resolved to a link-local address - its own lookup, not the daemon.)
 
 ```sh
 talkd/talkd.py --debug --port 518     # as a user in group tty
 ```
 
-Next: tvchat users (an invitation goes to tvchat, not a terminal), a relay
-(talkd splices the two streams, so laptops take no inbound connections),
-and `configure-talkd.sh` (service user, systemd unit, UDP 518 on lan0).
+Next: `configure-talkd.sh` (service user, systemd unit, UDP + TCP 518 on
+lan0), then tvchat's side.
 
 ## The client: tvchat
 
