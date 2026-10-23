@@ -113,6 +113,9 @@ the relay ports 5181-5188 in `lan0-tcp-ports`, then runs
 `setup-router.sh fw` - and, as `configure-ergo.sh` does, refuses (changing
 nothing) if that reload would close a port open only by a live rule, TCP
 or UDP: the October mail-port outage.
+(Since 2026-10-22 `setup-router.sh` itself refuses such a reload too, from
+any of its modes - `FW_FORCE=1` overrides; its `svc-*` ftp/telnet rules are
+exempt.)
 
 Next: tvchat's side (`protocol = talk`).
 
