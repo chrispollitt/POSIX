@@ -327,6 +327,28 @@ printf '518  # talk\n' > "$SANDBOX/t-udp"
 printf '%s\n' 518 5181 5182 5183 5184 5185 5186 5187 5188 >> "$SANDBOX/t-tcp"
 tplan router-new
 check "everything listed: nothing to do" '[ ! -s "$OUT" ]'
+# Oct 22 on cpbee: two silent stops under set -euo pipefail
+# 1. no lan0-udp-ports yet (before the first --open-firewall): the would-close
+#    check read the missing list and the plan died after printing half of itself
+rm -f "$SANDBOX/t-udp"; printf '443  # Apache https\n' > "$SANDBOX/t-tcp"
+cp "$TN" "$SANDBOX/tnft.conf"
+LP="$SANDBOX/t-tcp" UP="$SANDBOX/t-udp" CHAT_SETUP_NFT_CONF="$SANDBOX/tnft.conf" CHAT_SETUP_NFT_RULESET="$TN.live" \
+  CHAT_SETUP_ROUTER="$SANDBOX/router-new" talkd --firewall-plan > "$OUT" 2>&1
+check "no UDP list yet: the whole plan, the would-close check included" '[ $? = 0 ] && has "$OUT" "then run setup-router.sh fw" && has "$OUT" "REFUSED: that reload would close udp 5353" && ! has "$OUT" "ERROR"'
+# 2. nothing on UDP 518: the empty "who holds it" pipeline ended the install
+eval "$(sed -n '/^port_holder() {/,/^}/p' "$K")"
+ss() { printf '%s' "${SS_OUT:-}"; }
+PORT=518
+got=$(set -euo pipefail; SS_OUT="" port_holder; echo "rc=$?")
+check "port_holder: nothing on 518 -> empty, and success" '[ "$got" = "rc=0" ]'
+got=$(SS_OUT='UNCONN 0 0 0.0.0.0:518 0.0.0.0:* users:(("inetutils-inetd",pid=9,fd=5))' port_holder)
+check "  inetd on 518 -> named" '[ "$got" = "\"inetutils-inetd\"" ]'
+got=$(SS_OUT='UNCONN 0 0 0.0.0.0:518 0.0.0.0:* users:(("python3",pid=7,fd=3)) /opt/talkd/talkd.py' port_holder)
+check "  our own talkd.py -> not a conflict" '[ -z "$got" ]'
+unset -f ss
+# any stop says where, never silently
+talkd --print-inetd "$SANDBOX/no-such-inetd.conf" > "$OUT" 2>&1
+check "a failure says where it stopped" '[ $? != 0 ] && has "$OUT" "ERROR: configure-talkd.sh stopped at line"'
 
 # --------------------------------------------------------------------------
 t "talkd"

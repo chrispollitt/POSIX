@@ -48,6 +48,12 @@
 #
 set -euo pipefail
 
+# set -e stops at the first failing command - say where, never silently
+# (twice on cpbee, Oct 22, a harmless empty grep ended it without a word);
+# -E: inside functions too
+set -E
+trap 'rc=$?; printf "ERROR: configure-talkd.sh stopped at line %s (exit %s): %s\n" "$LINENO" "$rc" "$BASH_COMMAND" >&2' ERR
+
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 # the shared helpers (log/warn/die/backup/cidr_check, OS + SUDO) are mail-setup's
 . "$here/../../mail-setup/lib/common.sh"
@@ -149,6 +155,13 @@ inetd_edit() {   # inetd_edit FILE -> the file with them commented out, on stdou
 }
 inetd_has_talk() { grep -Eq '^[[:space:]]*(talk|ntalk)[[:space:]]' "$1" 2>/dev/null; }
 
+# the process (as ss names it, "name") holding UDP $PORT, other than our own
+# talkd.py; empty - and success - when there is none
+port_holder() {
+  { ${SUDO:-} ss -lunpH "sport = :$PORT" 2>/dev/null || true; } \
+    | awk '!/talkd\.py/ { if (match($0, /users:\(\("[^"]*"/)) { print substr($0, RSTART + 8, RLENGTH - 8); exit } }'
+}
+
 # --------------------------------------------------------------------------
 # firewall: what step 5 would do, as "how<TAB>...":
 #   list  FILE  PROTO  PORT   add PORT to that cmpi-router list
@@ -210,9 +223,10 @@ fw_lost_ports() {
   for proto in tcp udp; do
     if [ "$proto" = udp ]; then list=$LAN_UDP_PORTS_FILE; else list=$LAN_PORTS_FILE; fi
     live=$(fw_ruleset | accepted_ports "$proto")
+    # (a list may not exist yet - lan0-udp-ports until the first --open-firewall)
     keep=$( { if [ -n "${CHAT_SETUP_NFT_CONF:-}" ]; then cat "$NFT_CONF" 2>/dev/null
               else ${SUDO:-} cat "$NFT_CONF" 2>/dev/null; fi; } | accepted_ports "$proto"
-            awk '$1 ~ /^[0-9]+$/ { print $1 }' "$list" 2>/dev/null )
+            [ ! -f "$list" ] || awk '$1 ~ /^[0-9]+$/ { print $1 }' "$list" )
     comm -23 <(printf '%s\n' "$live" | sed '/^$/d' | sort -u) \
              <(printf '%s\n' "$keep" | sed '/^$/d' | sort -u) | sed "s/^/$proto /"
   done
@@ -332,7 +346,7 @@ fi
 if systemctl list-unit-files 2>/dev/null | grep -Eq '^(talkd|ntalkd|talk)\.socket'; then
   warn "a talk socket unit exists - disable it if it holds port $PORT"
 fi
-holder=$($SUDO ss -lunpH "sport = :$PORT" 2>/dev/null | grep -v 'talkd.py' | sed -n 's/.*users:((\("[^"]*"\).*/\1/p' | head -1)
+holder=$(port_holder)
 if [ -n "$holder" ] && ! systemctl is-active -q talkd; then
   die "UDP $PORT is held by $holder - stop it first (another talkd?)"
 fi
