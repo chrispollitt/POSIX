@@ -178,8 +178,8 @@ check "no password: exit 2" '[ $? = 2 ]'
 # --------------------------------------------------------------------------
 t "configure-tvchat.sh"
 V="$C/scripts/configure-tvchat.sh"
-H="$SANDBOX/home"; TC="$H/.config/tvmail/tvchat.conf"
-mkdir -p "$H/.config/tvmail"
+H="$SANDBOX/home"; TC="$H/.config/tvchat/tvchat.conf"
+mkdir -p "$H/.config/tvchat"
 printf '%s\n' "-----BEGIN CERTIFICATE-----" "MIIB" "-----END CERTIFICATE-----" > "$SANDBOX/ca.pem"
 cat > "$TC" <<'EOF'
 # my notes
@@ -203,8 +203,8 @@ private() { case "$(stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1")" in [67]00)
 tv() { env -u TVCHAT_PASS_CPBEE -u TVCHAT_CONF TVCHAT_BACKEND="${TVB-}" HOME="$H" "$V" --ca "$SANDBOX/ca.pem" --no-check "$@"; }
 CHAT_SETUP_PASS=pw1 tv --nick chris-pollitt --autoconnect > "$OUT" 2>&1
 check "first run: exit 0" '[ $? = 0 ] && has "$OUT" "[account:cpbee] added to"'
-check "  the CA copied" 'cmp -s "$SANDBOX/ca.pem" "$H/.config/tvmail/cpbee-ca.pem"'
-check "  cafile is a full path" 'grep -qx "cafile   = $H/.config/tvmail/cpbee-ca.pem" "$TC"'
+check "  the CA copied" 'cmp -s "$SANDBOX/ca.pem" "$H/.config/tvchat/cpbee-ca.pem"'
+check "  cafile is a full path" 'grep -qx "cafile   = $H/.config/tvchat/cpbee-ca.pem" "$TC"'
 check "  parses, values clean, autoconnect added" '"$PY" -c "
 import configparser, sys
 c = configparser.ConfigParser(interpolation=None); c.read(sys.argv[1])
@@ -244,7 +244,7 @@ check "--nick is required" '[ $? != 0 ] && has "$OUT" "--nick is required"'
 rm -rf "$H"; mkdir -p "$H"
 CHAT_SETUP_PASS=pw tv --nick n1 > "$OUT" 2>&1
 check "no tvchat.conf yet: created, owner only" '[ $? = 0 ] && has "$OUT" "created" && private "$TC"'
-# the password as tvmail will find it: the backend's own lookup
+# the password as tvchat will find it: the backend's own lookup
 cat > "$SANDBOX/new-backend" <<'EOF2'
 def find_password_where(account, host, login, scheme):
     return ("t", "~/.mu-tickets") if (account, host, login) == ("cpbee", "cpbee", "n1") else (None, None)
@@ -253,11 +253,22 @@ printf 'def find_password(*a):
     return "mailpw"
 ' > "$SANDBOX/old-backend"
 TVB="$SANDBOX/new-backend" tv --nick n1 > "$OUT" 2>&1
-check "the backend's lookup is the one asked" '[ $? = 0 ] && has "$OUT" "tvmail will use the one in ~/.mu-tickets" && ! has "$OUT" "WARN"'
+check "the backend's lookup is the one asked" '[ $? = 0 ] && has "$OUT" "tvchat will use the one in ~/.mu-tickets" && ! has "$OUT" "WARN"'
 TVB="$SANDBOX/old-backend" tv --nick n1 > "$OUT" 2>&1
-check "an old backend: a warning, ~/.netrc used" '[ $? = 0 ] && has "$OUT" "predates bug #46" && has "$OUT" "tvmail will use the one in ~/.netrc"'
+check "an old backend: a warning, ~/.netrc used" '[ $? = 0 ] && has "$OUT" "predates bug #46" && has "$OUT" "tvchat will use the one in ~/.netrc"'
 TVB="$SANDBOX/new-backend" CHAT_SETUP_PASS=pw2 tv --nick n2 --host n2.lan > "$OUT" 2>&1
 check "  the backend does not find a password just added: an error" '[ $? != 0 ] && has "$OUT" "does not find the password just added"'
+# the old ~/.config/tvmail/tvchat.conf (chat was part of tvmail): copied, then edited
+rm -rf "$H"; mkdir -p "$H/.config/tvmail"
+OLD="$H/.config/tvmail/tvchat.conf"
+printf '%s\n' '[account:libera]' 'protocol = irc' 'host     = irc.libera.chat' 'realname = Old Name' > "$OLD"
+cp "$OLD" "$SANDBOX/old.conf"
+tv --nick n3 --no-sasl > "$OUT" 2>&1
+check "an old tvmail tvchat.conf: copied to ~/.config/tvchat" '[ $? = 0 ] && has "$OUT" "copied to $TC" && has "$TC" "[account:libera]" && has "$TC" "[account:cpbee]"'
+check "  realname from it, the old file untouched" 'grep -qx "realname = Old Name" "$TC" && cmp -s "$OLD" "$SANDBOX/old.conf"'
+check "  the CA in ~/.config/tvchat" 'grep -qx "cafile   = $H/.config/tvchat/cpbee-ca.pem" "$TC"'
+tv --nick n3 --no-sasl > "$OUT" 2>&1
+check "  not copied again" '[ $? = 0 ] && ! has "$OUT" "copied to" && has "$OUT" "unchanged in"'
 
 echo
 echo "chat-setup tests: $PASS passed, $FAIL failed"

@@ -1,7 +1,7 @@
 # chat-setup
 
 Chat servers for the LAN. Today: an [Ergo](https://ergo.chat) IRC server, so an
-IRC client in development (tvmail's chat) can be tested against a server you
+IRC client in development (tvchat) can be tested against a server you
 own and can watch, instead of a public network. It is also the first step
 toward self-hosted chat.
 
@@ -9,7 +9,7 @@ toward self-hosted chat.
 |---|---|
 | [scripts/configure-ergo.sh](scripts/configure-ergo.sh) | install and run Ergo, LAN-only, TLS, with NickServ accounts |
 | [scripts/ergo-register.py](scripts/ergo-register.py) | create a NickServ account (used by `--register`) |
-| [scripts/configure-tvchat.sh](scripts/configure-tvchat.sh) | on a client: point tvmail's chat at that server (CA, `tvchat.conf`, password, a test login) |
+| [scripts/configure-tvchat.sh](scripts/configure-tvchat.sh) | on a client: point tvchat at that server (CA, `tvchat.conf`, password, a test login) |
 
 The shared shell helpers come from [`../mail-setup/lib/common.sh`](../mail-setup/lib/common.sh).
 
@@ -72,23 +72,26 @@ with `--network`, `--server-name`, `--listen` and `--port`.
 `--remove` stops and removes the service and `/opt/ergo`, but keeps
 `/etc/ergo` and `/var/lib/ergo`, so a re-install keeps the accounts.
 
-## The client: tvmail's chat
+## The client: tvchat
 
 ```sh
 ./scripts/configure-tvchat.sh --nick yournick --autoconnect
 ```
 
-Run it as yourself on the machine where tvmail runs (cmlaptop); it needs no
+Run it as yourself on the machine where tvchat runs (cmlaptop); it needs no
 root. `--host` defaults to `cpbee`; run `-h` for every option. It is safe to
 re-run. In order, it:
 
 1. **Fetches the CA** with `scp HOST:/opt/ergo/ca.pem`, so ssh's `known_hosts`
    vouches for it (`--ca FILE` uses a copy you already have), and saves it as
-   `~/.config/tvmail/ACCOUNT-ca.pem`.
+   `~/.config/tvchat/ACCOUNT-ca.pem`.
 2. **Checks TLS** the way `tvchat-backend` will: Python's `ssl`, with that CA
    and the host name checked against the certificate.
-3. **Writes `[account:ACCOUNT]`** into `~/.config/tvmail/tvchat.conf` (or
-   `$TVCHAT_CONF`). The section is added, or replaced if it's already there.
+3. **Writes `[account:ACCOUNT]`** into `~/.config/tvchat/tvchat.conf` (or
+   `$TVCHAT_CONF`). If that file doesn't exist yet but the old
+   `~/.config/tvmail/tvchat.conf` does (chat was part of tvmail until
+   tvchat 0.1.0), the old one is copied there first; tvchat reads the new
+   one from then on. The section is added, or replaced if it's already there.
    Every other section and comment stays, and the file is backed up first; an
    unchanged file is left alone. `cafile` gets the full path, since
    `tvchat-backend` doesn't expand `~`. Comments go on lines of their own, since

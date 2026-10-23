@@ -2,21 +2,23 @@
 #
 # configure-tvchat.sh
 #
-# The client half of configure-ergo.sh: point tvmail's chat at an IRC server
+# The client half of configure-ergo.sh: point tvchat at an IRC server
 # set up by it (or any IRC server whose CA you can fetch).  Run it as
 # yourself on the client machine - no root.  The script:
 #
 #   1. fetches the server's CA (by default scp HOST:/opt/ergo/ca.pem, so ssh's
 #      known_hosts vouches for it; --ca FILE uses a local copy instead) to
-#      ~/.config/tvmail/ACCOUNT-ca.pem;
+#      ~/.config/tvchat/ACCOUNT-ca.pem;
 #   2. checks that a TLS connection to HOST:PORT verifies against it - the
 #      way tvchat-backend will (Python's ssl, hostname checked);
-#   3. writes [account:ACCOUNT] into ~/.config/tvmail/tvchat.conf (or
+#   3. writes [account:ACCOUNT] into ~/.config/tvchat/tvchat.conf (or
 #      $TVCHAT_CONF): added, or replaced if it is there - every other section
-#      and comment is kept, and the file is backed up first.  cafile gets the
+#      and comment is kept, and the file is backed up first.  An old
+#      ~/.config/tvmail/tvchat.conf (from when chat was part of tvmail) is
+#      copied there first if there is none yet.  cafile gets the
 #      full path (tvchat-backend does not expand ~).  With --autoconnect the
 #      account joins [chat] autoconnect;
-#   4. the SASL password: looked up the way tvmail will (the installed
+#   4. the SASL password: looked up the way tvchat will (the installed
 #      tvchat-backend's own lookup: $TVCHAT_PASS_<ACCOUNT>, ~/.mu-tickets,
 #      ~/.netrc - each only for NICK) and kept if found; else asked for (or
 #      $CHAT_SETUP_PASS) and added to ~/.netrc, mode 600;
@@ -34,7 +36,7 @@
 #   --port N            TLS port (default: 6697)
 #   --account NAME      the section name, [account:NAME] (default: HOST's
 #                       first label)
-#   --display TEXT      shown in tvmail's titles (default: NAME, or
+#   --display TEXT      shown in tvchat's titles (default: NAME, or
 #                       NAME (HOST) when they differ)
 #   --channels LIST     joined on connect, comma-separated (default: #test)
 #   --realname TEXT     (default: the one tvchat.conf already uses, else
@@ -94,9 +96,15 @@ case "$ACCOUNT" in ''|*[/\\[:space:]]*|*]*) die "--account: no '/', '\\', ']' or
 if [ -z "$DISPLAY_NAME" ]; then
   if [ "$ACCOUNT" = "$HOST" ]; then DISPLAY_NAME=$ACCOUNT; else DISPLAY_NAME="$ACCOUNT ($HOST)"; fi
 fi
-CONF="${TVCHAT_CONF:-$HOME/.config/tvmail/tvchat.conf}"
-if [ -z "$REALNAME" ] && [ -f "$CONF" ]; then   # the one another account already uses
-  REALNAME=$(sed -n 's/^[[:space:]]*realname[[:space:]]*[=:][[:space:]]*//p' "$CONF" | head -1)
+CONF="${TVCHAT_CONF:-$HOME/.config/tvchat/tvchat.conf}"
+# chat was part of tvmail until tvchat 0.1.0; tvchat still reads this one
+# when its own is missing, so it is copied over (step 3) rather than ignored
+OLD_CONF=""
+if [ -z "${TVCHAT_CONF:-}" ] && [ ! -e "$CONF" ] && [ -f "$HOME/.config/tvmail/tvchat.conf" ]; then
+  OLD_CONF="$HOME/.config/tvmail/tvchat.conf"
+fi
+if [ -z "$REALNAME" ] && [ -f "${OLD_CONF:-$CONF}" ]; then   # the one another account already uses
+  REALNAME=$(sed -n 's/^[[:space:]]*realname[[:space:]]*[=:][[:space:]]*//p' "${OLD_CONF:-$CONF}" | head -1)
 fi
 if [ -z "$REALNAME" ]; then   # not Cygwin's "U-HOST\user,S-1-5-..."
   REALNAME=$(getent passwd "$(id -un)" 2>/dev/null | cut -d: -f5 | cut -d, -f1 || true)
@@ -114,7 +122,7 @@ CAFILE="$CONF_DIR/$ACCOUNT-ca.pem"
 PASS_VAR="TVCHAT_PASS_$(printf '%s' "$ACCOUNT" | tr -c 'A-Za-z0-9' '_' | tr 'a-z' 'A-Z')"
 NETRC="$HOME/.netrc"
 
-step "tvmail chat -> $NICK@$HOST:$PORT as [account:$ACCOUNT]"
+step "tvchat -> $NICK@$HOST:$PORT as [account:$ACCOUNT]"
 mkdir -p "$CONF_DIR"
 chmod 700 "$CONF_DIR" 2>/dev/null || true
 
@@ -178,6 +186,10 @@ PYEOF
 fi
 
 # 3. tvchat.conf -------------------------------------------------------------
+if [ -n "$OLD_CONF" ]; then   # its cafile paths still point into ~/.config/tvmail - they stay valid
+  cp -p -- "$OLD_CONF" "$CONF" || die "could not copy $OLD_CONF to $CONF"
+  log "tvchat.conf : $OLD_CONF copied to $CONF (tvchat reads the new one now; the old one can go)"
+fi
 section="[account:$ACCOUNT]
 protocol = irc
 display  = $DISPLAY_NAME
@@ -207,7 +219,7 @@ try:
         lines = f.read().splitlines(True)
     what = "added to"
 except FileNotFoundError:
-    lines = ["# tvchat-backend configuration - the chat side of tvmail.\n",
+    lines = ["# tvchat configuration (read by tvchat-backend).\n",
              "# NO PASSWORDS HERE: ~/.netrc or $TVCHAT_PASS_<ACCOUNT>.\n", "\n"]
     what = "created"
 if lines and not lines[-1].endswith("\n"):
@@ -284,9 +296,9 @@ log "tvchat.conf : [account:$ACCOUNT] $result $CONF"
 [ "$AUTOCONNECT" = 1 ] && log "autoconnect : $ACCOUNT"
 
 # 4. the password ------------------------------------------------------------
-# Found the way tvmail will find it: the installed tvchat-backend's own
+# Found the way tvchat will find it: the installed tvchat-backend's own
 # find_password_where() ($TVCHAT_BACKEND names another), so the check in 5.
-# sends what tvmail will send.  An older backend without it (before bug #46:
+# sends what tvchat will send.  An older backend without it (before bug #46:
 # ~/.mu-tickets could hand over another user's password) gets a warning and
 # the same order done here: $TVCHAT_PASS_<ACCOUNT>, then ~/.netrc for NICK.
 # ($TVCHAT_BACKEND= empty: none, as in the tests)
@@ -316,7 +328,7 @@ def lookup(account, host, nick, backend, pass_var, netrc_path):
         return a[2], "~/.netrc" + old
     return None, None
 '
-find_where() {   # -> where tvmail's lookup finds the password; 1 if nowhere
+find_where() {   # -> where tvchat's lookup finds the password; 1 if nowhere
   PASS_VAR="$PASS_VAR" "$PY" - "$ACCOUNT" "$HOST" "$NICK" "$BACKEND" "$NETRC" <<'PYEOF'
 import os, sys
 exec(os.environ["LOOKUP_PY"])
@@ -330,8 +342,8 @@ have_pass=""; where=""
 if [ "$SASL" = 1 ]; then
   [ -n "$BACKEND" ] || warn "no tvchat-backend on PATH: looking in \$$PASS_VAR and ~/.netrc only"
   if where=$(find_where); then
-    case "$where" in *"(old)") warn "the installed tvchat-backend predates bug #46's fix: tvmail may send another password (from ~/.mu-tickets) - update it" ;; esac
-    log "password    : tvmail will use the one in ${where%% (*}"
+    case "$where" in *"(old)") warn "the installed tvchat-backend predates bug #46's fix: tvchat may send another password (from ~/.mu-tickets) - update it" ;; esac
+    log "password    : tvchat will use the one in ${where%% (*}"
     where=${where%% (*}; have_pass=1
   else
     pw="${CHAT_SETUP_PASS:-}"
@@ -347,7 +359,7 @@ if [ "$SASL" = 1 ]; then
     printf 'machine %s login %s password %s\n' "$HOST" "$NICK" "$pw" >> "$NETRC"
     unset pw
     log "password    : added to ~/.netrc (machine $HOST, mode 600)"
-    where=$(find_where) || die "tvmail's lookup does not find the password just added to ~/.netrc"
+    where=$(find_where) || die "tvchat's lookup does not find the password just added to ~/.netrc"
     where=${where%% (*}; have_pass=1
   fi
 fi
@@ -420,6 +432,6 @@ fi
 
 cat <<EOF
 
-Done.  Start tvmail (tvmail --debug writes debug.chat.log beside debug.log);
-Chat > Connect... > $DISPLAY_NAME, then Alt-C for its conversations.
+Done.  Start tvchat (tvchat --debug writes debug.chat.log beside debug.log);
+Chat > Connect... > $DISPLAY_NAME.
 EOF

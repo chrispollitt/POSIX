@@ -3,7 +3,7 @@
 # configure-ergo.sh
 #
 # Run an Ergo IRC server (https://ergo.chat) on this box for the LAN: a place
-# to test an IRC client (tvmail's chat) without bothering a public network,
+# to test an IRC client (tvchat) without bothering a public network,
 # and the start of self-hosted chat.  Ergo is one Go binary with NickServ
 # built in, SASL, and the IRCv3 extensions (server-time, echo-message,
 # chathistory, labeled-response ...) a modern client expects.
@@ -600,12 +600,12 @@ done
 fqdn=$(hostname -f 2>/dev/null || echo "$host")
 cat <<EOF
 
-== for a client (tvmail's chat) ==
+== for a client (tvchat) ==
   On the client, chat-setup/scripts/configure-tvchat.sh does all of this:
       ./configure-tvchat.sh --host $host --port $PORT --nick YOURNICK
   By hand: the server's CA, to verify it - copy it to the client machine:
-      scp $host:$PREFIX/ca.pem ~/.config/tvmail/$host-ca.pem
-  then add to ~/.config/tvmail/tvchat.conf (cafile needs the full path;
+      scp $host:$PREFIX/ca.pem ~/.config/tvchat/$host-ca.pem
+  then add to ~/.config/tvchat/tvchat.conf (cafile needs the full path;
   comments go on lines of their own - one after a value becomes part of it):
 
       [account:$host]
@@ -616,7 +616,7 @@ cat <<EOF
       port     = $PORT
       tls      = true
       verify   = true
-      cafile   = /home/YOU/.config/tvmail/$host-ca.pem
+      cafile   = /home/YOU/.config/tvchat/$host-ca.pem
       nick     = YOURNICK
       # once registered (--register YOURNICK); omit to connect unauthenticated
       sasl     = YOURNICK
