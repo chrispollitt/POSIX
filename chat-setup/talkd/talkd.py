@@ -60,6 +60,7 @@ CAP_NET_BIND_SERVICE for port 518 - chat-setup/scripts/configure-talkd.sh
 import argparse
 import errno
 import heapq
+import ipaddress
 import logging
 import os
 import selectors
@@ -615,10 +616,11 @@ class Call:
 
 
 class Relay:
-    def __init__(self, daemon, loop, peer_port=518, local_names=()):
+    def __init__(self, daemon, loop, peer_port=518, local_names=(), relay_ports=None):
         self.d = daemon
         self.loop = loop
         self.peer_port = peer_port       # where other hosts' talkds listen
+        self.relay_ports = relay_ports   # (lo, hi) for the relay ports, or None
         self.local = set(n.lower() for n in local_names) | {
             "", "localhost", daemon.hostname.lower(), socket.getfqdn().lower()}
         self.users = {}                  # user -> [Control]
@@ -742,8 +744,8 @@ class Relay:
                 c.send("STATE %s ringing %s" % (cid, user))
                 return
             call.kind = "out"
-            self._listen(call)
-            self._ring_local(call, tty)
+            if self._listen(call):
+                self._ring_local(call, tty)
             return
         call.kind = "out"
         try:
@@ -762,14 +764,28 @@ class Relay:
 
     # -- 'out': the relay port and our own invitation ---------------------------
     def _listen(self, call):
+        """The relay port a callee's talk connects to: the first free one in
+        relay_ports (a range a firewall can let in), else any free port."""
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        s.bind(("0.0.0.0", 0))
+        for port in (range(self.relay_ports[0], self.relay_ports[1] + 1)
+                     if self.relay_ports else [0]):
+            try:
+                s.bind(("0.0.0.0", port))
+                break
+            except OSError:
+                continue
+        else:
+            s.close()
+            self.end(call, "too many calls at once (relay ports %d-%d all busy)"
+                     % self.relay_ports)
+            return False
         s.listen(1)
         s.setblocking(False)
         call.listen = s
         call.socks.append(s)
         self.loop.watch(s, on_read=lambda: self._answered(call))
+        return True
 
     def _my_addr(self, call, toward):
         """(ip, port) of the relay port as the callee's host can reach it."""
@@ -863,8 +879,8 @@ class Relay:
         if answer == SUCCESS:            # they called us first: connect to them
             self._connect_out(call, addr, call.caller)
             return
-        self._listen(call)
-        self._announce_remote(call, 0xFFFFFFFF)
+        if self._listen(call):
+            self._announce_remote(call, 0xFFFFFFFF)
 
     def _announce_remote(self, call, id_num):
         if call.done:
@@ -1048,10 +1064,13 @@ class Server:
     connections on TCP, one loop.  Ports 0 pick free ones (tests)."""
 
     def __init__(self, bind="0.0.0.0", port=518, tcp_port=None, peer_port=518,
-                 daemon=None):
+                 daemon=None, relay_ports=None, allow=None):
         self.loop = Loop()
         self.d = daemon or TalkDaemon()
-        self.relay = Relay(self.d, self.loop, peer_port=peer_port)
+        self.relay = Relay(self.d, self.loop, peer_port=peer_port, relay_ports=relay_ports)
+        # who may talk to us at all: talk has no passwords, so LAN only - a
+        # second fence behind the firewall (None: anyone)
+        self.allow = [ipaddress.ip_network(a, strict=False) for a in allow] if allow else None
         self.udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.udp.bind((bind, port))
         self.udp.setblocking(False)
@@ -1063,10 +1082,22 @@ class Server:
         self.loop.watch(self.udp, on_read=self._udp)
         self.loop.watch(self.tcp, on_read=self._accept)
 
+    def allowed(self, ip):
+        if self.allow is None:
+            return True
+        try:
+            a = ipaddress.ip_address(ip)
+        except ValueError:
+            return False
+        return any(a in n for n in self.allow)
+
     def _udp(self):
         try:
             data, src = self.udp.recvfrom(1024)
         except OSError:
+            return
+        if not self.allowed(src[0]):
+            _log.info("%s: not in --allow, ignored", src[0])
             return
         reply = self.d.process(data, src)
         if reply is not None:
@@ -1079,6 +1110,10 @@ class Server:
         try:
             s, peer = self.tcp.accept()
         except OSError:
+            return
+        if not self.allowed(peer[0]):
+            _log.info("%s: not in --allow, closed", peer[0])
+            s.close()
             return
         Control(self.relay, s, peer)
 
@@ -1099,11 +1134,29 @@ def main(argv=None):
     ap.add_argument("--bind", default="0.0.0.0", help="address to listen on")
     ap.add_argument("--port", type=int, default=518,
                     help="UDP port for talk, and TCP port for tvchat (518)")
+    ap.add_argument("--relay-ports", metavar="LO-HI",
+                    help="TCP ports for the relay (a callee's talk connects to one); "
+                         "list them in the firewall (default: any free port)")
+    ap.add_argument("--allow", metavar="CIDR", action="append",
+                    help="only these sources (repeatable; default: everyone - "
+                         "rely on the firewall)")
     ap.add_argument("--debug", action="store_true", help="log every request")
     a = ap.parse_args(argv)
     logging.basicConfig(level=logging.DEBUG if a.debug else logging.INFO,
                         format="talkd: %(message)s", stream=sys.stderr)
-    srv = Server(a.bind, a.port)
+    relay = None
+    if a.relay_ports:
+        lo, _, hi = a.relay_ports.partition("-")
+        try:
+            relay = (int(lo), int(hi or lo))
+        except ValueError:
+            ap.error("--relay-ports: LO-HI, e.g. 5181-5188")
+        if not 1 <= relay[0] <= relay[1] <= 65535:
+            ap.error("--relay-ports: LO-HI, e.g. 5181-5188")
+    try:
+        srv = Server(a.bind, a.port, relay_ports=relay, allow=a.allow)
+    except ValueError as e:
+        ap.error("--allow: %s" % e)
     _log.info("listening on %s port %d (udp: talk, tcp: tvchat)", a.bind, a.port)
     try:
         srv.run()

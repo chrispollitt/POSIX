@@ -320,11 +320,11 @@ def recv_until(sock, want, timeout=5):
 
 
 class RelayBase(TalkdBase):
-    def server(self, users=None, devdir=None, resolve=None):
+    def server(self, users=None, devdir=None, resolve=None, **kw):
         d = td.TalkDaemon(logins=(lambda: list(users)) if users is not None else (lambda: []),
                           devdir=devdir or str(self.dev), hostname="cpbee",
                           resolve=resolve or (lambda ip: "cmlaptop" if ip == "127.0.0.1" else ip))
-        srv = td.Server("127.0.0.1", 0, tcp_port=0, daemon=d)
+        srv = td.Server("127.0.0.1", 0, tcp_port=0, daemon=d, **kw)
         stop = threading.Event()
         th = threading.Thread(target=srv.run, args=(stop.is_set,), daemon=True)
         th.start()
@@ -486,6 +486,42 @@ class TestRelay(RelayBase):
         ring = m.expect("RING ")
         m.say("DECLINE " + ring.split()[1])
         c.expect("GONE c3 declined")
+
+    def test_relay_ports_come_from_the_range(self):
+        for name in ("pts1", "pts2"):
+            p = self.dev / name
+            p.write_bytes(b"")
+            p.chmod(0o620)
+        probe = socket.socket()
+        probe.bind(("0.0.0.0", 0))
+        port = probe.getsockname()[1]            # a free port: the range is one wide
+        probe.close()
+        srv = self.server(users=[("bob", "pts1"), ("carol", "pts2")], relay_ports=(port, port))
+        c = self.tv(srv, "chris")
+        c.say("CALL c1 bob")
+        c.expect("STATE c1 ringing bob")
+        _t, a, _i, addr = self.talk("bob").ask(srv, td.LOOK_UP, "chris")
+        self.assertEqual((a, addr[1]), (td.SUCCESS, port))
+        # the one relay port is taken: a second call at once is refused
+        c.say("CALL c2 carol")
+        c.expect("GONE c2 too many calls at once (relay ports %d-%d all busy)" % (port, port))
+
+    def test_allow_keeps_out_everyone_else(self):
+        srv = self.server(allow=["10.0.0.0/8"])          # not 127.0.0.1
+        alice = self.talk("alice")
+        alice.ctl.settimeout(0.5)
+        with self.assertRaises(socket.timeout):
+            alice.ask(srv, td.LOOK_UP, "chris")
+        s = socket.create_connection(srv.tcp.getsockname(), 5)
+        self.addCleanup(s.close)
+        s.sendall(b"HELLO chris\n")
+        try:                                     # closed, no answer (EOF, or a
+            got = recv_until(s, b"\n")           # reset: it had unread data)
+        except OSError:
+            got = b""
+        self.assertEqual(got, b"")
+        self.assertFalse(srv.relay.has_user("chris"))
+        self.assertTrue(srv.allowed("10.1.2.3") and not srv.allowed("192.168.10.5"))
 
     def test_another_host_whose_talkd_does_not_answer(self):
         old = td.CTL_WAIT

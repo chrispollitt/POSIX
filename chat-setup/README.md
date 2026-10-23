@@ -9,6 +9,7 @@ toward self-hosted chat.
 |---|---|
 | [scripts/configure-ergo.sh](scripts/configure-ergo.sh) | install and run Ergo, LAN-only, TLS, with NickServ accounts |
 | [scripts/ergo-register.py](scripts/ergo-register.py) | create a NickServ account (used by `--register`) |
+| [scripts/configure-talkd.sh](scripts/configure-talkd.sh) | install talkd as the LAN's talk daemon (service, user, inetd, firewall) |
 | [talkd/talkd.py](talkd/talkd.py) | a talk(1) daemon (ntalk on UDP 518) that also rings and relays for tvchat (TCP 518) - in progress |
 | [scripts/configure-tvchat.sh](scripts/configure-tvchat.sh) | on a client: point tvchat at that server (CA, `tvchat.conf`, password, a test login) |
 
@@ -98,11 +99,22 @@ tvchat user, and a tvchat user calling someone whose real talk answers.
 name resolved to a link-local address - its own lookup, not the daemon.)
 
 ```sh
-talkd/talkd.py --debug --port 518     # as a user in group tty
+sudo ./scripts/configure-talkd.sh --firewall-plan    # what it would open (and whether it may)
+sudo ./scripts/configure-talkd.sh --open-firewall
 ```
 
-Next: `configure-talkd.sh` (service user, systemd unit, UDP + TCP 518 on
-lan0), then tvchat's side.
+It installs `/opt/talkd/talkd.py`, a `talkd` system user, and
+`talkd.service` (group tty to ring terminals, CAP_NET_BIND_SERVICE for
+port 518, nothing else); comments a talk/ntalk line out of
+`/etc/inetd.conf`; answers only loopback and lan0's subnet (`--allow`).
+`--open-firewall` lists UDP 518 in `/etc/router-setup/lan0-udp-ports`
+(cmpi-router's `setup-router.sh` reads it since 2026-10-22) and TCP 518 +
+the relay ports 5181-5188 in `lan0-tcp-ports`, then runs
+`setup-router.sh fw` - and, as `configure-ergo.sh` does, refuses (changing
+nothing) if that reload would close a port open only by a live rule, TCP
+or UDP: the October mail-port outage.
+
+Next: tvchat's side (`protocol = talk`).
 
 ## The client: tvchat
 

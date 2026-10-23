@@ -272,6 +272,63 @@ tv --nick n3 --no-sasl > "$OUT" 2>&1
 check "  not copied again" '[ $? = 0 ] && ! has "$OUT" "copied to" && has "$OUT" "unchanged in"'
 
 # --------------------------------------------------------------------------
+t "configure-talkd.sh"
+K="$C/scripts/configure-talkd.sh"
+check "bash -n" 'bash -n "$K"'
+# lan0's subnet, as `ip` would give it on cpbee
+talkd() { CHAT_SETUP_LAN_CIDR=192.168.10.1/24 CHAT_SETUP_LAN_PORTS="${LP-$SANDBOX/no-list}" \
+  CHAT_SETUP_LAN_UDP_PORTS="${UP-$SANDBOX/no-udp-list}" "$K" "$@"; }
+talkd --print-unit > "$SANDBOX/tunit"
+check "the unit: talkd.py as talkd, group tty, only CAP_NET_BIND_SERVICE" 'has "$SANDBOX/tunit" "User=talkd" && has "$SANDBOX/tunit" "SupplementaryGroups=tty" && has "$SANDBOX/tunit" "AmbientCapabilities=CAP_NET_BIND_SERVICE" && has "$SANDBOX/tunit" "CapabilityBoundingSet=CAP_NET_BIND_SERVICE" && has "$SANDBOX/tunit" "NoNewPrivileges=yes"'
+check "  port 518, the relay ports, loopback + lan0's subnet only" 'has "$SANDBOX/tunit" "/opt/talkd/talkd.py --port 518 --relay-ports 5181-5188 --allow 127.0.0.0/8 --allow 192.168.10.0/24"'
+talkd --relay-ports 6000-6001 --allow 10.1.2.3/8 --print-unit > "$OUT"
+check "  --relay-ports, --allow (normalised)" 'has "$OUT" "--relay-ports 6000-6001 --allow 127.0.0.0/8 --allow 10.0.0.0/8"'
+for bad in 80-90 6000-7000 x 6001-6000 6000- ; do
+  talkd --relay-ports "$bad" --print-unit > "$OUT" 2>&1
+  check "--relay-ports $bad is refused" '[ $? != 0 ] && has "$OUT" "--relay-ports"'
+done
+talkd --allow 0.0.0.0/0 --print-unit > "$OUT" 2>&1
+check "--allow 0.0.0.0/0 is refused" '[ $? != 0 ] && has "$OUT" "would answer everyone"'
+talkd --allow lan --print-unit > "$OUT" 2>&1
+check "--allow junk is refused" '[ $? != 0 ] && has "$OUT" "is not an IPv4 CIDR"'
+printf '%s\n' 'talk	dgram	udp	wait	nobody.tty	/usr/sbin/in.talkd	in.talkd' '#ntalk  dgram udp wait nobody.tty /x' \
+  '  ntalk	dgram	udp	wait	nobody.tty	/usr/sbin/in.ntalkd	in.ntalkd' 'ftp stream tcp nowait root /x' > "$SANDBOX/inetd.conf"
+talkd --print-inetd "$SANDBOX/inetd.conf" > "$OUT"
+check "inetd.conf: talk and ntalk commented out, the rest kept" '[ "$(grep -c "^#chat-setup# " "$OUT")" = 2 ] && grep -qx "#ntalk  dgram udp wait nobody.tty /x" "$OUT" && grep -qx "ftp stream tcp nowait root /x" "$OUT"'
+
+# the firewall: a box without cmpi-router's lists - the nft rules to add
+TN="$SANDBOX/truleset"
+sed 's/{ 143, 993, 4190 }/{ 143, 993, 4190, 5181 }/' "$NFT" > "$TN"
+CHAT_SETUP_NFT_RULESET="$TN" talkd --firewall-plan > "$OUT" 2>&1
+check "no lists: udp 518, tcp 518 and the relay ports as nft rules" 'grep -qx "nft add rule inet filter input iifname \"lan0\" udp dport 518 accept" "$OUT" && grep -qx "nft add rule inet filter input iifname \"lan0\" tcp dport 518 accept" "$OUT" && grep -qx "nft add rule inet filter input iifname \"lan0\" tcp dport 5188 accept" "$OUT"'
+check "  (5181 is open already)" '! has "$OUT" "dport 5181 "'
+sed 's/policy drop/policy accept/' "$TN" > "$TN.acc"
+CHAT_SETUP_NFT_RULESET="$TN.acc" talkd --firewall-plan > "$OUT" 2>&1
+check "  an accept policy: nothing to do" '[ ! -s "$OUT" ]'
+# a cmpi-router box: the lists, then setup-router.sh fw
+printf '443  # Apache https\n' > "$SANDBOX/t-tcp"; : > "$SANDBOX/t-udp"
+printf '#!/bin/sh\n# LAN_UDP_PORTS_FILE=...\n' > "$SANDBOX/router-new"; printf '#!/bin/sh\n' > "$SANDBOX/router-old"
+chmod +x "$SANDBOX/router-new" "$SANDBOX/router-old"
+cp "$TN" "$SANDBOX/tnft.conf"
+tplan() { LP="$SANDBOX/t-tcp" UP="$SANDBOX/t-udp" CHAT_SETUP_NFT_CONF="$SANDBOX/tnft.conf" \
+  CHAT_SETUP_NFT_RULESET="$TN" CHAT_SETUP_ROUTER="$SANDBOX/$1" talkd --firewall-plan > "$OUT" 2>&1; }
+tplan router-new
+check "lists: udp 518 to the UDP list, tcp 518 + relay ports to the TCP list" 'has "$OUT" "add '"'"'518  # talk(1), ntalk (chat-setup talkd)'"'"' to $SANDBOX/t-udp" && has "$OUT" "add '"'"'518  # tvchat to talkd (chat-setup)'"'"' to $SANDBOX/t-tcp" && has "$OUT" "add '"'"'5188  # talkd relay (chat-setup)'"'"' to $SANDBOX/t-tcp" && has "$OUT" "then run setup-router.sh fw"'
+check "  (no runtime rules, nothing refused)" '! has "$OUT" "nft add rule" && ! has "$OUT" "REFUSED"'
+tplan router-old
+check "a setup-router.sh without a UDP list: refused" 'has "$OUT" "REFUSED: setup-router.sh has no UDP list (lan0-udp-ports)"'
+# live-only ports, TCP and UDP, would close on the reload
+{ cat "$TN"; } | sed 's/{ 22, 53 } accept/{ 22, 53 } accept\n\t\tiifname "lan0" udp dport 5353 accept/' > "$TN.live"
+sed '/143, 993, 4190/d' "$TN" > "$SANDBOX/tnft.conf"
+LP="$SANDBOX/t-tcp" UP="$SANDBOX/t-udp" CHAT_SETUP_NFT_CONF="$SANDBOX/tnft.conf" CHAT_SETUP_NFT_RULESET="$TN.live" \
+  CHAT_SETUP_ROUTER="$SANDBOX/router-new" talkd --firewall-plan > "$OUT" 2>&1
+check "runtime-only tcp and udp ports: refused, naming them" 'has "$OUT" "REFUSED: that reload would close tcp 143 tcp 4190 tcp 5181 tcp 993 udp 5353"'
+printf '518  # talk\n' > "$SANDBOX/t-udp"
+printf '%s\n' 518 5181 5182 5183 5184 5185 5186 5187 5188 >> "$SANDBOX/t-tcp"
+tplan router-new
+check "everything listed: nothing to do" '[ ! -s "$OUT" ]'
+
+# --------------------------------------------------------------------------
 t "talkd"
 "$PY" -m unittest discover -s "$here" -p test_talkd.py > "$OUT" 2>&1
 check "talkd.py unit tests (test_talkd.py)" '[ $? = 0 ]' || sed "s/^/    /" "$OUT"
