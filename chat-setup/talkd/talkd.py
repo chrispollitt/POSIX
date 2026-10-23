@@ -87,6 +87,13 @@ NAME_SIZE = 12
 TTY_SIZE = 16
 AF_INET_WIRE = 2     # AF_INET as talk puts it on the wire (BSD's value)
 
+# Linux's struct in_pktinfo {int ipi_ifindex; in_addr ipi_spec_dst; in_addr
+# ipi_addr}: received, ipi_addr is where the packet was sent; sent,
+# ipi_spec_dst is the source address to use (see Server._udp)
+PKTINFO = getattr(socket, "IP_PKTINFO", None) if sys.platform.startswith("linux") else None
+PKTINFO_STRUCT = struct.Struct("i4s4s")
+PKTINFO_SIZE = PKTINFO_STRUCT.size
+
 MSG = struct.Struct("!BBBBI16s16si12s12s16s")
 RESPONSE = struct.Struct("!BBBBI16s")
 SOCKADDR = struct.Struct("!HH4s8x")
@@ -1074,6 +1081,19 @@ class Server:
         self.udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.udp.bind((bind, port))
         self.udp.setblocking(False)
+        # Answer from the address each request was sent to.  Bound to 0.0.0.0,
+        # a reply to a request for 127.0.1.1 (Debian's own host name) leaves
+        # from 127.0.0.1, and a talk that connect()s its socket - Debian's
+        # does - never sees it: "[Checking for invitation on caller's
+        # machine]" forever (cpbee, Oct 22).  IP_PKTINFO tells us the address
+        # on the way in and sets it on the way out.
+        self.pktinfo = False
+        if PKTINFO is not None:
+            try:
+                self.udp.setsockopt(socket.IPPROTO_IP, PKTINFO, 1)
+                self.pktinfo = True
+            except OSError:
+                pass
         self.tcp = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.tcp.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.tcp.bind((bind, port if tcp_port is None else tcp_port))
@@ -1092,19 +1112,31 @@ class Server:
         return any(a in n for n in self.allow)
 
     def _udp(self):
+        dst = None                       # the address the request was sent to
         try:
-            data, src = self.udp.recvfrom(1024)
+            if self.pktinfo:
+                data, anc, _flags, src = self.udp.recvmsg(1024, socket.CMSG_SPACE(PKTINFO_SIZE))
+                for level, ctype, cdata in anc:
+                    if level == socket.IPPROTO_IP and ctype == PKTINFO and len(cdata) >= PKTINFO_SIZE:
+                        dst = PKTINFO_STRUCT.unpack(cdata[:PKTINFO_SIZE])[2]
+            else:
+                data, src = self.udp.recvfrom(1024)
         except OSError:
             return
         if not self.allowed(src[0]):
             _log.info("%s: not in --allow, ignored", src[0])
             return
         reply = self.d.process(data, src)
-        if reply is not None:
-            try:
+        if reply is None:
+            return
+        try:
+            if dst is not None:
+                self.udp.sendmsg([reply], [(socket.IPPROTO_IP, PKTINFO,
+                                            PKTINFO_STRUCT.pack(0, dst, b"\0\0\0\0"))], 0, src)
+            else:
                 self.udp.sendto(reply, src)
-            except OSError as e:
-                _log.debug("%s: reply failed: %s", src, e)
+        except OSError as e:
+            _log.debug("%s: reply failed: %s", src, e)
 
     def _accept(self):
         try:

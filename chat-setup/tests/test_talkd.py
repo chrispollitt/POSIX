@@ -487,6 +487,27 @@ class TestRelay(RelayBase):
         m.say("DECLINE " + ring.split()[1])
         c.expect("GONE c3 declined")
 
+    @unittest.skipUnless(td.PKTINFO is not None, "IP_PKTINFO: Linux only")
+    def test_answers_from_the_address_it_was_asked_at(self):
+        # cpbee, Oct 22: Debian's talk connect()s its socket to 127.0.1.1 (the
+        # host's own name); a reply from 127.0.0.1 never reached it
+        d = td.TalkDaemon(logins=lambda: [], devdir=str(self.dev), hostname="cpbee")
+        srv = td.Server("0.0.0.0", 0, tcp_port=0, daemon=d)
+        stop = threading.Event()
+        th = threading.Thread(target=srv.run, args=(stop.is_set,), daemon=True)
+        th.start()
+        self.addCleanup(srv.close)
+        self.addCleanup(th.join, 3)
+        self.addCleanup(stop.set)
+        self.assertTrue(srv.pktinfo)
+        for ip in ("127.0.0.1", "127.0.1.1"):
+            c = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.addCleanup(c.close)
+            c.settimeout(3)
+            c.connect((ip, srv.udp.getsockname()[1]))
+            c.send(req(td.LOOK_UP, ctl=c.getsockname()))
+            self.assertEqual(answer(c.recv(64))[1], td.NOT_HERE, ip)
+
     def test_relay_ports_come_from_the_range(self):
         for name in ("pts1", "pts2"):
             p = self.dev / name
