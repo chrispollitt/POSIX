@@ -12,6 +12,7 @@ toward self-hosted chat.
 | [scripts/configure-talkd.sh](scripts/configure-talkd.sh) | install talkd as the LAN's talk daemon (service, user, inetd, firewall) |
 | [talkd/talkd.py](talkd/talkd.py) | a talk(1) daemon (ntalk on UDP 518) that also rings and relays for tvchat (TCP 518) - in progress |
 | [scripts/configure-tvchat.sh](scripts/configure-tvchat.sh) | on a client: point tvchat at that server (CA, `tvchat.conf`, password, a test login) |
+| [scripts/configure-tvchat-delta.sh](scripts/configure-tvchat-delta.sh) | on a client: a Delta Chat account in tvchat on a mailbox made by mail-setup's `configure-delta.sh` (installs the core, `tvchat.conf`, password, a real connect) |
 
 The shared shell helpers come from [`../mail-setup/lib/common.sh`](../mail-setup/lib/common.sh).
 

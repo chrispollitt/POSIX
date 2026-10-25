@@ -351,6 +351,32 @@ talkd --print-inetd "$SANDBOX/no-such-inetd.conf" > "$OUT" 2>&1
 check "a failure says where it stopped" '[ $? != 0 ] && has "$OUT" "ERROR: configure-talkd.sh stopped at line"'
 
 # --------------------------------------------------------------------------
+t "configure-tvchat-delta.sh"
+VD="$C/scripts/configure-tvchat-delta.sh"
+HD="$SANDBOX/homed"; mkdir -p "$HD"
+td() { env -u TVCHAT_CONF TVCHAT_BACKEND="" HOME="$HD" "$VD" --no-check --no-install "$@"; }
+td > "$OUT" 2>&1
+check "no --addr: exit 1" '[ $? = 1 ] && has "$OUT" "--addr is required"'
+td --addr nodomain@host > "$OUT" 2>&1
+check "an address without a dotted domain is refused" '[ $? = 1 ] && has "$OUT" "needs a domain with a dot"'
+td --addr a@b.c --bogus > "$OUT" 2>&1
+check "unknown option: exit 2" '[ $? = 2 ]'
+CHAT_SETUP_PASS=pw1 td --addr delta@cpbee.cmnet --host cpbee --self-signed --autoconnect --name "Me" > "$OUT" 2>&1
+check "first run: exit 0, account created" '[ $? = 0 ] && has "$OUT" "[account:delta] created"'
+DC="$HD/.config/tvchat/tvchat.conf"
+check "  parses, bare login, 587, self-signed, autoconnect" '"$PY" -c "
+import configparser, sys
+c = configparser.ConfigParser(interpolation=None); c.read(sys.argv[1])
+a = c[\"account:delta\"]
+assert (a[\"protocol\"], a[\"addr\"], a[\"imap_user\"], a[\"imap_server\"], a[\"smtp_port\"], a[\"verify\"], a[\"name\"]) == (\"deltachat\", \"delta@cpbee.cmnet\", \"delta\", \"cpbee\", \"587\", \"false\", \"Me\"), dict(a)
+assert c[\"chat\"][\"autoconnect\"] == \"delta\"
+" "$DC"'
+check "  the password went to ~/.netrc, not the conf" 'grep -qx "machine cpbee login delta password pw1" "$HD/.netrc" && ! grep -q pw1 "$DC"'
+CHAT_SETUP_PASS=pw2 td --addr delta@cpbee.cmnet --host cpbee > "$OUT" 2>&1
+check "second run: the password is found, not asked" '[ $? = 0 ] && has "$OUT" "tvchat will use the one in ~/.netrc"'
+check "  the account is replaced, not doubled" '[ "$(grep -c "^\[account:delta\]" "$DC")" = 1 ]'
+
+# --------------------------------------------------------------------------
 t "talkd"
 "$PY" -m unittest discover -s "$here" -p test_talkd.py > "$OUT" 2>&1
 check "talkd.py unit tests (test_talkd.py)" '[ $? = 0 ]' || sed "s/^/    /" "$OUT"
