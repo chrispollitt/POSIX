@@ -106,16 +106,36 @@ chmod 700 "$CONF_DIR" 2>/dev/null || true
 # 1. the core ----------------------------------------------------------------
 RPC=deltachat-rpc-server
 rpc_path=$(command -v "$RPC" 2>/dev/null || true)
-if [ -z "$rpc_path" ] && [ "$INSTALL" = 1 ]; then
+if [ -z "$rpc_path" ] && [ "$INSTALL" = 1 ] && [ "$IS_CYGWIN" = 0 ]; then
   log "core        : not found - pip install --user deltachat-rpc-server"
   if "$PY" -m pip install --user --quiet deltachat-rpc-server >/dev/null 2>&1; then
     for d in "$("$PY" -c 'import sysconfig; print(sysconfig.get_path("scripts", "posix_user"))' 2>/dev/null || true)" \
              "$HOME/.local/bin" "$HOME/Library/Python/"*/bin; do
       for n in "$RPC" "$RPC.exe"; do
-        [ -x "$d/$n" ] && { rpc_path="$d/$n"; break 2; }
+        [ -x "$d/$n" ] && "$d/$n" --version >/dev/null 2>&1 && { rpc_path="$d/$n"; break 2; }
       done
     done
   fi
+fi
+if [ -z "$rpc_path" ] && [ "$INSTALL" = 1 ] && [ "$IS_CYGWIN" = 1 ]; then
+  # Cygwin has no wheel of its own: take the Windows build out of the PyPI one
+  # (it runs from Cygwin; tvchat-backend hands it a Windows path for its data)
+  log "core        : Cygwin - fetching the Windows build"
+  wd=$(mktemp -d)
+  if "$PY" -m pip download --quiet --no-deps --only-binary=:all: --platform win_amd64         --python-version 3 --dest "$wd" deltachat-rpc-server >/dev/null 2>&1; then
+    mkdir -p "$HOME/.local/bin"
+    if "$PY" - "$wd" "$HOME/.local/bin/deltachat-rpc-server.exe" <<'PYEOF2'
+import glob, shutil, sys, zipfile
+whl = glob.glob(sys.argv[1] + "/deltachat_rpc_server-*.whl")[0]
+with zipfile.ZipFile(whl) as z, open(sys.argv[2], "wb") as out:
+    shutil.copyfileobj(z.open("deltachat_rpc_server/deltachat-rpc-server.exe"), out)
+PYEOF2
+    then
+      chmod +x "$HOME/.local/bin/deltachat-rpc-server.exe"
+      rpc_path="$HOME/.local/bin/deltachat-rpc-server.exe"
+    fi
+  fi
+  rm -rf "$wd"
 fi
 if [ -z "$rpc_path" ]; then
   warn "no deltachat-rpc-server: install it (pip install deltachat-rpc-server, or a release"
