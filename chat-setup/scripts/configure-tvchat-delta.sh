@@ -258,6 +258,12 @@ log "tvchat.conf : [account:$ACCOUNT] $result $CONF"
 # find_password_where() ($TVCHAT_BACKEND names another; empty: none, as in the
 # tests).  Without a backend: $TVCHAT_PASS_<ACCOUNT>, then ~/.netrc for LOGIN.
 BACKEND="${TVCHAT_BACKEND-$(command -v tvchat-backend 2>/dev/null || true)}"
+if [ -z "${TVCHAT_BACKEND+set}" ] && [ -z "$BACKEND" ]; then
+  # a bare ssh login has no /usr/local/bin on PATH: look where install.sh puts it
+  for d in /usr/local/bin "$HOME/.local/bin" "$HOME/bin"; do
+    [ -x "$d/tvchat-backend" ] && { BACKEND="$d/tvchat-backend"; break; }
+  done
+fi
 find_where() {
   PASS_VAR="$PASS_VAR" "$PY" - "$ACCOUNT" "$HOST" "$LOGIN" "$BACKEND" "$NETRC" "$ADDR" <<'PYEOF'
 import netrc, os, sys
