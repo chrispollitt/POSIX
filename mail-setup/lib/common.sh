@@ -115,9 +115,10 @@ find_python() {
   return 1
 }
 
-# where per-user helper programs go: ~/bin if it exists, else ~/.local/bin
+# where per-user helper programs go: $MAIL_SETUP_BINDIR if set (e.g. ~/.local/bin),
+# else ~/bin - nothing is installed in ~/.local unless asked
 user_bindir() {
-  if [ -d "$HOME/bin" ]; then echo "$HOME/bin"; else echo "$HOME/.local/bin"; fi
+  echo "${MAIL_SETUP_BINDIR:-$HOME/bin}"
 }
 
 # cmpi-router's list of TCP ports open to the LAN: its `setup-router.sh fw`

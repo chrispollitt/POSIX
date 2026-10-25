@@ -80,7 +80,7 @@ so it still arrives when the smarthost is what's broken.
 
 ### Pullers and `mail-pull`
 
-Both puller scripts install **`mail-pull`** (in `~/bin`, else `~/.local/bin`),
+Both puller scripts install **`mail-pull`** (in `~/bin`, or `$MAIL_SETUP_BINDIR`),
 a two-line wrapper that runs whichever puller you configured last. Timers,
 cron and other programs (tvmail's **F3**) just run `mail-pull`, so switching
 pullers means re-running the other configure script. `--timer N` on either
@@ -224,7 +224,7 @@ sudo ./mail-setup.sh --role master --puller getmail --plus-base cwp@u-l.ca --plu
   `/etc/postfix/sasl_passwd` directly) or as a service account with `--pwfile` to a
   copy that account can read. Use `--config /etc/mailpull.conf` to keep the
   config out of a home directory; `mail-pull` passes it on. Cron example:
-  `*/5 * * * * root /root/.local/bin/mail-pull`. The `--timer` option installs a
+  `*/5 * * * * root /root/bin/mail-pull`. The `--timer` option installs a
   per-user systemd timer, so for root or a service account use cron or write
   your own system unit.
 - **Safe to re-run:** the new generic map is test-built with `postmap` in a temp

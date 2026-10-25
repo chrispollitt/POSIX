@@ -9,8 +9,9 @@
 # machine - no root.  The script:
 #
 #   1. makes sure the official Delta Chat core, `deltachat-rpc-server`, is
-#      there: on PATH, else `pip install --user deltachat-rpc-server`; if
-#      that is not possible it says how to get the release binary instead;
+#      there: on PATH, else taken out of its PyPI wheel into --prefix/bin
+#      (default /usr/local/bin; nothing goes into ~/.local); if that is not
+#      possible it says how to get the release binary instead;
 #   2. writes [account:ACCOUNT] into ~/.config/tvchat/tvchat.conf (or
 #      $TVCHAT_CONF), added or replaced - every other section and comment is
 #      kept, the file is backed up first - with `rpc_server =` set to the
@@ -41,6 +42,8 @@
 #   --self-signed       the server's certificate is self-signed (mail-setup's
 #                       is): verify = false
 #   --autoconnect       add the account to [chat] autoconnect
+#   --prefix DIR        install the core in DIR/bin (default /usr/local; sudo is used
+#                       when that needs it) - never in ~/.local
 #   --no-install        do not try to install the core
 #   --no-check          skip the real connect (offline)
 #   -h | --help         show this header
@@ -62,6 +65,7 @@ SELF_SIGNED=0
 AUTOCONNECT=0
 INSTALL=1
 CHECK=1
+PREFIX=/usr/local
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -74,6 +78,7 @@ while [ $# -gt 0 ]; do
     --smtp-port)   SMTP_PORT="${2:?}"; shift 2 ;;
     --self-signed) SELF_SIGNED=1; shift ;;
     --autoconnect) AUTOCONNECT=1; shift ;;
+    --prefix)      PREFIX="${2:?}"; shift 2 ;;
     --no-install)  INSTALL=0; shift ;;
     --no-check)    CHECK=0; shift ;;
     -h|--help)     usage "$0"; exit 0 ;;
@@ -104,47 +109,59 @@ mkdir -p "$CONF_DIR"
 chmod 700 "$CONF_DIR" 2>/dev/null || true
 
 # 1. the core ----------------------------------------------------------------
+# Never into ~/.local: it goes to PREFIX/bin (default /usr/local, sudo when that
+# needs it), the way install.sh puts tvchat.  pip is only used to download the
+# wheel; the program is taken out of it, so nothing else is installed.
 RPC=deltachat-rpc-server
 rpc_path=$(command -v "$RPC" 2>/dev/null || true)
-if [ -z "$rpc_path" ]; then   # an earlier run put it in ~/.local/bin, which may not be on PATH
+if [ -z "$rpc_path" ]; then   # an earlier run put it in PREFIX/bin, which may not be on PATH
   for n in "$RPC" "$RPC.exe"; do
-    [ -x "$HOME/.local/bin/$n" ] && "$HOME/.local/bin/$n" --version >/dev/null 2>&1       && { rpc_path="$HOME/.local/bin/$n"; break; }
+    [ -x "$PREFIX/bin/$n" ] && "$PREFIX/bin/$n" --version >/dev/null 2>&1 \
+      && { rpc_path="$PREFIX/bin/$n"; break; }
   done
 fi
-if [ -z "$rpc_path" ] && [ "$INSTALL" = 1 ] && [ "$IS_CYGWIN" = 0 ]; then
-  log "core        : not found - pip install --user deltachat-rpc-server"
-  if "$PY" -m pip install --user --quiet deltachat-rpc-server >/dev/null 2>&1; then
-    for d in "$("$PY" -c 'import sysconfig; print(sysconfig.get_path("scripts", "posix_user"))' 2>/dev/null || true)" \
-             "$HOME/.local/bin" "$HOME/Library/Python/"*/bin; do
-      for n in "$RPC" "$RPC.exe"; do
-        [ -x "$d/$n" ] && "$d/$n" --version >/dev/null 2>&1 && { rpc_path="$d/$n"; break 2; }
-      done
-    done
-  fi
-fi
-if [ -z "$rpc_path" ] && [ "$INSTALL" = 1 ] && [ "$IS_CYGWIN" = 1 ]; then
-  # Cygwin has no wheel of its own: take the Windows build out of the PyPI one
-  # (it runs from Cygwin; tvchat-backend hands it a Windows path for its data)
-  log "core        : Cygwin - fetching the Windows build"
+if [ -z "$rpc_path" ] && [ "$INSTALL" = 1 ]; then
+  log "core        : not found - fetching deltachat-rpc-server from PyPI into $PREFIX/bin"
   wd=$(mktemp -d)
-  if "$PY" -m pip download --quiet --no-deps --only-binary=:all: --platform win_amd64         --python-version 3 --dest "$wd" deltachat-rpc-server >/dev/null 2>&1; then
-    mkdir -p "$HOME/.local/bin"
-    if "$PY" - "$wd" "$HOME/.local/bin/deltachat-rpc-server.exe" <<'PYEOF2'
+  platform=""
+  # Cygwin has no wheel of its own: take the Windows build (it runs from Cygwin;
+  # tvchat-backend hands it a Windows path for its data)
+  [ "$IS_CYGWIN" = 1 ] && platform="--platform win_amd64 --python-version 3"
+  # shellcheck disable=SC2086
+  if "$PY" -m pip download --quiet --no-deps --only-binary=:all: $platform \
+        --dest "$wd" deltachat-rpc-server >/dev/null 2>&1; then
+    exe=$("$PY" - "$wd" <<'PYEOF2'
 import glob, shutil, sys, zipfile
 whl = glob.glob(sys.argv[1] + "/deltachat_rpc_server-*.whl")[0]
-with zipfile.ZipFile(whl) as z, open(sys.argv[2], "wb") as out:
-    shutil.copyfileobj(z.open("deltachat_rpc_server/deltachat-rpc-server.exe"), out)
+with zipfile.ZipFile(whl) as z:
+    for name in z.namelist():
+        base = name.rsplit("/", 1)[-1]
+        if base in ("deltachat-rpc-server", "deltachat-rpc-server.exe"):
+            with open(sys.argv[1] + "/" + base, "wb") as out:
+                shutil.copyfileobj(z.open(name), out)
+            print(base)
+            break
 PYEOF2
-    then
-      chmod +x "$HOME/.local/bin/deltachat-rpc-server.exe"
-      rpc_path="$HOME/.local/bin/deltachat-rpc-server.exe"
+    ) || exe=""
+    if [ -n "$exe" ]; then
+      dest="$PREFIX/bin"
+      sudo_cmd=""
+      if [ -d "$dest" ] && [ -w "$dest" ]; then :
+      elif [ ! -d "$dest" ] && mkdir -p "$dest" 2>/dev/null; then :
+      elif [ -n "$SUDO" ]; then sudo_cmd="$SUDO"; log "core        : $dest is not writable - using sudo"
+      else warn "cannot write $dest and there is no sudo: run again with --prefix DIR"
+      fi
+      if $sudo_cmd mkdir -p "$dest" && $sudo_cmd install -m 755 "$wd/$exe" "$dest/$exe" 2>/dev/null; then
+        rpc_path="$dest/$exe"
+        "$rpc_path" --version >/dev/null 2>&1 || rpc_path=""
+      fi
     fi
   fi
   rm -rf "$wd"
 fi
 if [ -z "$rpc_path" ]; then
-  warn "no deltachat-rpc-server: install it (pip install deltachat-rpc-server, or a release"
-  warn "binary from https://github.com/chatmail/core/releases onto PATH) and run this again"
+  warn "no deltachat-rpc-server: get a release binary from https://github.com/chatmail/core/releases"
+  warn "onto PATH (or run this again with --prefix DIR for a directory you can write) and run this again"
   [ "$CHECK" = 0 ] || die "cannot check the account without the core (--no-check skips this)"
 else
   log "core        : $rpc_path ($("$rpc_path" --version 2>/dev/null || echo '?'))"
@@ -265,7 +282,7 @@ log "tvchat.conf : [account:$ACCOUNT] $result $CONF"
 BACKEND="${TVCHAT_BACKEND-$(command -v tvchat-backend 2>/dev/null || true)}"
 if [ -z "${TVCHAT_BACKEND+set}" ] && [ -z "$BACKEND" ]; then
   # a bare ssh login has no /usr/local/bin on PATH: look where install.sh puts it
-  for d in /usr/local/bin "$HOME/.local/bin" "$HOME/bin"; do
+  for d in "$PREFIX/bin" /usr/local/bin "$HOME/bin"; do
     [ -x "$d/tvchat-backend" ] && { BACKEND="$d/tvchat-backend"; break; }
   done
 fi
