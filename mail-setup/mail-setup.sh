@@ -17,6 +17,7 @@
 #   configure-sendmail-relay.sh  Postfix as a send-only smarthost relay
 #   configure-dovecot.sh         Dovecot IMAP over /var/mail + ~/mail
 #   configure-sieve.sh           ManageSieve + Sieve vacation (tvmail Out of office)
+#   configure-delta.sh           Delta Chat mailboxes + authenticated submission (587)
 #   configure-mail-pull.sh       pop-pull   (POP3S -> /var/mail)
 #   configure-getmail.sh         getmail    (POP3S/IMAPS -> /var/mail)
 #   configure-webmin.sh          Webmin watchdog: mails you when mail gets stuck
@@ -178,6 +179,21 @@ if [ "$ROLE" = master ]; then
   if ask "Run configure-sieve.sh now? (switches Postfix delivery to dovecot-lda)" N; then
     log "running: $S/configure-sieve.sh"
     bash "$S/configure-sieve.sh" || warn "configure-sieve.sh exited non-zero - see above"
+  fi
+
+  # ------------------------------------------------------------------------
+  step "Delta Chat mailboxes (optional)"
+  # ------------------------------------------------------------------------
+  if ask "Run configure-delta.sh now? (dedicated mailboxes + an authenticated port 587 for Delta Chat / tvchat)" N; then
+    set -- "$S/configure-delta.sh"
+    if [ -z "$ASSUME" ]; then
+      d_dom=$(readval "mail domain of the mailboxes (blank = this host's fully qualified name)" "")
+      d_usr=$(readval "mailbox names to create" "delta")
+      [ -n "$d_dom" ] && set -- "$@" --domain "$d_dom"
+      set -- "$@" --users "$d_usr"
+    fi
+    log "running: $*"
+    bash "$@" || warn "configure-delta.sh exited non-zero - see above"
   fi
 
   # ------------------------------------------------------------------------

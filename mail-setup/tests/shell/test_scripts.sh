@@ -428,6 +428,22 @@ LC=$(printf '/^([^@]+)@[^.@]+$/    ${1}@%s\n' cpbee | sed -n 's|^/\(.*\)/ .*|\1|
 check "lan-canonical regex: dotless only" 'grep -Eq "$LC" <<<"chris@cmlaptop" && ! grep -Eq "$LC" <<<"me@gmail.com" && ! grep -Eq "$LC" <<<"chris"'
 
 # --------------------------------------------------------------------------
+t "configure-delta --print"
+D1=$("$S/configure-delta.sh" --print)
+check "auth socket for Postfix, group postfix" 'grep -qx "  unix_listener /var/spool/postfix/private/auth {" <<<"$D1" && grep -qx "    group = postfix" <<<"$D1"'
+check "submission demands TLS and a login" 'grep -q "smtpd_tls_security_level=encrypt" <<<"$D1" && grep -q "smtpd_sasl_auth_enable=yes" <<<"$D1" && grep -q "smtpd_sasl_path=private/auth" <<<"$D1"'
+check "only logged-in users relay" 'grep -q "smtpd_relay_restrictions=permit_sasl_authenticated,reject" <<<"$D1"'
+check "the drop-in warns it must stay readable" 'grep -q "world-readable" <<<"$D1"'
+"$S/configure-delta.sh" --bogus > "$OUT" 2>&1
+check "unknown option -> exit 2" '[ $? = 2 ]'
+check "-h prints the usage" '"$S/configure-delta.sh" -h | grep -q "^Usage:"'
+check "the script never leaks a umask" '! grep -n "^umask" "$S/configure-delta.sh"'
+if [ "$(uname -s)" = Linux ]; then :; else
+  "$S/configure-delta.sh" > "$OUT" 2>&1
+  check "refuses off Linux" '[ $? = 1 ] && grep -q "Linux only" "$OUT"'
+fi
+
+# --------------------------------------------------------------------------
 t "configure-sieve --print"
 S23=$("$S/configure-sieve.sh" --print 2.3.21)
 S24=$("$S/configure-sieve.sh" --print 2.4.1)
