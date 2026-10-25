@@ -106,6 +106,11 @@ chmod 700 "$CONF_DIR" 2>/dev/null || true
 # 1. the core ----------------------------------------------------------------
 RPC=deltachat-rpc-server
 rpc_path=$(command -v "$RPC" 2>/dev/null || true)
+if [ -z "$rpc_path" ]; then   # an earlier run put it in ~/.local/bin, which may not be on PATH
+  for n in "$RPC" "$RPC.exe"; do
+    [ -x "$HOME/.local/bin/$n" ] && "$HOME/.local/bin/$n" --version >/dev/null 2>&1       && { rpc_path="$HOME/.local/bin/$n"; break; }
+  done
+fi
 if [ -z "$rpc_path" ] && [ "$INSTALL" = 1 ] && [ "$IS_CYGWIN" = 0 ]; then
   log "core        : not found - pip install --user deltachat-rpc-server"
   if "$PY" -m pip install --user --quiet deltachat-rpc-server >/dev/null 2>&1; then
