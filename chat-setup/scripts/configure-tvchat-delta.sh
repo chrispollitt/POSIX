@@ -90,7 +90,26 @@ done
 case "$ADDR" in *[!A-Za-z0-9._+@-]*|*@*@*|@*|*@) die "--addr: '$ADDR' is not an address" ;; esac
 case "$ADDR" in *@*.*) : ;; *) die "--addr: '$ADDR' needs a domain with a dot (Delta Chat insists)" ;; esac
 : "${LOGIN:=${ADDR%@*}}"
-: "${HOST:=${ADDR#*@}}"
+if [ -z "$HOST" ]; then
+  # the mail domain is often not a host name (a LAN's  cpbee.cmnet  is only the
+  # domain of the addresses): use the first of  DOMAIN, its first label  that resolves
+  dom=${ADDR#*@}
+  HOST=$("$(command -v python3 || command -v python)" - "$dom" <<'PYEOF4'
+import socket, sys
+dom = sys.argv[1]
+for h in (dom, dom.split(".")[0]):
+    try:
+        socket.getaddrinfo(h, 993)
+        print(h)
+        break
+    except OSError:
+        pass
+else:
+    print(dom)
+PYEOF4
+  )
+  [ "$HOST" = "$dom" ] || printf '  host        : %s does not resolve - using %s\n' "$dom" "$HOST"
+fi
 case "$LOGIN$HOST" in *[!A-Za-z0-9._+@-]*|'') die "--user and --host take plain names only" ;; esac
 case "$SMTP_PORT" in ''|*[!0-9]*) die "--smtp-port must be a number" ;; esac
 case "$ACCOUNT" in ''|*[/\\[:space:]]*|*]*) die "--account: no '/', '\\', ']' or whitespace" ;; esac
@@ -114,6 +133,11 @@ chmod 700 "$CONF_DIR" 2>/dev/null || true
 # wheel; the program is taken out of it, so nothing else is installed.
 RPC=deltachat-rpc-server
 rpc_path=$(command -v "$RPC" 2>/dev/null || true)
+if [ -n "$rpc_path" ] && ! "$rpc_path" --version >/dev/null 2>&1; then
+  warn "$rpc_path does not run (a pip install on Cygwin does that) - setting it aside"
+  warn "(remove it with: pip uninstall deltachat-rpc-server; rm $rpc_path)"
+  rpc_path=""
+fi
 if [ -z "$rpc_path" ]; then   # an earlier run put it in PREFIX/bin, which may not be on PATH
   for n in "$RPC" "$RPC.exe"; do
     [ -x "$PREFIX/bin/$n" ] && "$PREFIX/bin/$n" --version >/dev/null 2>&1 \
@@ -169,6 +193,30 @@ fi
 RPC_LINE=""
 if [ -n "$rpc_path" ] && [ "$(command -v "$RPC" 2>/dev/null || true)" != "$rpc_path" ]; then
   RPC_LINE="rpc_server = $rpc_path"        # not on PATH: say where it is
+fi
+
+# 1b. the server's certificate ------------------------------------------------
+# A LAN server's is usually self-signed (mail-setup's is): without --self-signed,
+# look at the IMAP port and turn verification off for this account if it fails.
+if [ "$SELF_SIGNED" = 0 ] && [ "$CHECK" = 1 ]; then
+  if "$PY" - "$HOST" <<'PYEOF3'
+import socket, ssl, sys
+try:
+    s = socket.create_connection((sys.argv[1], 993), 8)
+except OSError:
+    sys.exit(0)                          # cannot tell: leave verification on
+try:
+    ssl.create_default_context().wrap_socket(s, server_hostname=sys.argv[1]).close()
+except ssl.SSLCertVerificationError:
+    sys.exit(1)
+except (ssl.SSLError, OSError):
+    pass
+PYEOF3
+  then :
+  else
+    SELF_SIGNED=1
+    log "certificate : $HOST's is self-signed (or not for that name): verify = false for this account"
+  fi
 fi
 
 # 2. tvchat.conf -------------------------------------------------------------
