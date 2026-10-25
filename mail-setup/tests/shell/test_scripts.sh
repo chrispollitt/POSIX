@@ -649,6 +649,15 @@ ok "bash -n on every script"
 for f in "$M"/bin/* "$M"/tests/live/*.py; do [ -f "$f" ] || continue; pycheck "$f" || bad "compile $f"; done
 ok "python compiles bin/* and tests/live/*.py"
 
+t "scripts are executable in git"
+if git -C "$M" rev-parse --git-dir >/dev/null 2>&1; then
+  nx=$(git -C "$M" ls-files -s -- "scripts/*.sh" "../chat-setup/scripts/*.sh" "../chat-setup/scripts/*.py" 2>/dev/null | grep -v "^100755" | cut -f2)
+  check "every scripts/*.sh is mode 755 in git (a 644 one fails with Permission denied on a fresh clone)" '[ -z "$nx" ]' || printf "    not executable: %s
+" "$nx"
+else
+  ok "skipped (not a git checkout)"
+fi
+
 echo
 echo "shell tests: $PASS passed, $FAIL failed"
 [ "$FAIL" = 0 ]
