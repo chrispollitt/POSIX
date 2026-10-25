@@ -428,6 +428,18 @@ LC=$(printf '/^([^@]+)@[^.@]+$/    ${1}@%s\n' cpbee | sed -n 's|^/\(.*\)/ .*|\1|
 check "lan-canonical regex: dotless only" 'grep -Eq "$LC" <<<"chris@cmlaptop" && ! grep -Eq "$LC" <<<"me@gmail.com" && ! grep -Eq "$LC" <<<"chris"'
 
 # --------------------------------------------------------------------------
+t "common.sh on Cygwin"
+if case "$(uname -s)" in CYGWIN*) false ;; *) true ;; esac; then
+  ok "skipped (not Cygwin)"
+else
+  P=$(env -i HOME="$HOME" PATH=/bin bash -c '. "$1"; echo "$PATH"' _ "$M/lib/common.sh")
+  check "a bare PATH gets /usr/bin first" 'case "$P" in /usr/bin:*) true ;; *) false ;; esac'
+  P2=$(env -i HOME="$HOME" PATH=/usr/bin:/bin bash -c '. "$1"; echo "$PATH"' _ "$M/lib/common.sh")
+  check "and keeps no duplicate of it" '[ "$(printf "%s" "$P2" | tr : "
+" | grep -cx /usr/bin)" = 1 ]'
+fi
+
+# --------------------------------------------------------------------------
 t "configure-delta --print"
 D1=$("$S/configure-delta.sh" --print)
 check "auth socket for Postfix, group postfix" 'grep -qx "  unix_listener /var/spool/postfix/private/auth {" <<<"$D1" && grep -qx "    group = postfix" <<<"$D1"'

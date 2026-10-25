@@ -43,6 +43,19 @@ readsecret() {   # readsecret "prompt" -> echoes the typed value (stdout only)
 # --------------------------------------------------------------------------
 # OS / package manager detection
 # --------------------------------------------------------------------------
+# Cygwin: a bare ssh login (and cron) has /bin but neither /usr/bin nor
+# /usr/local/bin on PATH - cmake 4.x then cannot find its modules, and
+# tools installed by `make install` or `pip --user` are not found.  Put them
+# there, /usr/bin first.
+case "$(uname -s 2>/dev/null)" in
+  CYGWIN*|MSYS*|MINGW*)
+    for _d in "$HOME/.local/bin" "$HOME/bin" /usr/local/bin; do
+      [ -d "$_d" ] && case ":$PATH:" in *":$_d:"*) ;; *) PATH="$PATH:$_d" ;; esac
+    done
+    case "$PATH" in /usr/bin:*) ;; *) PATH="/usr/bin:$PATH" ;; esac
+    unset _d; export PATH ;;
+esac
+
 OS=$(uname -s 2>/dev/null || echo unknown)
 IS_CYGWIN=0; case "$OS" in CYGWIN*|MSYS*|MINGW*) IS_CYGWIN=1 ;; esac
 IS_MACOS=0;  [ "$OS" = Darwin ] && IS_MACOS=1
