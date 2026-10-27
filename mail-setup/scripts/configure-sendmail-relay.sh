@@ -367,6 +367,21 @@ _cfg_postfix() {   # configure an already-installed Postfix as a smarthost relay
     # delivered here, and on the way out the generic map turns it into the
     # real mailbox.  Headers are rewritten for LAN clients too (by default
     # only for local submissions).
+    # That name must have a dot: Delta Chat (and anything else strict) won't
+    # take chris@cpbee as an address.  A short myhostname becomes the FQDN;
+    # the short name stays in mydestination so mail still addressed to it is
+    # delivered.
+    mh="$($SUDO postconf -h myhostname 2>/dev/null || true)"
+    case "$mh" in
+      *.*) ;;
+      *) case "$fqdn" in
+           *.*) $SUDO postconf -e "myhostname = $fqdn" \
+                  "mydestination = \$myhostname, ${mh:-$hn}, localhost.\$mydomain, localhost"
+                log "postfix: myhostname ${mh:-$hn} -> $fqdn (addresses need a dot)"
+                mh="$fqdn" ;;
+           *) log "warning: no FQDN for this box (try --fqdn NAME): addresses will be user@${mh:-$hn}" ;;
+         esac ;;
+    esac
     printf '/^([^@]+)@[^.@]+$/    ${1}@%s\n' "$mh" | $SUDO tee $PF_DIR/lan-canonical >/dev/null
     $SUDO postconf -e \
       "canonical_maps = regexp:$PF_DIR/lan-canonical" \
