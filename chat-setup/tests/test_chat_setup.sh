@@ -396,6 +396,10 @@ assert c[\"account:cpbee\"][\"protocol\"] == \"irc\" and c[\"account:floyd\"][\"
 " "$FC"'
 fl --nick Bot --account lan --admins "chris, ops" --claude-dir /srv/notes --print-config > "$FC" 2> "$OUT"
 check "options: account, nick, admins, claude dir" 'grep -qx "\[account:lan\]" "$FC" && grep -qx "nick     = Bot" "$FC" && grep -qx "sasl     = Bot" "$FC" && grep -qx "admins   = chris, ops" "$FC" && grep -qx "attach   = lan/\*" "$FC" && grep -qx "claude_dir      = /srv/notes" "$FC" && ! grep -q "cpbee/" "$FC"'
+fl --irc-host 192.168.10.1 --print-config | grep -qx "host     = 192.168.10.1"
+check "--irc-host: where he connects to Ergo" '[ $? = 0 ]'
+fl --irc-host 'bad host' --print-config > "$OUT" 2>&1
+check "a bad --irc-host is refused" '[ $? != 0 ] && has "$OUT" "--irc-host"'
 fl --print-unit > "$SANDBOX/floyd.service" 2> "$OUT"
 FU="$SANDBOX/floyd.service"
 check "--print-unit: runs as the floyd user by default" '[ $? = 0 ] && grep -qx "User=floyd" "$FU"'
