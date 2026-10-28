@@ -58,6 +58,9 @@
 #   --pull-user U       whose getmail setup fetches the mail (default: chris)
 #   --service-user U    who runs the floyd-daemon, and so owns --env-file
 #                       (default: the --user, floyd)
+#   --irc-host HOST     where he connects to Ergo's TLS port (default: the address
+#                       Ergo listens on, from ss; on the master the name "cpbee" is
+#                       127.0.1.1 or ::1, which Ergo's LAN-only listener refuses)
 #   --admins LIST       NickServ accounts that may give him orders (default: chris)
 #   --claude-dir DIR    the directory the Claude CLI works in (default: his home)
 #   --conf-file F       default /etc/tvchat/floyd.conf
@@ -83,6 +86,7 @@ IRCPORT=6667
 ACCOUNT=cpbee
 SVCUSER=""
 ADMINS=chris
+IRCHOST=""
 CLAUDEDIR=""
 CONFFILE=/etc/tvchat/floyd.conf
 TVCHATDIR=""
@@ -108,6 +112,7 @@ while [ $# -gt 0 ]; do
     --account)       ACCOUNT=${2:?}; shift 2 ;;
     --pull-user)     PULLUSER=${2:?}; shift 2 ;;
     --service-user)  SVCUSER=${2:?}; shift 2 ;;
+    --irc-host)      IRCHOST=${2:?}; shift 2 ;;
     --admins)        ADMINS=${2:?}; shift 2 ;;
     --claude-dir)    CLAUDEDIR=${2:?}; shift 2 ;;
     --conf-file)     CONFFILE=${2:?}; shift 2 ;;
@@ -140,6 +145,14 @@ tv_file() {
   done
   return 1
 }
+# the address Ergo's TLS listener is bound to (not loopback), if this box shows one
+detect_irc_host() {
+  command -v ss >/dev/null 2>&1 || return 0
+  ss -ltnH 'sport = :6697' 2>/dev/null | awk '{print $4}' | sed 's/:6697$//' \
+    | grep -vE '^(127\.|\[?::1?\]?$|0\.0\.0\.0$|\*$)' | head -n1 || true
+}
+[ -n "$IRCHOST" ] || IRCHOST=$(detect_irc_host)
+case "$IRCHOST" in *[!A-Za-z0-9.:-]*) die "--irc-host: '$IRCHOST' is not a host name or address" ;; esac
 # floyd.conf: the example with his nick, the account name and the admins filled in
 make_conf() {
   local src
@@ -148,6 +161,7 @@ make_conf() {
       -e "s#^attach   = cpbee/\*#attach   = $ACCOUNT/*#" \
       -e "s/^nick     = .*/nick     = $NICK/" \
       -e "s/^sasl     = .*/sasl     = $NICK/" \
+      ${IRCHOST:+-e "s/^host     = .*/host     = $IRCHOST/"} \
       -e "s/^admins   = .*/admins   = $ADMINS/" \
       ${CLAUDEDIR:+-e "s#^claude_dir *= .*#claude_dir      = $CLAUDEDIR#"} "$src"
 }
@@ -384,7 +398,8 @@ else
     else systemctl start tvchat-floyd; fi
     sleep 3
     if systemctl is-active --quiet tvchat-floyd; then
-      log "service     : tvchat-floyd is running (journalctl -u tvchat-floyd -f)"
+      log "service     : tvchat-floyd is running (journalctl -u tvchat-floyd -f); what it says about IRC:"
+      sleep 2; journalctl -u tvchat-floyd -n 4 --no-pager -o cat 2>/dev/null | sed 's/^/                /' || true
     else
       warn "service     : tvchat-floyd did not stay up:"
       journalctl -u tvchat-floyd -n 15 --no-pager 2>/dev/null >&2 || true
