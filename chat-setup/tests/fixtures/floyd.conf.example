@@ -1,0 +1,72 @@
+# The central Floyd: configuration for `tvchat-backend floyd-daemon`.
+#
+# On the LAN master (cpbee), chrispollitt/POSIX chat-setup/scripts/configure-floyd.sh
+# writes this to /etc/tvchat/floyd.conf (with his nick, the account and the admins
+# filled in), installs configure/tvchat-floyd.service and starts it.  Or copy it there
+# and edit it yourself.  It is an ordinary tvchat.conf: an IRC
+# account (Floyd's own nick, logged in to services) and a protocol = floyd
+# account that listens through it.
+#
+# NO PASSWORDS HERE.  Floyd's NickServ password goes in /etc/tvchat/floyd.env
+# (chmod 600) as
+#   TVCHAT_PASS_CPBEE=...
+# or in the service user's ~/.netrc:  machine cpbee  login Floyd  password ...
+# configure-floyd.sh registers the nick and writes that file.
+
+[account:cpbee]
+protocol = irc
+display  = cpbee
+host     = cpbee
+port     = 6697
+tls      = true
+cafile   = /opt/ergo/ca.pem
+nick     = Floyd
+realname = Floyd, B-19-7 (a robot)
+# his services account; the password is looked up as above
+sasl     = Floyd
+# joined on every start; anyone can also /invite him or /msg him
+channels = #test
+
+[account:floyd]
+protocol = floyd
+# he listens in every conversation of that account, private messages included
+attach   = cpbee/*
+# speaks as himself, so no "[Floyd] " tag
+tag      =
+# no wandering about in his own empty conversation
+idle     = 0
+# how much he does: off | minimal | helpful | chatty | clippy
+#   off      deaf and mute (only "!level" is heard)
+#   minimal  answers when spoken to and runs !commands, including !calc, !convert, !time in X,
+#            !todo, !note, !catchup; no banter, no karma, no unprompted anything
+#   helpful  + the same in plain words ("floyd: what is 12*7"), karma, !tell delivery
+#   chatty   + banter and games (the default)
+#   clippy   + unprompted tips: "Floyd not clippy but it looks like you ..." (one per conversation
+#            per clippy_gap seconds; "floyd: shoo" mutes him for an hour)
+# Admins change it per conversation with "!level NAME" (this is the default).
+#level      = chatty
+#clippy_gap = 300
+# who may give him orders: NickServ account names (case does not matter).  The
+# server vouches for the account on every line (IRCv3 account-tag); a nick, or
+# a name inside a message, counts for nothing.  "!whoami" tells anyone what
+# Floyd knows of them.
+admins   = chris
+# Floyd can ask the Claude CLI for an admin: "!claude QUESTION" in a channel,
+# or "claude QUESTION" in a private message.  The CLI runs as the service user
+# with only the tools below, so it can read but not run or change anything.
+# Read is not confined to claude_dir: it reads whatever that user can.  The service
+# runs as the floyd user (configure-floyd.sh's default), so that is only what floyd can
+# read; he needs his own login:  sudo -u floyd -H bash -l, then  claude
+claude   = yes
+#claude_cmd     = claude
+#claude_tools   = Read,Grep,Glob
+# (~ is the service user's home; configure-floyd.sh --claude-dir DIR sets it)
+claude_dir      = ~
+#claude_model   =
+# any more command-line arguments, e.g. --max-turns 8
+#claude_args    =
+# seconds to wait for an answer, and lines of it that are passed on (default 180, 10)
+#claude_timeout = 180
+#claude_lines   = 10
+# what he remembers (seen, tells, karma, quotes, facts)
+#memory   = ~/.local/share/tvchat/floyd/floyd.json

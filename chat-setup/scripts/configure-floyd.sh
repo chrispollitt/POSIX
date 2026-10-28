@@ -26,7 +26,20 @@
 #      (configure/tvchat-floyd.service reads it).  Re-running keeps the password
 #      already in that file.
 #
-# It does NOT start the daemon: see tvchat's INSTALL.md, "The central Floyd".
+#   5. installs and starts the daemon (tvchat-backend floyd-daemon): writes
+#      --conf-file (/etc/tvchat/floyd.conf, from tvchat's floyd.conf.example, with
+#      his nick, the account name and the admins filled in; an existing file is left
+#      alone), the systemd unit tvchat-floyd.service running as --service-user
+#      (default: the floyd user himself), checks the config, and starts it.
+#      Needs tvchat installed on this box (tvchat-backend on PATH) and its
+#      files at hand: --tvchat-dir, or ../../../TUIs/tvchat, or the installed
+#      /usr/local/share/doc/tvchat.
+#
+# The daemon runs as the floyd user by default, so the Claude CLI that admins can
+# ask through him (!claude ...) is only as powerful as that account: it cannot read
+# your files.  He needs his own `claude` login:  sudo -u floyd -H bash -l, then
+# `claude` (the account has no login shell, so su cannot be used).  Give him a
+# directory to look at with --claude-dir.  --service-user chris runs it as you instead.
 #
 # Re-runnable: each step is skipped when already true.
 #
@@ -44,7 +57,14 @@
 #                       name (default: cpbee -> TVCHAT_PASS_CPBEE)
 #   --pull-user U       whose getmail setup fetches the mail (default: chris)
 #   --service-user U    who runs the floyd-daemon, and so owns --env-file
-#                       (default: chris)
+#                       (default: the --user, floyd)
+#   --admins LIST       NickServ accounts that may give him orders (default: chris)
+#   --claude-dir DIR    the directory the Claude CLI works in (default: his home)
+#   --conf-file F       default /etc/tvchat/floyd.conf
+#   --tvchat-dir DIR    where floyd.conf.example and tvchat-floyd.service are
+#   --no-start          write the files, do not start the service
+#   --print-config      print the floyd.conf this would write, and stop (no root)
+#   --print-unit        print the systemd unit this would write, and stop
 #   --env-file F        default /etc/tvchat/floyd.env
 #   --password-file F   where the mailbox password is saved
 #                       (default: /root/floyd-passwords)
@@ -61,7 +81,13 @@ ADDRESS="cwp+floyd@u-l.ca"
 MAILHOST=localhost
 IRCPORT=6667
 ACCOUNT=cpbee
-SVCUSER=chris
+SVCUSER=""
+ADMINS=chris
+CLAUDEDIR=""
+CONFFILE=/etc/tvchat/floyd.conf
+TVCHATDIR=""
+NOSTART=0
+PRINT=""
 PULLUSER=chris
 ENVFILE=/etc/tvchat/floyd.env
 PWFILE=/root/floyd-passwords
@@ -82,6 +108,13 @@ while [ $# -gt 0 ]; do
     --account)       ACCOUNT=${2:?}; shift 2 ;;
     --pull-user)     PULLUSER=${2:?}; shift 2 ;;
     --service-user)  SVCUSER=${2:?}; shift 2 ;;
+    --admins)        ADMINS=${2:?}; shift 2 ;;
+    --claude-dir)    CLAUDEDIR=${2:?}; shift 2 ;;
+    --conf-file)     CONFFILE=${2:?}; shift 2 ;;
+    --tvchat-dir)    TVCHATDIR=${2:?}; shift 2 ;;
+    --no-start)      NOSTART=1; shift ;;
+    --print-config)  PRINT=config; shift ;;
+    --print-unit)    PRINT=unit; shift ;;
     --env-file)      ENVFILE=${2:?}; shift 2 ;;
     --password-file) PWFILE=${2:?}; shift 2 ;;
     -n|--dry-run)    DRY=1; shift ;;
@@ -95,9 +128,43 @@ case "$NICK" in ''|-*|*[!A-Za-z0-9_\`^{}\|\[\]\\-]*) die "--nick: '$NICK' is not
 case "$ADDRESS" in *@*.*) : ;; *) die "--address: '$ADDRESS' is not an address" ;; esac
 case "$ACCOUNT" in ''|*[!A-Za-z0-9_-]*) die "--account: '$ACCOUNT' may only have letters, digits, - and _" ;; esac
 
+[ -n "$SVCUSER" ] || SVCUSER=$USERNAME
+case "$ADMINS" in ''|*[!A-Za-z0-9_,\ \`^{}\|\[\]\\-]*) die "--admins: '$ADMINS' is not a list of account names" ;; esac
+
+# tvchat's files: a source checkout has them in configure/, an install in the doc dir
+tv_file() {
+  local dirs=("$here/../../../TUIs/tvchat" /usr/local/share/doc/tvchat /usr/share/doc/tvchat)
+  [ -z "$TVCHATDIR" ] || dirs=("$TVCHATDIR")        # asked for one: look nowhere else
+  for d in "${dirs[@]}"; do
+    for f in "$d/configure/$1" "$d/$1"; do [ -f "$f" ] && { echo "$f"; return 0; }; done
+  done
+  return 1
+}
+# floyd.conf: the example with his nick, the account name and the admins filled in
+make_conf() {
+  local src
+  src=$(tv_file floyd.conf.example) || die "floyd.conf.example not found (use --tvchat-dir DIR: a tvchat checkout or its installed doc directory)"
+  sed -e "s/^\[account:cpbee\]/[account:$ACCOUNT]/" \
+      -e "s#^attach   = cpbee/\*#attach   = $ACCOUNT/*#" \
+      -e "s/^nick     = .*/nick     = $NICK/" \
+      -e "s/^sasl     = .*/sasl     = $NICK/" \
+      -e "s/^admins   = .*/admins   = $ADMINS/" \
+      ${CLAUDEDIR:+-e "s#^claude_dir *= .*#claude_dir      = $CLAUDEDIR#"} "$src"
+}
+backend_path() { command -v tvchat-backend 2>/dev/null || echo /usr/local/bin/tvchat-backend; }
+# the systemd unit: who runs it, where the backend, the config and the passwords are
+make_unit() {
+  local src
+  src=$(tv_file tvchat-floyd.service) || die "tvchat-floyd.service not found (use --tvchat-dir DIR)"
+  sed -e "s#^User=.*#User=$SVCUSER#" \
+      -e "s#^ExecStart=.*#ExecStart=$(backend_path) floyd-daemon --conf $CONFFILE#" \
+      -e "s#^EnvironmentFile=.*#EnvironmentFile=-$ENVFILE#" "$src"
+}
+case "$PRINT" in config) make_conf; exit 0 ;; unit) make_unit; exit 0 ;; esac
+
 [ "$(uname -s)" = Linux ] || die "this sets up the Linux master; run it on cpbee"
 [ "$DRY" = 1 ] || [ "$(id -u)" = 0 ] || die "run it as root:  sudo $0"
-id "$SVCUSER" >/dev/null 2>&1 || die "--service-user: no such user: $SVCUSER"
+[ "$SVCUSER" = "$USERNAME" ] || id "$SVCUSER" >/dev/null 2>&1 || die "--service-user: no such user: $SVCUSER"   # (floyd is made below)
 id "$PULLUSER" >/dev/null 2>&1 || die "--pull-user: no such user: $PULLUSER"
 
 gen_pw() { head -c 48 /dev/urandom | base64 | tr -d '/+=\n' | head -c 22; }
@@ -255,14 +322,74 @@ else
     log "nickserv    : $NICK's password is in $ENVFILE (owner $SVCUSER)"
   else
     log "nickserv    : $NICK registered; the password in $ENVFILE is unchanged"
+    if [ -e "$ENVFILE" ]; then chown "$SVCUSER" "$ENVFILE"; chmod 600 "$ENVFILE"; fi
   fi
 fi
 
-# 5. what is next -------------------------------------------------------------
+# 5. the daemon ----------------------------------------------------------------
+changed=0
+if [ "$DRY" = 1 ]; then
+  log "would write $CONFFILE and /etc/systemd/system/tvchat-floyd.service (User=$SVCUSER), then start it"
+else
+  # (the config and the unit need tvchat's files; without them, say so and stop short)
+  if ! tv_file floyd.conf.example >/dev/null || ! tv_file tvchat-floyd.service >/dev/null; then
+    warn "daemon      : tvchat's floyd.conf.example / tvchat-floyd.service not found - give --tvchat-dir DIR"
+    warn "              (a tvchat checkout, or /usr/local/share/doc/tvchat once installed); see tvchat's INSTALL.md"
+    exit 0
+  fi
+  if [ ! -x "$(backend_path)" ]; then
+    warn "daemon      : tvchat-backend is not installed on this box (./build.sh && ./install.sh in tvchat); then run this again"
+    exit 0
+  fi
+  if [ -e "$CONFFILE" ]; then
+    log "floyd.conf  : $CONFFILE exists - left alone"
+  else
+    install -d -m 755 "$(dirname "$CONFFILE")"
+    make_conf > "$CONFFILE.new" && mv "$CONFFILE.new" "$CONFFILE"
+    chmod 644 "$CONFFILE"
+    log "floyd.conf  : wrote $CONFFILE (nick $NICK, account $ACCOUNT, admins $ADMINS)"
+  fi
+  if ! out=$("$(backend_path)" check-config "$CONFFILE" 2>&1); then
+    printf '%s\n' "$out" >&2
+    die "$CONFFILE has errors (above); fix it and run this again"
+  fi
+  unit=/etc/systemd/system/tvchat-floyd.service
+  make_unit > "$unit.new"
+  if [ -f "$unit" ] && cmp -s "$unit.new" "$unit"; then
+    rm -f "$unit.new"; log "unit        : $unit is up to date"
+  else
+    mv "$unit.new" "$unit"; chmod 644 "$unit"; changed=1; log "unit        : wrote $unit (runs as $SVCUSER)"
+  fi
+  if grep -qs "^claude *= *yes" "$CONFFILE" && \
+     ! sudo -u "$SVCUSER" -H sh -c 'command -v claude' >/dev/null 2>&1; then
+    warn "claude      : the Claude CLI is not on $SVCUSER's PATH, so !claude will say it cannot be reached."
+    warn "              Install it for him, then log in:  sudo -u $SVCUSER -H bash -l   and run   claude"
+  fi
+  if [ "$NOSTART" = 1 ]; then
+    log "service     : not started (--no-start):  systemctl enable --now tvchat-floyd"
+  elif ! command -v systemctl >/dev/null 2>&1; then
+    warn "service     : no systemctl here; run it by hand:  $(backend_path) floyd-daemon --conf $CONFFILE"
+  else
+    systemctl daemon-reload
+    systemctl enable tvchat-floyd >/dev/null 2>&1 || true
+    if systemctl is-active --quiet tvchat-floyd && [ "$changed" = 1 ]; then systemctl restart tvchat-floyd
+    else systemctl start tvchat-floyd; fi
+    sleep 3
+    if systemctl is-active --quiet tvchat-floyd; then
+      log "service     : tvchat-floyd is running (journalctl -u tvchat-floyd -f)"
+    else
+      warn "service     : tvchat-floyd did not stay up:"
+      journalctl -u tvchat-floyd -n 15 --no-pager 2>/dev/null >&2 || true
+    fi
+  fi
+fi
+
+# 6. what is next -------------------------------------------------------------
 cat <<EOF
 
 Done.  Next:
-  * read his mail:   sudo -u $USERNAME -H tvmail      (it is cwp+floyd@... mail, once pop-pull has fetched it)
-  * start the bot:   see tvchat's INSTALL.md, "The central Floyd"
-                     (/etc/tvchat/floyd.conf: sasl = $NICK; admins = chris)
+  * read his mail:     sudo -u $USERNAME -H tvmail      (it is $ADDRESS mail, once pop-pull has fetched it)
+  * try the bot:       /msg $NICK hello      (as $ADMINS: !whoami, then !claude QUESTION)
+  * his Claude login:  sudo -u $SVCUSER -H bash -l   then   claude      (once)
+  * logs:              journalctl -u tvchat-floyd -f
 EOF

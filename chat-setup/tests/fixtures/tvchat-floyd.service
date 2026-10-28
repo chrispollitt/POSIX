@@ -1,0 +1,33 @@
+# systemd unit for the central Floyd (tvchat-backend floyd-daemon).
+#
+# chrispollitt/POSIX chat-setup/scripts/configure-floyd.sh does all of this (the
+# floyd user, his mail, his NickServ account and password, /etc/tvchat/floyd.conf,
+# this unit, and starting it).  By hand, after writing /etc/tvchat/floyd.conf and
+# /etc/tvchat/floyd.env (TVCHAT_PASS_CPBEE=..., mode 600):
+#
+#   sudo install -m 644 tvchat-floyd.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now tvchat-floyd
+#   journalctl -u tvchat-floyd -f        # also the audit trail of who asked Claude what
+#
+# User= is the account the Claude CLI (!claude ...) runs as, and so what it can read:
+# floyd, a system user with no login shell (systemd does not need one).  He needs his
+# own login to Claude:  sudo -u floyd -H bash -l, then  claude
+[Unit]
+Description=Floyd, the central tvchat bot (IRC)
+After=network-online.target ergo.service
+Wants=network-online.target
+
+[Service]
+User=floyd
+ExecStart=/usr/local/bin/tvchat-backend floyd-daemon --conf /etc/tvchat/floyd.conf
+EnvironmentFile=-/etc/tvchat/floyd.env
+Restart=always
+RestartSec=10
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+
+[Install]
+WantedBy=multi-user.target
