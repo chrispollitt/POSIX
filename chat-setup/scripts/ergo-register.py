@@ -11,6 +11,9 @@ plaintext listener.  Connects as NICK, waits for the welcome, says
           a different password is NOT changed - say so)
   exit 1  anything else NickServ said, or no answer
   exit 2  usage / cannot connect
+  exit 3  the nick cannot be taken: in use, or reserved by an existing account (Ergo
+          refuses a registered nick to a connection that has not logged in, so this
+          is also what a re-run sees once NICK is registered)
 
 Stdlib only, Python >= 3.6.
 """
@@ -60,8 +63,9 @@ def main(argv):
                     continue
                 cmd = words[1] if len(words) > 1 else ""
                 if cmd == "433":
-                    print("ergo-register: the nick %s is in use right now - try again later" % nick)
-                    return 1
+                    print("ergo-register: the nick %s is not available: in use right now, or reserved "
+                          "by an account that already exists" % nick)
+                    return 3
                 if cmd == "001" and not registered:
                     registered = True
                     send("PRIVMSG NickServ :REGISTER %s" % pw)

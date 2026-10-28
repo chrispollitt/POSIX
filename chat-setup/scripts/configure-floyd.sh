@@ -309,8 +309,16 @@ if [ -z "$ircpw" ]; then ircpw=$(gen_pw); fresh=1; fi
 if [ "$DRY" = 1 ]; then
   log "would register $NICK with NickServ on 127.0.0.1:$IRCPORT and write $var to $ENVFILE"
 else
-  CHAT_SETUP_PASS="$ircpw" "$(find_python)" "$ergo_py" 127.0.0.1 "$IRCPORT" "$NICK" \
-    || die "could not register $NICK with NickServ (is Ergo up on 127.0.0.1:$IRCPORT? configure-ergo.sh)"
+  rc=0
+  CHAT_SETUP_PASS="$ircpw" "$(find_python)" "$ergo_py" 127.0.0.1 "$IRCPORT" "$NICK" || rc=$?
+  if [ "$rc" = 3 ] && [ "$fresh" = 0 ]; then
+    # Ergo does not let an unauthenticated connection take a registered nick: so on a
+    # re-run, once his secret is saved, "taken" means "registered earlier"
+    log "nickserv    : $NICK is taken - registered earlier (his password is in $ENVFILE).  If he is not,"
+    log "              something else is using the nick: /whois $NICK from an IRC client."
+    rc=0
+  fi
+  [ "$rc" = 0 ] || die "could not register $NICK with NickServ (is Ergo up on 127.0.0.1:$IRCPORT? configure-ergo.sh; is another connection using the nick $NICK?)"
   if [ "$fresh" = 1 ]; then
     install -d -m 755 "$(dirname "$ENVFILE")"
     umask 077

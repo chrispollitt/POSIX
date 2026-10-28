@@ -7,6 +7,7 @@ registration (001), then NickServ answers REGISTER according to MODE:
   exists    "Account already exists"
   refuse    "Passphrase contains forbidden characters or is otherwise invalid"
   silent    nothing (the client gives up)
+  taken     433 "Nickname is already in use" instead of the welcome
 
 Every line the client sent goes to stderr, so the test can check what it
 said (and that the password never appears anywhere else).
@@ -42,6 +43,8 @@ try:
             sys.stderr.write(line + "\n")
             if line.startswith("NICK "):
                 nick = line[5:]
+            elif line.startswith("USER ") and mode == "taken":
+                send(":srv 433 * %s :Nickname is already in use" % nick)
             elif line.startswith("USER "):
                 send(":srv NOTICE * :*** Looking up your hostname...")
                 send(":srv 001 %s :Welcome to the FakeNet IRC Network" % nick)
