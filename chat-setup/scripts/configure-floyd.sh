@@ -26,20 +26,26 @@
 #      (configure/tvchat-floyd.service reads it).  Re-running keeps the password
 #      already in that file.
 #
-#   5. installs and starts the daemon (tvchat-backend floyd-daemon): writes
-#      --conf-file (/etc/tvchat/floyd.conf, from tvchat's floyd.conf.example, with
-#      his nick, the account name and the admins filled in; an existing file is left
-#      alone), the systemd unit tvchat-floyd.service running as --service-user
-#      (default: the floyd user himself), checks the config, and starts it.
-#      Needs tvchat installed on this box (tvchat-backend on PATH) and its
-#      files at hand: --tvchat-dir, or ../../../TUIs/tvchat, or the installed
-#      /usr/local/share/doc/tvchat.
+#   5. brings up the daemon (tvchat-backend floyd-daemon), all of it:
+#        - builds and installs tvchat from its checkout when it is missing or out of
+#          date (built as the checkout's owner, installed into /usr/local);
+#        - installs the Claude CLI for the service user (Anthropic's installer, into
+#          ~/.local/bin) and clones the repositories he may read into --claude-dir;
+#        - writes --conf-file (/etc/tvchat/floyd.conf, from tvchat's floyd.conf.example,
+#          with his nick, the Ergo address, the account name, the admins and the path of
+#          his claude filled in; an existing file is kept, but its claude_cmd is fixed),
+#          the systemd unit tvchat-floyd.service (User = the service user), and starts
+#          or restarts it;
+#        - at a terminal, offers to log him in to Claude (once), then asks the CLI a
+#          question the way the daemon does, to prove it works.
+#      tvchat's checkout: --tvchat-dir, or ../../../TUIs/tvchat, or the installed
+#      /usr/local/share/doc/tvchat (then nothing is built).
 #
 # The daemon runs as the floyd user by default, so the Claude CLI that admins can
 # ask through him (!claude ...) is only as powerful as that account: it cannot read
-# your files.  He needs his own `claude` login:  sudo -u floyd -H bash -l, then
-# `claude` (the account has no login shell, so su cannot be used).  Give him a
-# directory to look at with --claude-dir.  --service-user chris runs it as you instead.
+# your files.  His Claude login is his own (the account has no login shell, so su
+# cannot be used; the script runs the CLI for him).  --service-user chris runs the
+# daemon as you instead.
 #
 # Re-runnable: each step is skipped when already true.
 #
@@ -62,7 +68,14 @@
 #                       Ergo listens on, from ss; on the master the name "cpbee" is
 #                       127.0.1.1 or ::1, which Ergo's LAN-only listener refuses)
 #   --admins LIST       NickServ accounts that may give him orders (default: chris)
-#   --claude-dir DIR    the directory the Claude CLI works in (default: his home)
+#   --claude-dir DIR    the directory the Claude CLI works in (default: ~floyd/src)
+#   --clone URL         a repository to clone (or update) into --claude-dir, so Claude
+#                       can read it; repeatable (default: github.com/chrispollitt's
+#                       TUIs and POSIX).  --no-clone: none
+#   --claude-cmd PATH   his claude (default: ~floyd/.local/bin/claude, installed if absent)
+#   --no-claude-install don't install the Claude CLI for him
+#   --no-login          don't offer the Claude login
+#   --no-install-tvchat don't build and install tvchat from the checkout
 #   --conf-file F       default /etc/tvchat/floyd.conf
 #   --tvchat-dir DIR    where floyd.conf.example and tvchat-floyd.service are
 #   --no-start          write the files, do not start the service
@@ -91,6 +104,9 @@ CLAUDEDIR=""
 CONFFILE=/etc/tvchat/floyd.conf
 TVCHATDIR=""
 NOSTART=0
+NOCLONE=0; NOCLAUDE=0; NOLOGIN=0; NOTV=0
+CLAUDECMD=""
+CLONES=()
 PRINT=""
 PULLUSER=chris
 ENVFILE=/etc/tvchat/floyd.env
@@ -118,6 +134,12 @@ while [ $# -gt 0 ]; do
     --conf-file)     CONFFILE=${2:?}; shift 2 ;;
     --tvchat-dir)    TVCHATDIR=${2:?}; shift 2 ;;
     --no-start)      NOSTART=1; shift ;;
+    --clone)         CLONES+=("${2:?}"); shift 2 ;;
+    --no-clone)      NOCLONE=1; shift ;;
+    --claude-cmd)    CLAUDECMD=${2:?}; shift 2 ;;
+    --no-claude-install) NOCLAUDE=1; shift ;;
+    --no-login)      NOLOGIN=1; shift ;;
+    --no-install-tvchat) NOTV=1; shift ;;
     --print-config)  PRINT=config; shift ;;
     --print-unit)    PRINT=unit; shift ;;
     --env-file)      ENVFILE=${2:?}; shift 2 ;;
@@ -134,6 +156,8 @@ case "$ADDRESS" in *@*.*) : ;; *) die "--address: '$ADDRESS' is not an address" 
 case "$ACCOUNT" in ''|*[!A-Za-z0-9_-]*) die "--account: '$ACCOUNT' may only have letters, digits, - and _" ;; esac
 
 [ -n "$SVCUSER" ] || SVCUSER=$USERNAME
+[ ${#CLONES[@]} -gt 0 ] || CLONES=(https://github.com/chrispollitt/TUIs https://github.com/chrispollitt/POSIX)
+case "$CLAUDECMD" in ''|/*) : ;; *) die "--claude-cmd: '$CLAUDECMD' is not a full path" ;; esac
 case "$ADMINS" in ''|*[!A-Za-z0-9_,\ \`^{}\|\[\]\\-]*) die "--admins: '$ADMINS' is not a list of account names" ;; esac
 
 # tvchat's files: a source checkout has them in configure/, an install in the doc dir
@@ -144,6 +168,13 @@ tv_file() {
     for f in "$d/configure/$1" "$d/$1"; do [ -f "$f" ] && { echo "$f"; return 0; }; done
   done
   return 1
+}
+# the directory those files are in: a tvchat checkout (has build.sh) or its installed doc dir
+tv_dir() {
+  local f
+  f=$(tv_file floyd.conf.example) || return 1
+  f=$(dirname "$f"); [ "$(basename "$f")" = configure ] && f=$(dirname "$f")
+  echo "$f"
 }
 # the address Ergo's TLS listener is bound to (not loopback), if this box shows one
 detect_irc_host() {
@@ -163,7 +194,8 @@ make_conf() {
       -e "s/^sasl     = .*/sasl     = $NICK/" \
       ${IRCHOST:+-e "s/^host     = .*/host     = $IRCHOST/"} \
       -e "s/^admins   = .*/admins   = $ADMINS/" \
-      ${CLAUDEDIR:+-e "s#^claude_dir *= .*#claude_dir      = $CLAUDEDIR#"} "$src"
+      ${CLAUDEDIR:+-e "s#^claude_dir *= .*#claude_dir      = $CLAUDEDIR#"} \
+      ${CLAUDECMD:+-e "s|^#\{0,1\}claude_cmd .*|claude_cmd = $CLAUDECMD|"} "$src"
 }
 backend_path() { command -v tvchat-backend 2>/dev/null || echo /usr/local/bin/tvchat-backend; }
 # the systemd unit: who runs it, where the backend, the config and the passwords are
@@ -181,6 +213,8 @@ case "$PRINT" in config) make_conf; exit 0 ;; unit) make_unit; exit 0 ;; esac
 [ "$SVCUSER" = "$USERNAME" ] || id "$SVCUSER" >/dev/null 2>&1 || die "--service-user: no such user: $SVCUSER"   # (floyd is made below)
 id "$PULLUSER" >/dev/null 2>&1 || die "--pull-user: no such user: $PULLUSER"
 
+[ "$DRY" != 1 ] || [ "$(id -u)" = 0 ] || \
+  log "(a dry run as $(id -un): other users' home directories cannot be examined, so steps that are done may show as 'would'; use sudo for an exact one)"
 gen_pw() { head -c 48 /dev/urandom | base64 | tr -d '/+=\n' | head -c 22; }
 find_python() {
   for c in python3 python3.12 python3.11 python3.10 python3.9 python3.8 python3.7; do
@@ -348,28 +382,103 @@ else
   fi
 fi
 
-# 5. the daemon ----------------------------------------------------------------
+# 5. tvchat, Claude for him, the daemon ----------------------------------------
 changed=0
+svc_home=$(getent passwd "$SVCUSER" | cut -d: -f6 || true); [ -n "$svc_home" ] || svc_home=/home/$SVCUSER
+as_svc() { runuser -u "$SVCUSER" -- env HOME="$svc_home" "$@"; }
+tvdir=$(tv_dir || true)
+if [ -z "$tvdir" ]; then
+  warn "daemon      : tvchat's floyd.conf.example / tvchat-floyd.service not found - give --tvchat-dir DIR"
+  warn "              (a tvchat checkout, or /usr/local/share/doc/tvchat once installed)"
+  exit 0
+fi
+backend=$(backend_path)
+
+# 5a. tvchat itself: built and installed when missing or different from the checkout
+if [ "$NOTV" = 0 ] && [ -f "$tvdir/build.sh" ]; then
+  if [ ! -x "$backend" ] || ! cmp -s "$tvdir/backend/tvchat-backend" "$backend"; then
+    owner=$(stat -c %U "$tvdir")
+    if [ "$DRY" = 1 ]; then
+      log "would build tvchat in $tvdir (as $owner) and install it into /usr/local"
+    else
+      log "tvchat      : building $tvdir as $owner (a few minutes the first time) ..."
+      blog=$(mktemp)
+      if runuser -u "$owner" -- sh -c 'cd "$1" && ./build.sh' sh "$tvdir" > "$blog" 2>&1; then
+        cmake --install "$tvdir/build" --prefix /usr/local > "$blog" 2>&1 \
+          || { tail -n 15 "$blog" >&2; die "installing tvchat failed"; }
+        chown "$owner" "$tvdir/build/install_manifest.txt" 2>/dev/null || true
+        rm -f "$blog"; changed=1
+        log "tvchat      : installed into /usr/local ($(tvchat-backend --version))"
+      else
+        tail -n 20 "$blog" >&2; die "building tvchat failed (above; full log: $blog)"
+      fi
+    fi
+  fi
+elif [ ! -x "$backend" ]; then
+  warn "daemon      : tvchat-backend is not installed on this box and there is no checkout to build it from"
+  warn "              (./build.sh && ./install.sh in tvchat, or give --tvchat-dir DIR); then run this again"
+  exit 0
+fi
+
+# 5b. the Claude CLI, for the service user
+[ -n "$CLAUDECMD" ] || { [ -x "$svc_home/.local/bin/claude" ] && CLAUDECMD="$svc_home/.local/bin/claude"; } || true
+if [ -z "$CLAUDECMD" ] && [ "$NOCLAUDE" = 0 ]; then
+  if [ "$DRY" = 1 ]; then
+    log "would install the Claude CLI for $SVCUSER (https://claude.ai/install.sh, into $svc_home/.local/bin)"
+  else
+    log "claude      : installing the Claude CLI for $SVCUSER (Anthropic's installer, into $svc_home/.local/bin) ..."
+    clog=$(mktemp)
+    if as_svc sh -c 'cd "$HOME" && curl -fsSL https://claude.ai/install.sh | bash' > "$clog" 2>&1 \
+       && [ -x "$svc_home/.local/bin/claude" ]; then
+      CLAUDECMD="$svc_home/.local/bin/claude"; rm -f "$clog"; changed=1
+      log "claude      : installed $CLAUDECMD"
+    else
+      tail -n 10 "$clog" >&2
+      warn "claude      : could not install it for $SVCUSER (above); !claude will not work until you do"
+    fi
+  fi
+fi
+
+# 5c. what he may read: --claude-dir, with the repositories cloned (or updated) into it
+if [ -z "$CLAUDEDIR" ] && [ "$NOCLONE" = 0 ]; then CLAUDEDIR="$svc_home/src"; fi
+if [ -n "$CLAUDEDIR" ] && [ "$DRY" != 1 ]; then
+  as_svc mkdir -p "$CLAUDEDIR" || warn "claude dir  : cannot create $CLAUDEDIR as $SVCUSER"
+  if [ "$NOCLONE" = 0 ]; then
+    for url in "${CLONES[@]}"; do
+      name=$(basename "$url" .git)
+      if [ -d "$CLAUDEDIR/$name/.git" ]; then
+        as_svc git -C "$CLAUDEDIR/$name" pull -q --ff-only >/dev/null 2>&1 \
+          && log "clone       : $name updated" || warn "clone       : could not update $CLAUDEDIR/$name"
+      else
+        as_svc git -C "$CLAUDEDIR" clone -q "$url" >/dev/null 2>&1 \
+          && log "clone       : $name -> $CLAUDEDIR/$name" || warn "clone       : could not clone $url into $CLAUDEDIR"
+      fi
+    done
+  fi
+elif [ -n "$CLAUDEDIR" ]; then
+  log "would create $CLAUDEDIR as $SVCUSER"
+  [ "$NOCLONE" = 1 ] || log "would clone (or update) into it: ${CLONES[*]}"
+fi
+
+# 5d. the config, the unit, the service
 if [ "$DRY" = 1 ]; then
-  log "would write $CONFFILE and /etc/systemd/system/tvchat-floyd.service (User=$SVCUSER), then start it"
+  log "would write $CONFFILE (claude_cmd = ${CLAUDECMD:-claude}) and /etc/systemd/system/tvchat-floyd.service (User=$SVCUSER), then start it"
 else
-  # (the config and the unit need tvchat's files; without them, say so and stop short)
-  if ! tv_file floyd.conf.example >/dev/null || ! tv_file tvchat-floyd.service >/dev/null; then
-    warn "daemon      : tvchat's floyd.conf.example / tvchat-floyd.service not found - give --tvchat-dir DIR"
-    warn "              (a tvchat checkout, or /usr/local/share/doc/tvchat once installed); see tvchat's INSTALL.md"
-    exit 0
-  fi
-  if [ ! -x "$(backend_path)" ]; then
-    warn "daemon      : tvchat-backend is not installed on this box (./build.sh && ./install.sh in tvchat); then run this again"
-    exit 0
-  fi
   if [ -e "$CONFFILE" ]; then
-    log "floyd.conf  : $CONFFILE exists - left alone"
+    log "floyd.conf  : $CONFFILE exists - kept"
+    if [ -n "$CLAUDECMD" ] && ! grep -qxE "claude_cmd *= *$CLAUDECMD" "$CONFFILE"; then
+      if grep -qE '^#?claude_cmd *=( *claude)? *$' "$CONFFILE"; then
+        sed -i "s|^#\{0,1\}claude_cmd .*|claude_cmd = $CLAUDECMD|" "$CONFFILE"
+        changed=1; log "floyd.conf  : claude_cmd = $CLAUDECMD"
+      else
+        warn "floyd.conf  : its claude_cmd is not $CLAUDECMD; left as you set it"
+      fi
+    fi
   else
     install -d -m 755 "$(dirname "$CONFFILE")"
     make_conf > "$CONFFILE.new" && mv "$CONFFILE.new" "$CONFFILE"
-    chmod 644 "$CONFFILE"
-    log "floyd.conf  : wrote $CONFFILE (nick $NICK, account $ACCOUNT, admins $ADMINS)"
+    chmod 644 "$CONFFILE"; changed=1
+    log "floyd.conf  : wrote $CONFFILE (nick $NICK, account $ACCOUNT, host ${IRCHOST:-as in the example}, admins $ADMINS)"
   fi
   if ! out=$("$(backend_path)" check-config "$CONFFILE" 2>&1); then
     printf '%s\n' "$out" >&2
@@ -381,11 +490,6 @@ else
     rm -f "$unit.new"; log "unit        : $unit is up to date"
   else
     mv "$unit.new" "$unit"; chmod 644 "$unit"; changed=1; log "unit        : wrote $unit (runs as $SVCUSER)"
-  fi
-  if grep -qs "^claude *= *yes" "$CONFFILE" && \
-     ! sudo -u "$SVCUSER" -H sh -c 'command -v claude' >/dev/null 2>&1; then
-    warn "claude      : the Claude CLI is not on $SVCUSER's PATH, so !claude will say it cannot be reached."
-    warn "              Install it for him, then log in:  sudo -u $SVCUSER -H bash -l   and run   claude"
   fi
   if [ "$NOSTART" = 1 ]; then
     log "service     : not started (--no-start):  systemctl enable --now tvchat-floyd"
@@ -399,11 +503,33 @@ else
     sleep 3
     if systemctl is-active --quiet tvchat-floyd; then
       log "service     : tvchat-floyd is running (journalctl -u tvchat-floyd -f); what it says about IRC:"
-      sleep 2; journalctl -u tvchat-floyd -n 4 --no-pager -o cat 2>/dev/null | sed 's/^/                /' || true
+      sleep 2; journalctl -u tvchat-floyd -n 5 --no-pager -o cat 2>/dev/null | sed 's/^/                /' || true
     else
       warn "service     : tvchat-floyd did not stay up:"
       journalctl -u tvchat-floyd -n 15 --no-pager 2>/dev/null >&2 || true
     fi
+  fi
+
+  # 5e. his Claude login (his own, once), proved the way the daemon uses the CLI
+  if [ -n "$CLAUDECMD" ] && grep -qs "^claude *= *yes" "$CONFFILE"; then
+    claude_ok() {
+      echo "Reply with exactly: pong" | as_svc sh -c 'cd "$1" && timeout 90 "$2" -p --output-format text --tools Read --allowedTools Read --permission-mode dontAsk' \
+        sh "${CLAUDEDIR:-$svc_home}" "$CLAUDECMD" 2>/dev/null | grep -qi pong
+    }
+    if claude_ok; then
+      log "claude      : $SVCUSER is logged in to Claude and the CLI answers"
+    elif [ "$NOLOGIN" = 0 ] && [ -t 0 ] && [ -t 1 ]; then
+      printf '  claude      : %s is not logged in to Claude yet.  Log in now (then /exit)? [Y/n] ' "$SVCUSER"
+      read -r ans || ans=n
+      case "$ans" in [Nn]*) : ;; *) as_svc sh -c 'cd "$HOME" && exec "$1"' sh "$CLAUDECMD" || true ;; esac
+      if claude_ok; then log "claude      : logged in, and the CLI answers"
+      else warn "claude      : still no answer from the CLI; log in with:  sudo -u $SVCUSER -H sh -c 'cd ~ && $CLAUDECMD'"; fi
+    else
+      warn "claude      : $SVCUSER is not logged in to Claude (or the CLI does not answer).  Log in once:"
+      warn "              sudo -u $SVCUSER -H sh -c 'cd ~ && $CLAUDECMD'      (then /exit)"
+    fi
+  elif grep -qs "^claude *= *yes" "$CONFFILE"; then
+    warn "claude      : no Claude CLI for $SVCUSER, so !claude will say it cannot be reached"
   fi
 fi
 
@@ -411,8 +537,7 @@ fi
 cat <<EOF
 
 Done.  Next:
-  * read his mail:     sudo -u $USERNAME -H tvmail      (it is $ADDRESS mail, once pop-pull has fetched it)
   * try the bot:       /msg $NICK hello      (as $ADMINS: !whoami, then !claude QUESTION)
-  * his Claude login:  sudo -u $SVCUSER -H bash -l   then   claude      (once)
+  * read his mail:     sudo -u $USERNAME -H tvmail      (it is $ADDRESS mail, once pop-pull has fetched it)
   * logs:              journalctl -u tvchat-floyd -f
 EOF
