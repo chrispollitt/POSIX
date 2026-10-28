@@ -171,6 +171,8 @@ reg exists
 check "already exists: exit 0, says the password is unchanged" '[ $? = 0 ] && has "$OUT" "already exists (its password is unchanged)"'
 reg refuse
 check "refused: exit 1 with NickServ's words" '[ $? = 1 ] && has "$OUT" "Passphrase contains forbidden characters"'
+reg taken
+check "nick taken (433): exit 3 - a re-run after it was registered" '[ $? = 3 ] && has "$OUT" "is not available"'
 reg silent
 check "no answer: exit 1" '[ $? = 1 ] && has "$OUT" "no answer from NickServ"'
 CHAT_SETUP_PASS="" "$PY" "$C/scripts/ergo-register.py" 127.0.0.1 1 tester > "$OUT" 2>&1
