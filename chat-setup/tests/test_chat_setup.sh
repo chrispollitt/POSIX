@@ -377,6 +377,39 @@ check "second run: the password is found, not asked" '[ $? = 0 ] && has "$OUT" "
 check "  the account is replaced, not doubled" '[ "$(grep -c "^\[account:delta\]" "$DC")" = 1 ]'
 
 # --------------------------------------------------------------------------
+t "configure-floyd.sh (the floyd.conf and the unit it would write)"
+FL="$C/scripts/configure-floyd.sh"
+fl() { "$FL" --tvchat-dir "$FIX" "$@"; }
+check "bash -n configure-floyd.sh" 'bash -n "$FL"'
+check "-h prints the usage" '"$FL" -h | grep -q "^Usage:"'
+fl --print-config > "$SANDBOX/floyd.conf" 2> "$OUT"
+check "--print-config: exit 0, no root needed" '[ $? = 0 ]'
+FC="$SANDBOX/floyd.conf"
+check "  the nick, account and admins of the defaults" 'grep -qx "\[account:cpbee\]" "$FC" && grep -qx "nick     = Floyd" "$FC" && grep -qx "sasl     = Floyd" "$FC" && grep -qx "admins   = chris" "$FC" && grep -qx "attach   = cpbee/\*" "$FC"'
+check "  Claude works in the service user's home" 'grep -qx "claude_dir      = ~" "$FC"'
+check "  it still parses as a tvchat.conf" '"$PY" -c "
+import configparser, sys
+c = configparser.ConfigParser(interpolation=None); c.read(sys.argv[1])
+assert c[\"account:cpbee\"][\"protocol\"] == \"irc\" and c[\"account:floyd\"][\"protocol\"] == \"floyd\"
+" "$FC"'
+fl --nick Bot --account lan --admins "chris, ops" --claude-dir /srv/notes --print-config > "$FC" 2> "$OUT"
+check "options: account, nick, admins, claude dir" 'grep -qx "\[account:lan\]" "$FC" && grep -qx "nick     = Bot" "$FC" && grep -qx "sasl     = Bot" "$FC" && grep -qx "admins   = chris, ops" "$FC" && grep -qx "attach   = lan/\*" "$FC" && grep -qx "claude_dir      = /srv/notes" "$FC" && ! grep -q "cpbee/" "$FC"'
+fl --print-unit > "$SANDBOX/floyd.service" 2> "$OUT"
+FU="$SANDBOX/floyd.service"
+check "--print-unit: runs as the floyd user by default" '[ $? = 0 ] && grep -qx "User=floyd" "$FU"'
+check "  the backend, the config and the password file" 'grep -qE "^ExecStart=.*tvchat-backend floyd-daemon --conf /etc/tvchat/floyd.conf$" "$FU" && grep -qx "EnvironmentFile=-/etc/tvchat/floyd.env" "$FU"'
+fl --user fbot --service-user chris --conf-file /srv/f.conf --env-file /srv/f.env --print-unit > "$FU" 2> "$OUT"
+check "  --service-user, --conf-file and --env-file" 'grep -qx "User=chris" "$FU" && grep -q "floyd-daemon --conf /srv/f.conf$" "$FU" && grep -qx "EnvironmentFile=-/srv/f.env" "$FU"'
+fl --user fbot --print-unit | grep -qx "User=fbot"
+check "  the service user follows --user" '[ $? = 0 ]'
+"$FL" --tvchat-dir "$SANDBOX/nowhere" --print-config > "$OUT" 2>&1
+check "no tvchat files: fails, says --tvchat-dir" '[ $? != 0 ] && has "$OUT" "--tvchat-dir"'
+fl --admins 'a;b' --print-config > "$OUT" 2>&1
+check "--admins with odd characters is refused" '[ $? != 0 ] && has "$OUT" "--admins"'
+fl --nick 'bad nick' --print-config > "$OUT" 2>&1
+check "a bad --nick is refused" '[ $? != 0 ] && has "$OUT" "--nick"'
+
+# --------------------------------------------------------------------------
 t "talkd"
 "$PY" -m unittest discover -s "$here" -p test_talkd.py > "$OUT" 2>&1
 check "talkd.py unit tests (test_talkd.py)" '[ $? = 0 ]' || sed "s/^/    /" "$OUT"

@@ -12,6 +12,7 @@ toward self-hosted chat.
 | [scripts/configure-talkd.sh](scripts/configure-talkd.sh) | install talkd as the LAN's talk daemon (service, user, inetd, firewall) |
 | [talkd/talkd.py](talkd/talkd.py) | a talk(1) daemon (ntalk on UDP 518) that also rings and relays for tvchat (TCP 518) - in progress |
 | [scripts/configure-tvchat.sh](scripts/configure-tvchat.sh) | on a client: point tvchat at that server (CA, `tvchat.conf`, password, a test login) |
+| [scripts/configure-floyd.sh](scripts/configure-floyd.sh) | on the master: Floyd, tvchat's bot and tvmail's assistant - the `floyd` user and his mailbox (puller, `tvmail.conf`), his NickServ nick and password, `/etc/tvchat/floyd.conf`, the `tvchat-floyd` systemd unit (runs as `floyd`), and start it; needs tvchat installed (see tvchat's INSTALL.md, "The central Floyd") |
 | [scripts/configure-tvchat-delta.sh](scripts/configure-tvchat-delta.sh) | on a client: a Delta Chat account in tvchat on a mailbox made by mail-setup's `configure-delta.sh` (installs the core, `tvchat.conf`, password, a real connect) |
 
 The shared shell helpers come from [`../mail-setup/lib/common.sh`](../mail-setup/lib/common.sh).
@@ -174,4 +175,5 @@ These tests need no root, no network and no Linux. They cover the
 one), the unit, the download pin, the firewall plan, option checks, and
 `ergo-register.py` against a fake NickServ, and `configure-tvchat.sh`'s
 edits of a `tvchat.conf` and `~/.netrc` in a sandboxed `HOME` (with
-`--no-check`).
+`--no-check`). `configure-floyd.sh`'s `floyd.conf` and systemd unit are checked through
+its `--print-config` / `--print-unit`.
