@@ -1,0 +1,12 @@
+[Unit]
+Description=maze4 in a browser tab (ttyd, read-only, 127.0.0.1:7681)
+
+[Service]
+Environment=PATH=%h/bin:/usr/local/bin:/usr/bin:/bin
+Environment=BASE=/maze4/term
+ExecStart=%h/gh_cp/Games/maze4/ttyd/run-ttyd.sh
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

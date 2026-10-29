@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>terminal</title>
+<!-- A desktop window around a ttyd terminal: title bar, close / minimise / maximise, drag to move,
+     drag the corner to resize.  Served by nginx at /APP/ ; the terminal is ttyd at /APP/term/ in the iframe.
+     Closing the window ends the session (the iframe is blanked); reopening starts a new one. -->
+<style>
+  :root {
+    --desk-1: #1b2330; --desk-2: #0e1116;
+    --win: #000; --bar: #2a2d33; --bar-text: #c9cdd3; --bar-dim: #7d838d; --edge: #3a3e46;
+    --close: #ff5f57; --min: #febc2e; --max: #28c840; --bar-h: 34px;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; }
+  body {
+    background: radial-gradient(120% 120% at 30% 20%, var(--desk-1), var(--desk-2));
+    font: 13px/1 system-ui, -apple-system, "Segoe UI", sans-serif; color: var(--bar-text);
+  }
+  #win {
+    position: absolute; background: var(--win); border: 1px solid var(--edge); border-radius: 10px;
+    box-shadow: 0 18px 50px rgba(0,0,0,.6), 0 2px 6px rgba(0,0,0,.5); overflow: hidden;
+    display: flex; flex-direction: column; min-width: 0;
+  }
+  #win.max { inset: 0 !important; width: auto !important; height: auto !important; border-radius: 0; border: 0; }
+  #win.min { height: calc(var(--bar-h) + 2px) !important; }
+  #win.min #term, #win.min #grip { display: none; }
+  #win.closed { display: none; }
+  #bar {
+    flex: none; height: var(--bar-h); background: var(--bar); display: flex; align-items: center;
+    padding: 0 12px; cursor: default; user-select: none; touch-action: none;
+  }
+  #lights { display: flex; gap: 8px; width: 70px; }
+  #lights button {
+    width: 13px; height: 13px; border: 0; border-radius: 50%; padding: 0; cursor: pointer;
+    color: transparent; font: 700 9px/13px system-ui, sans-serif; text-align: center;
+  }
+  #lights button:hover { color: rgba(0,0,0,.55); }
+  #lights button:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+  #b-close { background: var(--close); } #b-min { background: var(--min); } #b-max { background: var(--max); }
+  #title { flex: 1; text-align: center; color: var(--bar-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #win:focus-within #title, #win.active #title { color: var(--bar-text); }
+  #spacer { width: 70px; }
+  #term { flex: 1; min-height: 0; width: 100%; border: 0; background: var(--win); display: block; }
+  #grip { position: absolute; right: 0; bottom: 0; width: 16px; height: 16px; cursor: nwse-resize; touch-action: none; }
+  body.dragging #term { pointer-events: none; }
+  #closed {
+    display: none; position: absolute; inset: 0; align-items: center; justify-content: center;
+    flex-direction: column; gap: 14px; color: var(--bar-dim);
+  }
+  #closed.on { display: flex; }
+  #closed button {
+    font: inherit; color: var(--bar-text); background: var(--bar); border: 1px solid var(--edge);
+    border-radius: 6px; padding: 8px 14px; cursor: pointer;
+  }
+  #closed button:hover { border-color: var(--bar-dim); }
+</style>
+</head>
+<body>
+<div id="win" role="application">
+  <div id="bar">
+    <div id="lights">
+      <button id="b-close" type="button" title="Close (ends the session)" aria-label="Close">&times;</button>
+      <button id="b-min" type="button" title="Minimise" aria-label="Minimise">&minus;</button>
+      <button id="b-max" type="button" title="Maximise" aria-label="Maximise">+</button>
+    </div>
+    <div id="title"></div>
+    <div id="spacer"></div>
+  </div>
+  <iframe id="term" title="terminal" allow="clipboard-read; clipboard-write; fullscreen"></iframe>
+  <div id="grip"></div>
+</div>
+<div id="closed"><div>Session ended.</div><button id="reopen" type="button">Open a new terminal</button></div>
+<script>
+(function () {
+  var win = document.getElementById('win'), bar = document.getElementById('bar'),
+      term = document.getElementById('term'), grip = document.getElementById('grip'),
+      closed = document.getElementById('closed');
+  var BAR = 34, MINW = 360, MINH = 200, MARGIN = 40;
+
+  // title from the path: /maze4/ -> "chris@cpbee: maze4"
+  var seg = location.pathname.split('/').filter(Boolean)[0] || 'terminal';
+  var names = { maze4: 'maze4', bidet: 'BIDeT 4D' };
+  var title = 'chris@cpbee: ' + (names[seg] || seg);
+  document.title = title;
+  document.getElementById('title').textContent = title;
+
+  var st = { x: 0, y: 0, w: 0, h: 0 };
+  function place() {
+    st.w = Math.max(MINW, window.innerWidth - 2 * MARGIN);
+    st.h = Math.max(MINH, window.innerHeight - 2 * MARGIN);
+    st.x = Math.round((window.innerWidth - st.w) / 2);
+    st.y = Math.round((window.innerHeight - st.h) / 2);
+  }
+  function clamp() {
+    st.w = Math.max(MINW, st.w); st.h = Math.max(MINH, st.h);
+    st.x = Math.min(Math.max(st.x, 80 - st.w), window.innerWidth - 80);
+    st.y = Math.min(Math.max(st.y, 0), window.innerHeight - BAR);
+  }
+  function apply() {
+    clamp();
+    win.style.left = st.x + 'px'; win.style.top = st.y + 'px';
+    win.style.width = st.w + 'px'; win.style.height = st.h + 'px';
+  }
+  function focusTerm() { try { term.contentWindow.focus(); } catch (e) {} }
+
+  // pointer drag with capture, so the pointer stays ours over the iframe
+  function drag(el, onmove, ondone) {
+    el.addEventListener('pointerdown', function (e) {
+      if (e.button !== 0 || e.target.closest('button') || win.classList.contains('max')) return;
+      var sx = e.clientX, sy = e.clientY, s = { x: st.x, y: st.y, w: st.w, h: st.h };
+      el.setPointerCapture(e.pointerId);
+      document.body.classList.add('dragging');
+      function mv(ev) { onmove(s, ev.clientX - sx, ev.clientY - sy); apply(); }
+      function up() {
+        el.removeEventListener('pointermove', mv); el.removeEventListener('pointerup', up);
+        document.body.classList.remove('dragging'); if (ondone) ondone();
+      }
+      el.addEventListener('pointermove', mv); el.addEventListener('pointerup', up);
+      e.preventDefault();
+    });
+  }
+  drag(bar, function (s, dx, dy) { st.x = s.x + dx; st.y = s.y + dy; }, focusTerm);
+  drag(grip, function (s, dx, dy) { st.w = s.w + dx; st.h = s.h + dy; }, focusTerm);
+
+  function toggleMax() { win.classList.remove('min'); win.classList.toggle('max'); focusTerm(); }
+  document.getElementById('b-max').onclick = toggleMax;
+  bar.addEventListener('dblclick', function (e) { if (!e.target.closest('button')) toggleMax(); });
+  document.getElementById('b-min').onclick = function () {
+    win.classList.remove('max'); win.classList.toggle('min'); focusTerm();
+  };
+  document.getElementById('b-close').onclick = function () {
+    term.src = 'about:blank'; win.classList.add('closed'); closed.classList.add('on');
+  };
+  function open() {
+    closed.classList.remove('on'); win.classList.remove('closed', 'min');
+    term.src = 'term/';
+  }
+  document.getElementById('reopen').onclick = open;
+  term.addEventListener('load', function () { if (term.src.indexOf('about:blank') < 0) focusTerm(); });
+  window.addEventListener('resize', apply);
+
+  place(); apply();
+  if (window.innerWidth < 700) win.classList.add('max');   // a phone: use the whole screen
+  term.src = 'term/';
+})();
+</script>
+</body>
+</html>

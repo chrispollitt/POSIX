@@ -1,0 +1,12 @@
+[Unit]
+Description=bidet in a browser tab (ttyd, SIXEL, 127.0.0.1:7682)
+
+[Service]
+Environment=PATH=%h/bin:/usr/local/bin:/usr/bin:/bin
+Environment=BASE=/bidet/term
+ExecStart=%h/gh_cp/CWPutils/BIDeT/4D/ttyd/run-ttyd.sh
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
