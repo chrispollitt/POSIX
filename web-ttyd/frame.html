@@ -82,8 +82,9 @@
 
   // title from the path: /maze4/ -> "chris@cpbee: maze4"
   var seg = location.pathname.split('/').filter(Boolean)[0] || 'terminal';
-  var names = { maze4: 'maze4', bidet: 'BIDeT 4D' };
-  var title = 'chris@cpbee: ' + (names[seg] || seg);
+  var titles = { maze4: 'chris@cpbee: maze4', bidet: 'chris@cpbee: BIDeT 4D',
+                 cpvax: 'cpvax: OpenVMS VAX', 'cpvax-console': 'cpvax: simh console' };
+  var title = titles[seg] || 'chris@cpbee: ' + seg;
   document.title = title;
   document.getElementById('title').textContent = title;
 

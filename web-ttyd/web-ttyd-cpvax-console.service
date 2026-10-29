@@ -1,0 +1,13 @@
+[Unit]
+Description=cpvax simh console in a browser tab (ttyd, 127.0.0.1:7684)
+
+[Service]
+Environment=PATH=%h/bin:/usr/local/bin:/usr/bin:/bin
+Environment=BASE=/cpvax-console/term
+Environment=VAX_MODE=console
+ExecStart=%h/gh_cp/VAX/simh/ttyd/run-ttyd.sh
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

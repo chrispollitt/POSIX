@@ -1,0 +1,13 @@
+[Unit]
+Description=cpvax (OpenVMS login) in a browser tab (ttyd, 127.0.0.1:7683)
+
+[Service]
+Environment=PATH=%h/bin:/usr/local/bin:/usr/bin:/bin
+Environment=BASE=/cpvax/term
+Environment=VAX_MODE=login
+ExecStart=%h/gh_cp/VAX/simh/ttyd/run-ttyd.sh
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

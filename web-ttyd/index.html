@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cpbee apps</title>
+<!-- The list of apps at https://HOST:8444/.  To add one, add a line to APPS below (and its nginx location,
+     unit and launcher: see README.md).  Served by nginx behind the same password as the apps. -->
+<style>
+  :root {
+    --desk-1: #1b2330; --desk-2: #0e1116; --tile: #2a2d33; --tile-hi: #33373e; --edge: #3a3e46;
+    --text: #d6dae0; --dim: #8a909a; --accent: #6cb6ff;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; min-height: 100%; }
+  body {
+    background: radial-gradient(120% 120% at 30% 20%, var(--desk-1), var(--desk-2)) fixed;
+    color: var(--text); font: 15px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
+    display: flex; justify-content: center; padding: 8vh 16px 40px;
+  }
+  main { width: 100%; max-width: 760px; }
+  h1 { margin: 0 0 4px; font-size: 22px; font-weight: 600; letter-spacing: .2px; }
+  .sub { margin: 0 0 28px; color: var(--dim); }
+  ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); }
+  a.tile {
+    display: block; height: 100%; padding: 16px 18px; background: var(--tile); border: 1px solid var(--edge);
+    border-radius: 10px; color: inherit; text-decoration: none; box-shadow: 0 6px 18px rgba(0,0,0,.35);
+    transition: background .12s, border-color .12s, transform .12s;
+  }
+  a.tile:hover { background: var(--tile-hi); border-color: #4a505a; transform: translateY(-1px); }
+  a.tile:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .name { font: 600 16px/1.2 ui-monospace, "Cascadia Mono", Consolas, Menlo, monospace; }
+  .what { margin-top: 6px; color: var(--dim); }
+  .tag { display: inline-block; margin-top: 10px; padding: 2px 8px; border: 1px solid var(--edge); border-radius: 999px; font-size: 12px; color: var(--dim); }
+  footer { margin-top: 28px; color: var(--dim); font-size: 13px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>cpbee</h1>
+  <p class="sub">Console apps, in a window.</p>
+  <ul id="apps"></ul>
+  <footer>Each opens in its own terminal window. Closing the window ends that session.</footer>
+</main>
+<script>
+(function () {
+  // path, name, what it is, how it behaves
+  var APPS = [
+    ['maze4/',         'maze4',         'Fruitbots race through a procedurally generated maze, fully autonomous.', 'watch only'],
+    ['bidet/',         'BIDeT 4D',      'Turn text into pictures: presets, fonts, SIXEL graphics in the terminal.', 'interactive'],
+    ['cpvax/',         'cpvax',         'The OpenVMS VAX: a normal VT100 login over telnet. Needs the VAX to be running.', 'interactive'],
+    ['cpvax-console/', 'cpvax console', 'The simh console (OPA0:) of the VAX. One at a time; Ctrl-E reaches the simulator itself.', 'careful']
+  ];
+  var ul = document.getElementById('apps');
+  APPS.forEach(function (a) {
+    var li = document.createElement('li'), l = document.createElement('a');
+    l.className = 'tile'; l.href = a[0];
+    [['name', a[1]], ['what', a[2]], ['tag', a[3]]].forEach(function (p) {
+      var d = document.createElement(p[0] === 'tag' ? 'span' : 'div'); d.className = p[0]; d.textContent = p[1]; l.appendChild(d);
+    });
+    li.appendChild(l); ul.appendChild(li);
+  });
+})();
+</script>
+</body>
+</html>
