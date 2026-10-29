@@ -40,8 +40,8 @@ makes `fw` refuse, at the next reload.  Projects open and audit ports with `../n
 
 - nginx here listens on the LAN address only, so this is reachable from the LAN, not the internet.  Anything wider
   (Tailscale, a port-forward) is a separate decision: bidet's and the VAX's ttyds are *writable* terminals.
-- cpvax: the VAX is started by hand (`sudo systemctl start vax`; the unit deliberately has no `[Install]`), so the
-  window says so and offers to retry when nothing answers.  The console flavour reaches simh itself: Ctrl-E gives the
+- cpvax: the VAX is off until someone powers it on from the window (see `VAX/simh/ondemand/`; the unit has no `[Install]`), so the
+  window offers to power it on, shows progress, and connects when it answers.  The console flavour reaches simh itself: Ctrl-E gives the
   `sim>` prompt, where `quit` stops the machine without a VMS shutdown.  `telnet -E` turns off telnet's escape
   character, so neither window offers a `telnet>` prompt or `!` shell escape.
 - A `return` in nginx runs before the auth check; `/`, `/APP/` use `rewrite ... break`, which does not skip auth.
