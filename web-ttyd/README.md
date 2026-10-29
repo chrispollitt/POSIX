@@ -9,6 +9,7 @@ maximise, drag, resize).  Written for cpbee.
     https://192.168.10.1:8444/bidet/           a text prompt that draws pictures (SIXEL), not a shell
     https://192.168.10.1:8444/cpvax/           the OpenVMS VAX: a VT100 login over telnet to 192.168.20.30
     https://192.168.10.1:8444/cpvax-console/   the simh console (127.0.0.1:2323), one client at a time
+    https://192.168.10.1:8444/waxweb/          WAX & TAPE: a web page (not a terminal) that drives the VAX's collection program
 
 | file | what |
 |---|---|
@@ -21,6 +22,16 @@ maximise, drag, resize).  Written for cpbee.
 The launchers live with the apps: `Games/maze4/ttyd/`, `CWPutils/BIDeT/4D/ttyd/` (with `bidet-web.sh`, the prompt)
 and `VAX/simh/ttyd/` (with `cpvax-term.sh`, the telnet session).  They need `~/bin/ttyd` (the static release binary)
 and, for bidet, a venv with numpy and Pillow (`~/venvs/bidet`).
+
+## waxweb: the odd one out
+
+`waxweb` (`VAX/waxweb`) is an ordinary web server on `127.0.0.1:8088`, so it has no `frame.html` window and no
+`/APP/term/`: one `location /waxweb/` in `web-ttyd.conf` proxies it (the trailing `/` on `proxy_pass` strips the
+prefix, and the page's URLs are relative, so it works here and at its own root).  Its unit is
+`web-ttyd-waxweb.service`.  It logs in to OpenVMS (192.168.20.30:23) as the unprivileged `WAXWEB` account whose
+password is in `~/.config/waxweb.env` (mode 600; `install.sh` refuses to go on without it: see
+`VAX/waxweb/deploy/waxweb.env.example`).  nginx does the authentication, so waxweb's own `WAXWEB_AUTH` stays unset.
+The page can power the VAX on (`VAX_UNIT=vax.service`, the same sudoers line as the cpvax window).
 
 ## Adding an app
 

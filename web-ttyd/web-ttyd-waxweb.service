@@ -1,0 +1,15 @@
+[Unit]
+Description=WAX & TAPE web front end for the cpvax (waxweb, 127.0.0.1:8088)
+
+[Service]
+# VAX_PASS and the rest: ~/.config/waxweb.env (see VAX/waxweb/deploy/waxweb.env.example)
+EnvironmentFile=%h/.config/waxweb.env
+Environment=WAXWEB_BIND=127.0.0.1
+Environment=WAXWEB_PORT=8088
+WorkingDirectory=%h/gh_cp/VAX/waxweb
+ExecStart=/usr/bin/python3 %h/gh_cp/VAX/waxweb/waxweb.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

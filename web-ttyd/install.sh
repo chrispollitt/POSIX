@@ -1,6 +1,6 @@
 #!/bin/bash
 # Put the console apps behind nginx on cpbee: https://192.168.10.1:8444/ lists them
-# (maze4, bidet, cpvax, cpvax-console).  Safe to run again to pick up changes.
+# (maze4, bidet, cpvax, cpvax-console, and waxweb, a web page rather than a terminal).  Safe to run again to pick up changes.
 # Run it ON cpbee, as the user that owns ~/gh_cp (it uses sudo for the nginx and firewall parts).
 #
 #   ./install.sh -n      show what it would do, change nothing
@@ -8,7 +8,8 @@
 #   ./install.sh -u      take it all out again (units, nginx files; keeps the htpasswd and the firewall entry)
 #
 # Needs: nginx, openssl, systemd (user units), ~/bin/ttyd, and the run-ttyd.sh launchers in ~/gh_cp:
-# Games/maze4/ttyd, CWPutils/BIDeT/4D/ttyd and VAX/simh/ttyd.
+# Games/maze4/ttyd, CWPutils/BIDeT/4D/ttyd and VAX/simh/ttyd; and for waxweb ~/gh_cp/VAX/waxweb and
+# ~/.config/waxweb.env (mode 600).
 # The firewall port goes through ../net-utils/lan-port (cmpi-router's port list), not a hand edit.
 set -euo pipefail
 
@@ -21,7 +22,8 @@ webdir=/usr/share/web-ttyd
 pages=(frame.html index.html)
 users_file=/etc/nginx/web-ttyd.htpasswd
 unitdir=$HOME/.config/systemd/user
-apps=(maze4 bidet cpvax cpvax-console)
+apps=(maze4 bidet cpvax cpvax-console waxweb)
+waxweb_env=$HOME/.config/waxweb.env
 launchers=("$HOME/gh_cp/Games/maze4/ttyd/run-ttyd.sh" "$HOME/gh_cp/CWPutils/BIDeT/4D/ttyd/run-ttyd.sh"
            "$HOME/gh_cp/VAX/simh/ttyd/run-ttyd.sh")
 
@@ -51,6 +53,10 @@ fi
 # --- checks, before anything changes ---
 [ -x "$HOME/bin/ttyd" ] || { echo "no ~/bin/ttyd" >&2; exit 1; }
 for l in "${launchers[@]}"; do [ -x "$l" ] || { echo "missing or not executable: $l" >&2; exit 1; }; done
+[ -f "$HOME/gh_cp/VAX/waxweb/waxweb.py" ] || { echo "missing: $HOME/gh_cp/VAX/waxweb/waxweb.py" >&2; exit 1; }
+# waxweb holds the VMS password in this file; do not start it without one, or with one others can read
+[ -f "$waxweb_env" ] || { echo "no $waxweb_env: copy VAX/waxweb/deploy/waxweb.env.example there, set VAX_PASS, chmod 600" >&2; exit 1; }
+[ "$(stat -c %a "$waxweb_env")" = 600 ] || { echo "$waxweb_env must be mode 600 (it holds a password)" >&2; exit 1; }
 [ -x "$lanport" ] || { echo "missing or not executable: $lanport" >&2; exit 1; }
 [ -x /usr/sbin/nginx ] || command -v nginx >/dev/null || { echo "nginx not found" >&2; exit 1; }
 command -v openssl >/dev/null || { echo "openssl not found" >&2; exit 1; }
