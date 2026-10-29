@@ -52,15 +52,18 @@ to re-run. Run `-h` for every option. In order, it:
 5. **Installs and starts `ergo.service`**, a sandboxed systemd unit. If Ergo
    does not come up listening, the script puts the previous `ircd.yaml` back
    and shows the journal.
-6. **Opens the firewall**, but only with `--open-firewall`. On a cmpi-router
-   box, the script adds the port to `/etc/router-setup/lan0-tcp-ports` and
-   runs `setup-router.sh fw`, so the rule survives a firewall reload. That
-   reload rebuilds the whole firewall from the list, which would close any
-   port opened only at runtime (an `nft add rule`). So if the live firewall
-   accepts a TCP port that is in neither `/etc/nftables.conf` nor the list,
-   the script refuses, names the ports, and changes nothing: add them to the
-   list first. Elsewhere, it prints (or with `--open-firewall` adds) the `nft` rule. Use
-   `--firewall-plan` to see what it would do, without root.
+6. **Opens the firewall**, but only with `--open-firewall`, through
+   [`net-utils/lan-port`](../net-utils/lan-port), the one script that owns
+   the firewall: on a cmpi-router box it adds the port to
+   `/etc/router-setup/lan0-tcp-ports`, runs `setup-router.sh fw` and checks the
+   port is open, so it survives a firewall reload. That reload rebuilds the
+   whole firewall from the lists, which would close any port opened only at
+   runtime (an `nft add rule`). So if the live firewall accepts a port that is
+   in no list, `lan-port` refuses, names the ports, and changes nothing: add
+   them to the list first (`lan-port add PORT "what it is"`). Elsewhere, it
+   prints (or with `--open-firewall` runs) the `nft` rule. Use
+   `--firewall-plan` to see what it would do, without root; `lan-port check`
+   audits the lists against the live firewall afterwards.
 7. **Registers NickServ accounts** with `--register NICK`, once per account.
    The script asks for each password, or reads `$CHAT_SETUP_PASS`. Use these
    accounts for SASL.
@@ -109,12 +112,12 @@ It installs `/opt/talkd/talkd.py`, a `talkd` system user, and
 `talkd.service` (group tty to ring terminals, CAP_NET_BIND_SERVICE for
 port 518, nothing else); comments a talk/ntalk line out of
 `/etc/inetd.conf`; answers only loopback and lan0's subnet (`--allow`).
-`--open-firewall` lists UDP 518 in `/etc/router-setup/lan0-udp-ports`
-(cmpi-router's `setup-router.sh` reads it since 2026-10-22) and TCP 518 +
-the relay ports 5181-5188 in `lan0-tcp-ports`, then runs
-`setup-router.sh fw` - and, as `configure-ergo.sh` does, refuses (changing
-nothing) if that reload would close a port open only by a live rule, TCP
-or UDP: the October mail-port outage.
+`--open-firewall` calls [`net-utils/lan-port`](../net-utils/lan-port), which lists UDP 518
+in `/etc/router-setup/lan0-udp-ports` (cmpi-router's `setup-router.sh` reads it
+since 2026-10-22) and TCP 518 + the relay ports 5181-5188 in `lan0-tcp-ports`,
+reloads once with `setup-router.sh fw`, and checks they are open - and, as
+`configure-ergo.sh` does, refuses (changing nothing) if that reload would close
+a port open only by a live rule, TCP or UDP: the October mail-port outage.
 (Since 2026-10-22 `setup-router.sh` itself refuses such a reload too, from
 any of its modes - `FW_FORCE=1` overrides; its `svc-*` ftp/telnet rules are
 exempt.)

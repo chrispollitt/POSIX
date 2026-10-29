@@ -35,14 +35,14 @@
 #   5. installs /etc/systemd/system/ergo.service, creates the database on
 #      the first run, and (re)starts Ergo.  If it does not come up listening,
 #      the previous ircd.yaml is put back and the journal is shown;
-#   6. firewall: on a cmpi-router box (/etc/router-setup/lan0-tcp-ports
-#      exists) the port is added to that list and `setup-router.sh fw`
-#      reloads the ruleset, so it survives a reload.  That reload rebuilds
-#      /etc/nftables.conf from the list, so a port opened at runtime (an
-#      `nft add rule`, not in the file) would close: if the live firewall
-#      accepts any such port, the script refuses and names them - list them
-#      in lan0-tcp-ports first; elsewhere, if an
-#      nftables input chain drops by default, the rule to add is printed.
+#   6. firewall, through ../../net-utils/lan-port: on a cmpi-router box the
+#      port is added to its port list (/etc/router-setup/lan0-tcp-ports),
+#      `setup-router.sh fw` reloads the ruleset, and the port is checked to be
+#      open, so it survives a reload.  That reload rebuilds the firewall from
+#      the lists, so lan-port refuses (changing nothing) if the live firewall
+#      accepts a port that is in no list - list those first; elsewhere, if an
+#      nftables input chain drops by default, the rule to add is printed (and
+#      run with --open-firewall).
 #      Only with --open-firewall - by default it just says what is needed;
 #   7. --register NICK: creates that NickServ account (password asked for,
 #      or $CHAT_SETUP_PASS), over loopback - use it for SASL;
@@ -71,7 +71,7 @@
 #                       /etc/ergo and /var/lib/ergo (accounts) for next time
 #   --firewall-plan     just print what step 6 would do, and exit - no root,
 #                       nothing changed.  Reads `nft list ruleset` (or the
-#                       file in $CHAT_SETUP_NFT_RULESET)
+#                       file in $LAN_PORT_RULESET)
 #   --print-config FILE just print the ircd.yaml made from default.yaml FILE
 #                       (with the options above) - no root, nothing changed
 #   --print-unit        just print the systemd unit
@@ -138,8 +138,6 @@ CONF="$CONF_DIR/ircd.yaml"
 TLS_DIR="$CONF_DIR/tls"
 DATA=/var/lib/ergo
 UNIT=/etc/systemd/system/ergo.service
-LAN_PORTS_FILE="${CHAT_SETUP_LAN_PORTS:-/etc/router-setup/lan0-tcp-ports}"
-NFT_CONF="${CHAT_SETUP_NFT_CONF:-/etc/nftables.conf}"   # what setup-router.sh fw loads
 LOCAL_CA_DIR="${CHAT_SETUP_LOCAL_CA_DIR:-/etc/ssl/Simple_Inc/certs}"
 # Ergo wants a dot in a server name (so it cannot be taken for a nick):
 # the full hostname if it has one, else the short one + .lan
@@ -272,82 +270,15 @@ EOF
 }
 
 # --------------------------------------------------------------------------
-# firewall: what step 6 would do, as "how<TAB>what" lines:
-#   ports-file  FILE         add PORT to cmpi-router's list (then setup-router.sh fw)
-#   nft         COMMAND      a runtime rule
-#   note        TEXT         nothing can be done automatically
-# Nothing printed: the port is already open (or nothing filters it).
+# firewall: ../../net-utils/lan-port lists the port, reloads with cmpi-router's
+# setup-router.sh fw and checks it is open (or, off a cmpi-router box, plans
+# the runtime nft rule).  Nothing here reads the ruleset or edits a list.
+# Off a cmpi-router box the rule goes on the interface that holds --listen.
+# fw_plan exits 0: nothing to do, 3: it would open the port, 1: it refuses.
 # --------------------------------------------------------------------------
-fw_ruleset() {
-  if [ -n "${CHAT_SETUP_NFT_RULESET:-}" ]; then cat "$CHAT_SETUP_NFT_RULESET" 2>/dev/null || true
-  elif command -v nft >/dev/null 2>&1; then ${SUDO:-} nft list ruleset 2>/dev/null || true
-  fi
-}
-fw_plan() {
-  local iif; iif=$(iface_of "$LISTEN")
-  if [ -f "$LAN_PORTS_FILE" ]; then
-    grep -Eq "^[[:space:]]*$PORT([[:space:]]|\$)" "$LAN_PORTS_FILE" \
-      || printf 'ports-file\t%s\n' "$LAN_PORTS_FILE"
-    return 0
-  fi
-  # input chains that drop by default and accept nothing on PORT
-  fw_ruleset | awk -v port="$PORT" '
-    function has(line, p) { return (" " line " ") ~ ("[^0-9]" p "[^0-9]") }
-    /^table / { fam = $2; tbl = $3; chain = ""; next }
-    /^[ \t]*chain / { chain = $2; hook = 0; drop = 0; ok = 0; next }
-    chain != "" && /type filter hook input/ { hook = 1; drop = ($0 ~ /policy drop/); next }
-    chain != "" && hook && /dport/ && /accept/ && has($0, port) { ok = 1; next }
-    /^[ \t]*}/ && chain != "" {
-      if (hook && drop && !ok) printf "%s\t%s\t%s\n", fam, tbl, chain
-      chain = ""
-    }' | while IFS=$'\t' read -r fam tbl chain; do
-      case "$fam$tbl$chain$iif" in *[!A-Za-z0-9_.@:-]*) continue ;; esac
-      if [ -n "$iif" ]; then
-        printf 'nft\tnft add rule %s %s %s iifname "%s" tcp dport %s accept\n' "$fam" "$tbl" "$chain" "$iif" "$PORT"
-      else
-        printf 'note\tnftables %s %s %s drops %s by default and no interface holds %s\n' \
-          "$fam" "$tbl" "$chain" "$PORT" "$LISTEN"
-      fi
-    done
-}
-
-# The TCP ports input chains accept, one per line, from an nft ruleset on
-# stdin ("tcp dport 22 accept", "tcp dport { 143, 993 } accept").
-accepted_tcp_ports() {
-  awk '
-    /^[ \t]*chain / { hook = 0; next }
-    /type filter hook input/ { hook = 1; next }
-    hook && /tcp dport/ && /accept/ {
-      s = $0; sub(/.*tcp dport[ \t]*/, "", s)
-      if (s ~ /^\{/) { sub(/^\{/, "", s); sub(/\}.*/, "", s) } else sub(/[ \t].*/, "", s)
-      n = split(s, a, /[ ,\t]+/)
-      for (i = 1; i <= n; i++) if (a[i] ~ /^[0-9]+$/) print a[i]
-    }' | sort -u
-}
-
-# Ports the live firewall accepts that `setup-router.sh fw` would drop: in
-# neither the ruleset file it rebuilds nor its port list - opened at runtime
-# (mail-setup's 143/993/4190 were, until a reload closed them, Oct 2026).
-fw_lost_ports() {
-  local live keep
-  live=$(fw_ruleset | accepted_tcp_ports)
-  keep=$( { if [ -n "${CHAT_SETUP_NFT_CONF:-}" ]; then cat "$NFT_CONF" 2>/dev/null
-            else ${SUDO:-} cat "$NFT_CONF" 2>/dev/null; fi; } | accepted_tcp_ports
-          awk '$1 ~ /^[0-9]+$/ { print $1 }' "$LAN_PORTS_FILE" 2>/dev/null )
-  comm -23 <(printf '%s\n' "$live" | sed '/^$/d' | sort -u) \
-           <(printf '%s\n' "$keep" | sed '/^$/d' | sort -u)
-}
-
-router_script() {   # cmpi-router's setup-router.sh, if it can be found
-  local u h
-  [ -n "${CHAT_SETUP_ROUTER:-}" ] && { echo "$CHAT_SETUP_ROUTER"; return 0; }
-  for u in "${SUDO_USER:-}" "$(id -un)"; do
-    [ -n "$u" ] || continue
-    h=$(getent passwd "$u" | cut -d: -f6)
-    [ -x "$h/cmpi-router/bin/setup-router.sh" ] && { echo "$h/cmpi-router/bin/setup-router.sh"; return 0; }
-  done
-  return 1
-}
+LAN_PORT_WHY="Ergo IRC (chat-setup)"
+fw_plan() { LAN_PORT_IIF=$(iface_of "$LISTEN" || true) lan_port plan "$PORT" "$LAN_PORT_WHY"; }
+fw_add()  { LAN_PORT_IIF=$(iface_of "$LISTEN" || true) lan_port add "$PORT" "$LAN_PORT_WHY"; }
 
 # --------------------------------------------------------------------------
 # the print-only modes (no root, nothing changed)
@@ -361,16 +292,7 @@ case "$MODE" in
     pinned_sha "$VERSION" "$ARCH" || echo "(no pinned SHA-256 for $VERSION $ARCH: checked against the release's checksums.txt only)"
     exit 0 ;;
   firewall-plan)
-    fw_plan | while IFS=$'\t' read -r how what; do
-      case "$how" in
-        ports-file)
-          echo "add '$PORT  # Ergo IRC (chat-setup)' to $what, then run setup-router.sh fw"
-          lost=$(fw_lost_ports)
-          [ -z "$lost" ] || echo "REFUSED: that reload would close tcp $(echo $lost) (opened at runtime, not in $what): list them there first" ;;
-        nft)        echo "$what" ;;
-        note)       echo "NOTE: $what" ;;
-      esac
-    done
+    fw_plan || true
     exit 0 ;;
 esac
 
@@ -388,8 +310,8 @@ if [ "$REMOVE" = 1 ]; then
   $SUDO systemctl daemon-reload
   $SUDO rm -rf "$PREFIX"
   log "removed the service and $PREFIX; kept $CONF_DIR and $DATA (accounts)"
-  [ -f "$LAN_PORTS_FILE" ] && grep -Eq "^[[:space:]]*$PORT([[:space:]]|\$)" "$LAN_PORTS_FILE" \
-    && log "port $PORT is still listed in $LAN_PORTS_FILE - delete that line and run setup-router.sh fw to close it"
+  { lan_port list 2>/dev/null || true; } | grep -q "^$PORT/tcp" \
+    && log "port $PORT is still in the router's port list - '$LAN_PORT remove $PORT' unlists it and closes it"
   exit 0
 fi
 
@@ -544,44 +466,19 @@ fi
 log "service     : ergo running - TLS $LISTEN:$PORT, plaintext 127.0.0.1:6667"
 
 # 6. firewall ----------------------------------------------------------------
-FW=$(fw_plan)
-if [ -n "$FW" ]; then
-  while IFS=$'\t' read -r how what; do
-    case "$how" in
-      ports-file)
-        if [ "$OPEN_FW" = 1 ]; then
-          lost=$(fw_lost_ports)
-          if [ -n "$lost" ]; then
-            die "not reloading the firewall: setup-router.sh fw rebuilds it from $what,
-  and these TCP ports are open now only by runtime rules, so they would close:
-      $(echo $lost)
-  Add each to $what first (\"PORT  # what it is\", one per line), then re-run.
-  (Nothing was changed: Ergo runs, but $PORT is not open to the LAN yet.)"
-          fi
-          printf '%s  # Ergo IRC (chat-setup)\n' "$PORT" | $SUDO tee -a "$what" >/dev/null
-          log "firewall    : added $PORT to $what"
-          if sr=$(router_script); then
-            $SUDO "$sr" fw && log "firewall    : reloaded ($sr fw)"
-          else
-            warn "now run 'sudo ./bin/setup-router.sh fw' in cmpi-router to load the rule"
-          fi
-        else
-          warn "the firewall drops $PORT: re-run with --open-firewall (adds it to $what"
-          warn "  and reloads with cmpi-router's setup-router.sh fw)"
-        fi ;;
-      nft)
-        if [ "$OPEN_FW" = 1 ]; then
-          eval "$SUDO $what" && log "firewall    : $what"     # names vetted in fw_plan
-          warn "that rule is lost when nftables reloads - add it to your ruleset file too"
-        else
-          warn "nftables drops $PORT by default, so clients will time out.  open it now:"
-          warn "  $what      (or re-run with --open-firewall)"
-        fi ;;
-      note) warn "$what" ;;
-    esac
-  done <<<"$FW"
-else
+rc=0; plan=$(fw_plan 2>&1) || rc=$?
+if [ "$rc" = 0 ]; then
   log "firewall    : nothing to open"
+elif [ "$OPEN_FW" != 1 ]; then
+  warn "the firewall does not open $PORT yet: re-run with --open-firewall, which does this:"
+  printf '%s\n' "$plan" | while IFS= read -r l; do warn "  $l"; done
+else
+  rc=0; fw_add || rc=$?
+  case $rc in
+    0) ;;
+    2) warn "the rule above was not run (no interface known for $LISTEN): run it by hand" ;;
+    *) die "the firewall was not opened (see above): Ergo runs, but $PORT is not open to the LAN yet" ;;
+  esac
 fi
 
 # 7. accounts ----------------------------------------------------------------

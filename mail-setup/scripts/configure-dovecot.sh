@@ -15,10 +15,11 @@
 #
 # TLS: the distro package's self-signed cert (IMAPS on 993) is left as is.
 #
-# Firewall: on a cmpi-router box (/etc/router-setup/lan0-tcp-ports exists)
-# 993 - and 143 with --plaintext - go into that list, so its
-# `setup-router.sh fw` keeps them open (it rebuilds the firewall from the
-# list).  Listen local: nothing to open.
+# Firewall: ../../net-utils/lan-port opens 993 - and 143 with --plaintext - for
+# the LAN.  On a cmpi-router box that lists them in its port list and reloads
+# with `setup-router.sh fw` (which rebuilds the firewall from the lists), then
+# checks they are open; elsewhere it only says which nft rule would.  Listen
+# local: nothing to open.
 #
 # Re-runnable.
 #
@@ -208,8 +209,8 @@ fi
 log "dovecot: running  (IMAPS 993$( [ "$PLAINTEXT" = 1 ] && echo ', IMAP 143 with password login' ), listen: $LISTEN)"
 
 if [ "$LISTEN" = all ]; then
-  lan_ports_keep 993 "Dovecot imaps (mail-setup)"
-  [ "$PLAINTEXT" = 1 ] && lan_ports_keep 143 "Dovecot imap (mail-setup)"
+  if [ "$PLAINTEXT" = 1 ]; then lan_ports_keep 993 "Dovecot imaps (mail-setup)" 143 "Dovecot imap (mail-setup)"
+  else lan_ports_keep 993 "Dovecot imaps (mail-setup)"; fi
 fi
 
 if [ -n "$TEST_USER" ]; then

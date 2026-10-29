@@ -19,12 +19,13 @@
 #      callee on another host connects to one), and --allow: loopback plus
 #      lan0's subnet - talk has no passwords, so nobody else is answered;
 #   5. firewall, only with --open-firewall (by default it says what is
-#      needed): on a cmpi-router box, UDP 518 goes in
-#      /etc/router-setup/lan0-udp-ports and TCP 518 + the relay ports in
-#      lan0-tcp-ports, then `setup-router.sh fw` reloads - refused if that
+#      needed), through ../../net-utils/lan-port: on a cmpi-router box, UDP 518
+#      goes in /etc/router-setup/lan0-udp-ports and TCP 518 + the relay ports
+#      in lan0-tcp-ports, then `setup-router.sh fw` reloads once and the ports
+#      are checked to be open - refused (nothing changed) if that
 #      setup-router.sh has no UDP list yet, or if the reload would close a
 #      port open only by a runtime rule (as configure-ergo.sh does);
-#      elsewhere the nft rules to add are printed.
+#      elsewhere the nft rules to add are printed (and run).
 #
 # Re-runnable.  Never answers the WAN: --allow, and the firewall.
 #
@@ -41,7 +42,7 @@
 #                        inetd.conf change and the firewall lists stay)
 #   --firewall-plan      just print what step 5 would do, and exit - no root,
 #                        nothing changed.  Reads `nft list ruleset` (or the
-#                        file in $CHAT_SETUP_NFT_RULESET)
+#                        file in $LAN_PORT_RULESET)
 #   --print-unit         just print the systemd unit
 #   --print-inetd FILE   just print FILE with the talk lines commented out
 #   -h | --help          show this header
@@ -93,9 +94,6 @@ esac
 PREFIX=/opt/talkd
 UNIT=/etc/systemd/system/talkd.service
 INETD_CONF="${CHAT_SETUP_INETD_CONF:-/etc/inetd.conf}"
-LAN_PORTS_FILE="${CHAT_SETUP_LAN_PORTS:-/etc/router-setup/lan0-tcp-ports}"
-LAN_UDP_PORTS_FILE="${CHAT_SETUP_LAN_UDP_PORTS:-/etc/router-setup/lan0-udp-ports}"
-NFT_CONF="${CHAT_SETUP_NFT_CONF:-/etc/nftables.conf}"   # what setup-router.sh fw loads
 IFACE="${CHAT_SETUP_IFACE:-lan0}"
 
 # --allow: loopback always, plus the LAN - lan0's subnet unless named
@@ -163,99 +161,19 @@ port_holder() {
 }
 
 # --------------------------------------------------------------------------
-# firewall: what step 5 would do, as "how<TAB>...":
-#   list  FILE  PROTO  PORT   add PORT to that cmpi-router list
-#   nft   COMMAND             a runtime rule (not a cmpi-router box)
+# firewall: ../../net-utils/lan-port lists the ports (UDP 518 in lan0-udp-ports,
+# the TCP ones in lan0-tcp-ports), reloads once with cmpi-router's
+# setup-router.sh fw and checks they are open - or, off a cmpi-router box,
+# plans the runtime nft rules.  It refuses, changing nothing, if
+# setup-router.sh has no UDP list or the reload would close a port that is
+# open only by a runtime rule.  Nothing here reads the ruleset or edits a list.
+# fw_plan exits 0: nothing to do, 3: it would open ports, 1: it refuses.
 # --------------------------------------------------------------------------
-fw_ruleset() {
-  if [ -n "${CHAT_SETUP_NFT_RULESET:-}" ]; then cat "$CHAT_SETUP_NFT_RULESET" 2>/dev/null || true
-  elif command -v nft >/dev/null 2>&1; then ${SUDO:-} nft list ruleset 2>/dev/null || true
-  fi
-}
-
-# The ports of PROTO that input chains accept, one per line, from an nft
-# ruleset on stdin ("udp dport 518 accept", "tcp dport { 143, 993 } accept").
-accepted_ports() {
-  awk -v proto="$1" '
-    /^[ \t]*chain / { hook = 0; next }
-    /type filter hook input/ { hook = 1; next }
-    hook && $0 ~ (proto " dport") && /accept/ {
-      s = $0; sub(".*" proto " dport[ \t]*", "", s)
-      if (s ~ /^\{/) { sub(/^\{/, "", s); sub(/\}.*/, "", s) } else sub(/[ \t].*/, "", s)
-      n = split(s, a, /[ ,\t]+/)
-      for (i = 1; i <= n; i++) if (a[i] ~ /^[0-9]+$/) print a[i]
-    }' | sort -u
-}
-
-drop_policy() {   # an input chain drops by default
-  fw_ruleset | grep -q 'type filter hook input.*policy drop'
-}
-
-listed() { grep -Eq "^[[:space:]]*$2([[:space:]]|\$)" "$1" 2>/dev/null; }
-
-wanted() {   # PROTO PORT, one per line: what talkd listens on
-  echo "udp $PORT"
-  echo "tcp $PORT"
-  seq "$RLO" "$RHI" | sed 's/^/tcp /'
-}
-
-fw_plan() {
-  local proto port file live
-  if [ -f "$LAN_PORTS_FILE" ]; then
-    wanted | while read -r proto port; do
-      if [ "$proto" = udp ]; then file=$LAN_UDP_PORTS_FILE; else file=$LAN_PORTS_FILE; fi
-      listed "$file" "$port" || printf 'list\t%s\t%s\t%s\n' "$file" "$proto" "$port"
-    done
-    return 0
-  fi
-  drop_policy || return 0
-  live=$(fw_ruleset)
-  wanted | while read -r proto port; do
-    printf '%s\n' "$live" | accepted_ports "$proto" | grep -qx "$port" && continue
-    printf 'nft\tnft add rule inet filter input iifname "%s" %s dport %s accept\n' "$IFACE" "$proto" "$port"
-  done
-}
-
-# Ports the live firewall accepts that `setup-router.sh fw` would drop (in
-# neither the file it rebuilds nor its lists), as "PROTO PORT" lines.
-fw_lost_ports() {
-  local proto live keep list
-  for proto in tcp udp; do
-    if [ "$proto" = udp ]; then list=$LAN_UDP_PORTS_FILE; else list=$LAN_PORTS_FILE; fi
-    live=$(fw_ruleset | accepted_ports "$proto")
-    # (a list may not exist yet - lan0-udp-ports until the first --open-firewall)
-    keep=$( { if [ -n "${CHAT_SETUP_NFT_CONF:-}" ]; then cat "$NFT_CONF" 2>/dev/null
-              else ${SUDO:-} cat "$NFT_CONF" 2>/dev/null; fi; } | accepted_ports "$proto"
-            [ ! -f "$list" ] || awk '$1 ~ /^[0-9]+$/ { print $1 }' "$list" )
-    comm -23 <(printf '%s\n' "$live" | sed '/^$/d' | sort -u) \
-             <(printf '%s\n' "$keep" | sed '/^$/d' | sort -u) | sed "s/^/$proto /"
-  done
-}
-
-router_script() {   # cmpi-router's setup-router.sh, if it can be found
-  local u h
-  [ -n "${CHAT_SETUP_ROUTER:-}" ] && { echo "$CHAT_SETUP_ROUTER"; return 0; }
-  for u in "${SUDO_USER:-}" "$(id -un)"; do
-    [ -n "$u" ] || continue
-    h=$(getent passwd "$u" | cut -d: -f6)
-    [ -x "$h/cmpi-router/bin/setup-router.sh" ] && { echo "$h/cmpi-router/bin/setup-router.sh"; return 0; }
-  done
-  return 1
-}
-
-# a setup-router.sh too old to read lan0-udp-ports would drop UDP 518 again
-router_reads_udp() {
-  local sr; sr=$(router_script) || return 1
-  grep -q 'LAN_UDP_PORTS_FILE' "$sr"
-}
-
-comment_for() {   # PROTO PORT -> the comment for the list line
-  case "$1 $2" in
-    "udp $PORT") echo "talk(1), ntalk (chat-setup talkd)" ;;
-    "tcp $PORT") echo "tvchat to talkd (chat-setup)" ;;
-    *)           echo "talkd relay (chat-setup)" ;;
-  esac
-}
+LAN_PORT_SPECS=("$PORT/udp" "talk(1), ntalk (chat-setup talkd)"
+                "$PORT/tcp" "tvchat to talkd (chat-setup)"
+                "$RLO-$RHI/tcp" "talkd relay (chat-setup)")
+fw_plan() { LAN_PORT_IIF=$IFACE lan_port plan "${LAN_PORT_SPECS[@]}"; }
+fw_add()  { LAN_PORT_IIF=$IFACE lan_port add "${LAN_PORT_SPECS[@]}"; }
 
 # --------------------------------------------------------------------------
 # the print-only modes (no root, nothing changed)
@@ -264,20 +182,7 @@ case "$MODE" in
   print-unit)  make_unit; exit 0 ;;
   print-inetd) inetd_edit "$PRINT_FROM"; exit 0 ;;
   firewall-plan)
-    plan=$(fw_plan)
-    printf '%s\n' "$plan" | while IFS=$'\t' read -r how a b c; do
-      case "$how" in
-        list) echo "add '$c  # $(comment_for "$b" "$c")' to $a" ;;
-        nft)  echo "$a" ;;
-      esac
-    done
-    if printf '%s\n' "$plan" | grep -q '^list'; then
-      echo "then run setup-router.sh fw"
-      printf '%s\n' "$plan" | grep -q "^list.*udp" && ! router_reads_udp \
-        && echo "REFUSED: setup-router.sh has no UDP list (lan0-udp-ports) - update cmpi-router first"
-      lost=$(fw_lost_ports)
-      [ -z "$lost" ] || echo "REFUSED: that reload would close $(echo $lost) (opened at runtime, in no list): list them first"
-    fi
+    fw_plan || true
     exit 0 ;;
 esac
 
@@ -295,7 +200,7 @@ if [ "$REMOVE" = 1 ]; then
   $SUDO systemctl daemon-reload
   $SUDO rm -rf "$PREFIX"
   log "removed the service and $PREFIX"
-  log "the firewall lists and $INETD_CONF are as they were - edit them by hand to undo"
+  log "the firewall lists and $INETD_CONF are as they were - undo with: $LAN_PORT remove $PORT/udp $PORT $RLO-$RHI; and edit $INETD_CONF by hand"
   exit 0
 fi
 
@@ -377,49 +282,14 @@ fi
 log "service     : talkd running - UDP $PORT (talk), TCP $PORT (tvchat), relay $RLO-$RHI"
 
 # 5. firewall -------------------------------------------------------------------
-FW=$(fw_plan)
-if [ -z "$FW" ]; then
+rc=0; plan=$(fw_plan 2>&1) || rc=$?
+if [ "$rc" = 0 ]; then
   log "firewall    : nothing to open"
-elif printf '%s\n' "$FW" | grep -q '^list'; then
-  if [ "$OPEN_FW" != 1 ]; then
-    warn "the firewall drops talkd's ports: re-run with --open-firewall (adds them to"
-    warn "  $LAN_PORTS_FILE / $LAN_UDP_PORTS_FILE and reloads with setup-router.sh fw)"
-  else
-    if printf '%s\n' "$FW" | grep -q "^list.*udp" && ! router_reads_udp; then
-      die "not touching the firewall: cmpi-router's setup-router.sh does not read
-  $LAN_UDP_PORTS_FILE yet, so UDP $PORT would stay closed.  Update cmpi-router,
-  then re-run.  (talkd runs; tvchat on the LAN cannot reach it yet.)"
-    fi
-    lost=$(fw_lost_ports)
-    if [ -n "$lost" ]; then
-      die "not reloading the firewall: setup-router.sh fw rebuilds it from its lists,
-  and these ports are open now only by runtime rules, so they would close:
-      $(echo $lost)
-  Add each to its list first (\"PORT  # what it is\", one per line), then re-run.
-  (Nothing was changed: talkd runs, but its ports are not open to the LAN yet.)"
-    fi
-    $SUDO install -d -m 755 "$(dirname "$LAN_UDP_PORTS_FILE")"
-    [ -f "$LAN_UDP_PORTS_FILE" ] || $SUDO touch "$LAN_UDP_PORTS_FILE"
-    printf '%s\n' "$FW" | while IFS=$'\t' read -r how file proto port; do
-      [ "$how" = list ] || continue
-      printf '%s  # %s\n' "$port" "$(comment_for "$proto" "$port")" | $SUDO tee -a "$file" >/dev/null
-      log "firewall    : $proto $port added to $file"
-    done
-    if sr=$(router_script); then
-      $SUDO "$sr" fw && log "firewall    : reloaded ($sr fw)"
-    else
-      warn "now run 'sudo ./bin/setup-router.sh fw' in cmpi-router to load the rules"
-    fi
-  fi
+elif [ "$OPEN_FW" != 1 ]; then
+  warn "the firewall does not open talkd's ports yet: re-run with --open-firewall, which does this:"
+  printf '%s\n' "$plan" | while IFS= read -r l; do warn "  $l"; done
 else
-  printf '%s\n' "$FW" | while IFS=$'\t' read -r how what; do
-    if [ "$OPEN_FW" = 1 ]; then
-      eval "$SUDO $what" && log "firewall    : $what"   # ports are numbers, the iface vetted
-    else
-      warn "open it: $what"
-    fi
-  done
-  [ "$OPEN_FW" = 1 ] && warn "those rules are lost when nftables reloads - add them to your ruleset file too"
+  fw_add || die "the firewall was not opened (see above): talkd runs, but its ports are not open to the LAN yet"
 fi
 
 host=$(hostname -s 2>/dev/null || hostname)
