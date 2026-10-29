@@ -26,6 +26,8 @@ SANDBOX=$(mktemp -d)
 trap 'rm -rf "$SANDBOX"' EXIT
 export HOME="$SANDBOX/home"; mkdir -p "$HOME/bin"
 export MAIL_SETUP_SUDO=""
+# lan-port: no cmpi-router lists here, so the real firewall is never consulted
+export LAN_PORT_DIR="$SANDBOX/no-router-setup"
 FAKE="$SANDBOX/fake"; mkdir -p "$FAKE"
 export PATH="$HOME/bin:$FAKE:$PATH"
 PY=$(command -v python3)
@@ -524,7 +526,7 @@ table ip nat {
         }
 }
 EOF
-MAIL_SETUP_NFT_RULESET="$NFT" "$S/configure-sieve.sh" --firewall-plan > "$OUT" 2>&1
+LAN_PORT_RULESET="$NFT" "$S/configure-sieve.sh" --firewall-plan > "$OUT" 2>&1
 check "--firewall-plan exits 0, no root needed" '[ $? = 0 ]'
 check "opens 4190 where IMAP already is (lan0 only)" '[ "$(cat "$OUT")" = "nft add rule inet filter input iifname \"lan0\" tcp dport 4190 accept" ]'
 # a second IMAP interface and a bare (no iifname) IMAP rule
@@ -538,23 +540,23 @@ table ip filter {
   }
 }
 EOF
-MAIL_SETUP_NFT_RULESET="$NFT" "$S/configure-sieve.sh" --firewall-plan > "$OUT" 2>&1
+LAN_PORT_RULESET="$NFT" "$S/configure-sieve.sh" --firewall-plan > "$OUT" 2>&1
 check "one rule per interface, no duplicates" '[ "$(wc -l < "$OUT")" = 2 ] && has "$OUT" "iifname \"lan0\" tcp dport 4190" && has "$OUT" "iifname \"lan1\" tcp dport 4190"'
 printf 'table inet filter {\n chain input {\n  type filter hook input priority 0; policy drop;\n  tcp dport { 143, 993 } accept\n }\n}\n' > "$NFT"
-MAIL_SETUP_NFT_RULESET="$NFT" "$S/configure-sieve.sh" --firewall-plan > "$OUT" 2>&1
+LAN_PORT_RULESET="$NFT" "$S/configure-sieve.sh" --firewall-plan > "$OUT" 2>&1
 check "IMAP rule without an interface: rule for every interface (just printed)" '[ "$(cat "$OUT")" = "nft add rule inet filter input tcp dport 4190 accept" ]'
 # nothing to do
 printf 'table inet filter {\n chain input {\n  type filter hook input priority 0; policy drop;\n  tcp dport { 22, 993, 4190 } accept\n }\n}\n' > "$NFT"
-MAIL_SETUP_NFT_RULESET="$NFT" "$S/configure-sieve.sh" --firewall-plan > "$OUT" 2>&1
-check "4190 already accepted: nothing to add" '[ ! -s "$OUT" ]'
+LAN_PORT_RULESET="$NFT" "$S/configure-sieve.sh" --firewall-plan > "$OUT" 2>&1
+check "4190 already accepted: nothing to add" 'has "$OUT" "nothing to open" && ! has "$OUT" "nft add rule"'
 printf 'table inet filter {\n chain input {\n  type filter hook input priority 0; policy accept;\n  tcp dport 993 accept\n }\n}\n' > "$NFT"
-MAIL_SETUP_NFT_RULESET="$NFT" "$S/configure-sieve.sh" --firewall-plan > "$OUT" 2>&1
-check "policy accept: nothing to add" '[ ! -s "$OUT" ]'
+LAN_PORT_RULESET="$NFT" "$S/configure-sieve.sh" --firewall-plan > "$OUT" 2>&1
+check "policy accept: nothing to add" 'has "$OUT" "nothing to open" && ! has "$OUT" "nft add rule"'
 printf 'table inet filter {\n chain input {\n  type filter hook input priority 0; policy drop;\n  iifname "ev\\"il;x" tcp dport 993 accept\n }\n}\n' > "$NFT"
-MAIL_SETUP_NFT_RULESET="$NFT" "$S/configure-sieve.sh" --firewall-plan > "$OUT" 2>&1
-check "odd interface names are never put in a command" '[ ! -s "$OUT" ]'
-MAIL_SETUP_NFT_RULESET="$SANDBOX/no-such-file" "$S/configure-sieve.sh" --firewall-plan > "$OUT" 2>&1
-check "no ruleset: nothing to add, exit 0" '[ $? = 0 ] && [ ! -s "$OUT" ]'
+LAN_PORT_RULESET="$NFT" "$S/configure-sieve.sh" --firewall-plan > "$OUT" 2>&1
+check "odd interface names are never put in a command" '! has "$OUT" "nft add rule"'
+LAN_PORT_RULESET="$SANDBOX/no-such-file" "$S/configure-sieve.sh" --firewall-plan > "$OUT" 2>&1
+check "no ruleset: nothing to add, exit 0" '[ $? = 0 ] && has "$OUT" "nothing to open" && ! has "$OUT" "nft add rule"'
 check "-h documents --open-firewall / --firewall-plan" '"$S/configure-sieve.sh" -h | grep -q -e "--open-firewall" && "$S/configure-sieve.sh" -h | grep -q -e "--firewall-plan"'
 
 # --------------------------------------------------------------------------
@@ -625,20 +627,32 @@ check "mail-setup.sh rejects a bad --pull-every" '[ $? != 0 ]'
 check "mail-setup.sh takes --lan= / --pull-every=" '[ $? = 0 ]'
 
 # --------------------------------------------------------------------------
-# cmpi-router's port list: what setup-router.sh fw rebuilds the firewall from
-t "lan_ports_record"
-LP="$SANDBOX/lan0-tcp-ports"
-lp() { ( SUDO=""; MAIL_SETUP_LAN_PORTS="$LP"; . "$M/lib/common.sh"; lan_ports_record "$@" ); }
-lp 993 "Dovecot imaps"
-check "no list (not a cmpi-router box): nothing done" '[ $? = 2 ] && [ ! -e "$LP" ]'
-printf '443  # Apache https\n' > "$LP"
-lp 993 "Dovecot imaps"
-check "added" '[ $? = 0 ] && grep -qx "993  # Dovecot imaps" "$LP"'
-lp 993 "Dovecot imaps"
-check "already there: not twice" '[ $? = 1 ] && [ "$(grep -c "^993 " "$LP")" = 1 ]'
-lp 99 "not 993"
-check "99 is not 993" '[ $? = 0 ] && grep -qx "99  # not 993" "$LP"'
-check "the rest kept" 'grep -qx "443  # Apache https" "$LP"'
+# net-utils/lan-port opens the port: on a cmpi-router box the lists + setup-router.sh fw, elsewhere an nft rule
+t "lan_ports_keep (through lan-port)"
+LRS="$SANDBOX/lan-ruleset"; LD="$SANDBOX/router-setup"
+printf 'table inet filter {\n\tchain input {\n\t\ttype filter hook input priority filter; policy drop;\n\t\tiifname "lan0" tcp dport { 22, 53 } accept\n' > "$SANDBOX/lan-base"
+cp "$SANDBOX/lan-base" "$LRS"; printf '\t}\n}\n' >> "$LRS"
+# a stand-in for cmpi-router's setup-router.sh: fw loads every listed port into the ruleset
+cat > "$SANDBOX/setup-router.sh" <<EOS
+#!/bin/sh
+{ cat "$SANDBOX/lan-base"; awk '\$1 ~ /^[0-9]+\$/ { printf "\t\tiifname \"lan0\" tcp dport %s accept\n", \$1 }' "$LD/lan0-tcp-ports"; printf '\t}\n}\n'; } > "$LRS"
+EOS
+chmod +x "$SANDBOX/setup-router.sh"
+lk() { ( SUDO=""; . "$M/lib/common.sh"; lan_ports_keep "$@" ) > "$OUT" 2>&1; }
+LAN_PORT_RULESET="$LRS" lk 993 "Dovecot imaps"
+check "no cmpi-router lists: the nft rule is shown, nothing opened or listed" 'has "$OUT" "nft add rule inet filter input iifname \"lan0\" tcp dport 993 accept" && has "$OUT" "not opened" && [ ! -e "$LD" ]'
+mkdir -p "$LD"; printf '443  # Apache https\n' > "$LD/lan0-tcp-ports"
+export LAN_PORT_DIR="$LD" LAN_PORT_RULESET="$LRS" LAN_PORT_ROUTER="$SANDBOX/setup-router.sh"
+"$SANDBOX/setup-router.sh"
+lk 993 "Dovecot imaps (mail-setup)" 143 "Dovecot imap (mail-setup)"
+check "a cmpi-router box: listed, the firewall reloaded, confirmed open" 'grep -qx "993  # Dovecot imaps (mail-setup)" "$LD/lan0-tcp-ports" && grep -qx "143  # Dovecot imap (mail-setup)" "$LD/lan0-tcp-ports" && has "$OUT" "open: 993/tcp 143/tcp" && has "$LRS" "dport 993 accept"'
+lk 993 "Dovecot imaps (mail-setup)"
+check "again: already listed and open, not listed twice" 'has "$OUT" "already listed and open" && [ "$(grep -c "^993 " "$LD/lan0-tcp-ports")" = 1 ]'
+check "the rest kept" 'grep -qx "443  # Apache https" "$LD/lan0-tcp-ports"'
+sed -i 's/{ 22, 53 } accept/{ 22, 53 } accept\n\t\tiifname "lan0" tcp dport 4190 accept/' "$LRS"
+lk 587 "Postfix submission"
+check "a runtime-only port would close: lan-port refuses, nothing listed, lan_ports_keep warns and goes on" '[ $? = 0 ] && has "$OUT" "tcp/4190" && has "$OUT" "WARN: firewall: lan-port could not open it" && ! grep -q "^587 " "$LD/lan0-tcp-ports"'
+export LAN_PORT_DIR="$SANDBOX/no-router-setup"; unset LAN_PORT_RULESET LAN_PORT_ROUTER
 
 # --------------------------------------------------------------------------
 t "syntax"

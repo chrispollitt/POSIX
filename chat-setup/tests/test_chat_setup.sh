@@ -28,7 +28,7 @@ SANDBOX=$(mktemp -d)
 trap 'rm -rf "$SANDBOX"' EXIT
 export CHAT_SETUP_SUDO=""
 export CHAT_SETUP_IFACE=lan0                 # the box's interfaces don't matter here
-export CHAT_SETUP_LAN_PORTS="$SANDBOX/no-ports-file"
+export LAN_PORT_DIR="$SANDBOX/no-router-setup"   # no cmpi-router lists unless a test names a directory
 PY=$(command -v python3)
 OUT="$SANDBOX/out"
 ergo() { "$E" --listen 192.168.10.1 --server-name cpbee.lan --network cmnet "$@"; }
@@ -98,39 +98,37 @@ table inet filter {
 	}
 }
 EOF
-CHAT_SETUP_NFT_RULESET="$NFT" ergo --firewall-plan > "$OUT" 2>&1
+# no cmpi-router lists (LAN_PORT_DIR is missing): lan-port plans the runtime nft rule
+LAN_PORT_RULESET="$NFT" ergo --firewall-plan > "$OUT" 2>&1
 check "drop policy, no rule: the nft rule on lan0" 'grep -qx "nft add rule inet filter input iifname \"lan0\" tcp dport 6697 accept" "$OUT"'
 sed 's/{ 22, 53 }/{ 22, 53, 6697 }/' "$NFT" > "$NFT.open"
-CHAT_SETUP_NFT_RULESET="$NFT.open" ergo --firewall-plan > "$OUT" 2>&1
-check "already accepted: nothing to do" '[ ! -s "$OUT" ]'
+LAN_PORT_RULESET="$NFT.open" ergo --firewall-plan > "$OUT" 2>&1
+check "already accepted: nothing to do" 'has "$OUT" "nothing to open" && ! has "$OUT" "nft add rule"'
 sed 's/6697/16697/' "$NFT.open" > "$NFT.other"
-CHAT_SETUP_NFT_RULESET="$NFT.other" ergo --firewall-plan > "$OUT" 2>&1
+LAN_PORT_RULESET="$NFT.other" ergo --firewall-plan > "$OUT" 2>&1
 check "16697 is not 6697" 'has "$OUT" "tcp dport 6697 accept"'
 sed 's/policy drop/policy accept/' "$NFT" > "$NFT.accept"
-CHAT_SETUP_NFT_RULESET="$NFT.accept" ergo --firewall-plan > "$OUT" 2>&1
-check "accept policy: nothing to do" '[ ! -s "$OUT" ]'
-printf '443  # Apache https\n25  # Postfix\n' > "$SANDBOX/lan0-tcp-ports"
-CHAT_SETUP_LAN_PORTS="$SANDBOX/lan0-tcp-ports" CHAT_SETUP_NFT_RULESET="$NFT" ergo --firewall-plan > "$OUT" 2>&1
-check "cmpi-router's port list: add it there" 'has "$OUT" "add '"'"'6697  # Ergo IRC (chat-setup)'"'"' to $SANDBOX/lan0-tcp-ports, then run setup-router.sh fw"'
+LAN_PORT_RULESET="$NFT.accept" ergo --firewall-plan > "$OUT" 2>&1
+check "accept policy: nothing to do" 'has "$OUT" "nothing to open" && ! has "$OUT" "nft add rule"'
+# a cmpi-router box: its port lists, then setup-router.sh fw (all through net-utils/lan-port)
+RD="$SANDBOX/router-setup"; mkdir -p "$RD"
+printf '443  # Apache https\n25  # Postfix\n143  # imap\n993  # imaps\n4190  # sieve\n' > "$RD/lan0-tcp-ports"
+LAN_PORT_DIR="$RD" LAN_PORT_RULESET="$NFT" ergo --firewall-plan > "$OUT" 2>&1
+check "cmpi-router's port list: add it there" 'has "$OUT" "would add '"'"'6697  # Ergo IRC (chat-setup)'"'"' to $RD/lan0-tcp-ports" && has "$OUT" "then run setup-router.sh fw"'
 check "  (and no runtime rule)" '! has "$OUT" "nft add rule"'
-printf '6697  # Ergo IRC (chat-setup)\n' >> "$SANDBOX/lan0-tcp-ports"
-CHAT_SETUP_LAN_PORTS="$SANDBOX/lan0-tcp-ports" CHAT_SETUP_NFT_RULESET="$NFT" ergo --firewall-plan > "$OUT" 2>&1
-check "  already listed: nothing to do" '[ ! -s "$OUT" ]'
-# a reload rebuilds the ruleset from the file: ports open only at runtime
-# (143, 993, 4190 here - live, in neither file) would close
-printf '443  # Apache https\n' > "$SANDBOX/lan0-tcp-ports"
-sed '/143, 993, 4190/d' "$NFT" > "$SANDBOX/nftables.conf"
-CHAT_SETUP_NFT_CONF="$SANDBOX/nftables.conf" CHAT_SETUP_LAN_PORTS="$SANDBOX/lan0-tcp-ports" \
-  CHAT_SETUP_NFT_RULESET="$NFT" ergo --firewall-plan > "$OUT" 2>&1
-check "runtime-only ports: the reload is refused, naming them" 'has "$OUT" "REFUSED: that reload would close tcp 143 4190 993"'
-printf '143  # imap\n993  # imaps\n4190  # sieve\n' >> "$SANDBOX/lan0-tcp-ports"
-CHAT_SETUP_NFT_CONF="$SANDBOX/nftables.conf" CHAT_SETUP_LAN_PORTS="$SANDBOX/lan0-tcp-ports" \
-  CHAT_SETUP_NFT_RULESET="$NFT" ergo --firewall-plan > "$OUT" 2>&1
+printf '6697  # Ergo IRC (chat-setup)\n' >> "$RD/lan0-tcp-ports"
+LAN_PORT_DIR="$RD" LAN_PORT_RULESET="$NFT.open" ergo --firewall-plan > "$OUT" 2>&1
+check "  already listed and open: nothing to do" 'has "$OUT" "already listed and open: 6697/tcp" && ! has "$OUT" "then run"'
+LAN_PORT_DIR="$RD" LAN_PORT_RULESET="$NFT" ergo --firewall-plan > "$OUT" 2>&1
+check "  listed but the firewall was not reloaded: reload" 'has "$OUT" "listed, not open now: 6697/tcp" && has "$OUT" "then run setup-router.sh fw"'
+# a reload rebuilds the firewall from the lists: ports open only at runtime
+# (143, 993, 4190 here - live, in no list) would close
+printf '443  # Apache https\n' > "$RD/lan0-tcp-ports"
+LAN_PORT_DIR="$RD" LAN_PORT_RULESET="$NFT" ergo --firewall-plan > "$OUT" 2>&1
+check "runtime-only ports: the reload is refused, naming them" 'has "$OUT" "REFUSED: that reload would close tcp/143 tcp/4190 tcp/993"'
+printf '143  # imap\n993  # imaps\n4190  # sieve\n' >> "$RD/lan0-tcp-ports"
+LAN_PORT_DIR="$RD" LAN_PORT_RULESET="$NFT" ergo --firewall-plan > "$OUT" 2>&1
 check "  listed in lan0-tcp-ports: fine" 'has "$OUT" "then run setup-router.sh fw" && ! has "$OUT" "REFUSED"'
-cp "$NFT" "$SANDBOX/nftables.conf"; printf '443  # Apache https\n' > "$SANDBOX/lan0-tcp-ports"
-CHAT_SETUP_NFT_CONF="$SANDBOX/nftables.conf" CHAT_SETUP_LAN_PORTS="$SANDBOX/lan0-tcp-ports" \
-  CHAT_SETUP_NFT_RULESET="$NFT" ergo --firewall-plan > "$OUT" 2>&1
-check "  in the ruleset file already: fine" '! has "$OUT" "REFUSED"'
 
 # --------------------------------------------------------------------------
 t "options"
@@ -278,8 +276,7 @@ t "configure-talkd.sh"
 K="$C/scripts/configure-talkd.sh"
 check "bash -n" 'bash -n "$K"'
 # lan0's subnet, as `ip` would give it on cpbee
-talkd() { CHAT_SETUP_LAN_CIDR=192.168.10.1/24 CHAT_SETUP_LAN_PORTS="${LP-$SANDBOX/no-list}" \
-  CHAT_SETUP_LAN_UDP_PORTS="${UP-$SANDBOX/no-udp-list}" "$K" "$@"; }
+talkd() { CHAT_SETUP_LAN_CIDR=192.168.10.1/24 "$K" "$@"; }
 talkd --print-unit > "$SANDBOX/tunit"
 check "the unit: talkd.py as talkd, group tty, only CAP_NET_BIND_SERVICE" 'has "$SANDBOX/tunit" "User=talkd" && has "$SANDBOX/tunit" "SupplementaryGroups=tty" && has "$SANDBOX/tunit" "AmbientCapabilities=CAP_NET_BIND_SERVICE" && has "$SANDBOX/tunit" "CapabilityBoundingSet=CAP_NET_BIND_SERVICE" && has "$SANDBOX/tunit" "NoNewPrivileges=yes"'
 check "  port 518, the relay ports, loopback + lan0's subnet only" 'has "$SANDBOX/tunit" "/opt/talkd/talkd.py --port 518 --relay-ports 5181-5188 --allow 127.0.0.0/8 --allow 192.168.10.0/24"'
@@ -298,45 +295,45 @@ printf '%s\n' 'talk	dgram	udp	wait	nobody.tty	/usr/sbin/in.talkd	in.talkd' '#nta
 talkd --print-inetd "$SANDBOX/inetd.conf" > "$OUT"
 check "inetd.conf: talk and ntalk commented out, the rest kept" '[ "$(grep -c "^#chat-setup# " "$OUT")" = 2 ] && grep -qx "#ntalk  dgram udp wait nobody.tty /x" "$OUT" && grep -qx "ftp stream tcp nowait root /x" "$OUT"'
 
-# the firewall: a box without cmpi-router's lists - the nft rules to add
+# the firewall (all through net-utils/lan-port): a box without cmpi-router's lists - the nft rules to add
 TN="$SANDBOX/truleset"
 sed 's/{ 143, 993, 4190 }/{ 143, 993, 4190, 5181 }/' "$NFT" > "$TN"
-CHAT_SETUP_NFT_RULESET="$TN" talkd --firewall-plan > "$OUT" 2>&1
+LAN_PORT_RULESET="$TN" talkd --firewall-plan > "$OUT" 2>&1
 check "no lists: udp 518, tcp 518 and the relay ports as nft rules" 'grep -qx "nft add rule inet filter input iifname \"lan0\" udp dport 518 accept" "$OUT" && grep -qx "nft add rule inet filter input iifname \"lan0\" tcp dport 518 accept" "$OUT" && grep -qx "nft add rule inet filter input iifname \"lan0\" tcp dport 5188 accept" "$OUT"'
 check "  (5181 is open already)" '! has "$OUT" "dport 5181 "'
 sed 's/policy drop/policy accept/' "$TN" > "$TN.acc"
-CHAT_SETUP_NFT_RULESET="$TN.acc" talkd --firewall-plan > "$OUT" 2>&1
-check "  an accept policy: nothing to do" '[ ! -s "$OUT" ]'
+LAN_PORT_RULESET="$TN.acc" talkd --firewall-plan > "$OUT" 2>&1
+check "  an accept policy: nothing to do" 'has "$OUT" "nothing to open" && ! has "$OUT" "nft add rule"'
 # a cmpi-router box: the lists, then setup-router.sh fw
-printf '443  # Apache https\n' > "$SANDBOX/t-tcp"; : > "$SANDBOX/t-udp"
+TD="$SANDBOX/t-router"; mkdir -p "$TD"
+printf '443  # Apache https\n143  # imap\n993  # imaps\n4190  # sieve\n' > "$TD/lan0-tcp-ports"; : > "$TD/lan0-udp-ports"
 printf '#!/bin/sh\n# LAN_UDP_PORTS_FILE=...\n' > "$SANDBOX/router-new"; printf '#!/bin/sh\n' > "$SANDBOX/router-old"
 chmod +x "$SANDBOX/router-new" "$SANDBOX/router-old"
-cp "$TN" "$SANDBOX/tnft.conf"
-tplan() { LP="$SANDBOX/t-tcp" UP="$SANDBOX/t-udp" CHAT_SETUP_NFT_CONF="$SANDBOX/tnft.conf" \
-  CHAT_SETUP_NFT_RULESET="$TN" CHAT_SETUP_ROUTER="$SANDBOX/$1" talkd --firewall-plan > "$OUT" 2>&1; }
+tplan() { LAN_PORT_DIR="$TD" LAN_PORT_RULESET="${RS-$TN}" LAN_PORT_ROUTER="$SANDBOX/$1" talkd --firewall-plan > "$OUT" 2>&1; }
 tplan router-new
-check "lists: udp 518 to the UDP list, tcp 518 + relay ports to the TCP list" 'has "$OUT" "add '"'"'518  # talk(1), ntalk (chat-setup talkd)'"'"' to $SANDBOX/t-udp" && has "$OUT" "add '"'"'518  # tvchat to talkd (chat-setup)'"'"' to $SANDBOX/t-tcp" && has "$OUT" "add '"'"'5188  # talkd relay (chat-setup)'"'"' to $SANDBOX/t-tcp" && has "$OUT" "then run setup-router.sh fw"'
+check "lists: udp 518 to the UDP list, tcp 518 + relay ports to the TCP list" 'has "$OUT" "would add '"'"'518  # talk(1), ntalk (chat-setup talkd)'"'"' to $TD/lan0-udp-ports" && has "$OUT" "would add '"'"'518  # tvchat to talkd (chat-setup)'"'"' to $TD/lan0-tcp-ports" && has "$OUT" "would add '"'"'5188  # talkd relay (chat-setup)'"'"' to $TD/lan0-tcp-ports" && has "$OUT" "then run setup-router.sh fw"'
 check "  (no runtime rules, nothing refused)" '! has "$OUT" "nft add rule" && ! has "$OUT" "REFUSED"'
 tplan router-old
 check "a setup-router.sh without a UDP list: refused" 'has "$OUT" "REFUSED: setup-router.sh has no UDP list (lan0-udp-ports)"'
 # live-only ports, TCP and UDP, would close on the reload
-{ cat "$TN"; } | sed 's/{ 22, 53 } accept/{ 22, 53 } accept\n\t\tiifname "lan0" udp dport 5353 accept/' > "$TN.live"
-sed '/143, 993, 4190/d' "$TN" > "$SANDBOX/tnft.conf"
-LP="$SANDBOX/t-tcp" UP="$SANDBOX/t-udp" CHAT_SETUP_NFT_CONF="$SANDBOX/tnft.conf" CHAT_SETUP_NFT_RULESET="$TN.live" \
-  CHAT_SETUP_ROUTER="$SANDBOX/router-new" talkd --firewall-plan > "$OUT" 2>&1
-check "runtime-only tcp and udp ports: refused, naming them" 'has "$OUT" "REFUSED: that reload would close tcp 143 tcp 4190 tcp 5181 tcp 993 udp 5353"'
-printf '518  # talk\n' > "$SANDBOX/t-udp"
-printf '%s\n' 518 5181 5182 5183 5184 5185 5186 5187 5188 >> "$SANDBOX/t-tcp"
-tplan router-new
-check "everything listed: nothing to do" '[ ! -s "$OUT" ]'
+sed 's/{ 22, 53 } accept/{ 22, 53 } accept\n\t\tiifname "lan0" udp dport 5353 accept/' "$TN" > "$TN.live"
+printf '443  # Apache https\n' > "$TD/lan0-tcp-ports"
+RS="$TN.live" tplan router-new
+check "runtime-only tcp and udp ports: refused, naming them" 'has "$OUT" "REFUSED: that reload would close tcp/143 tcp/4190 tcp/993 udp/5353"'
+printf '143  # imap\n993  # imaps\n4190  # sieve\n' >> "$TD/lan0-tcp-ports"; printf '5353  # mdns\n' > "$TD/lan0-udp-ports"
+RS="$TN.live" tplan router-new
+check "  listed: fine" 'has "$OUT" "then run setup-router.sh fw" && ! has "$OUT" "REFUSED"'
+# everything listed, and open: nothing to do
+printf '%s\n' 518 5181 5182 5183 5184 5185 5186 5187 5188 >> "$TD/lan0-tcp-ports"; printf '518  # talk\n' >> "$TD/lan0-udp-ports"
+sed 's/{ 22, 53 } accept/{ 22, 53 } accept\n\t\tiifname "lan0" tcp dport { 518, 5181-5188 } accept\n\t\tiifname "lan0" udp dport { 518, 5353 } accept/' "$TN" > "$TN.all"
+RS="$TN.all" tplan router-new
+check "everything listed and open: nothing to do" 'has "$OUT" "already listed and open" && ! has "$OUT" "then run" && ! has "$OUT" "REFUSED"'
 # Oct 22 on cpbee: two silent stops under set -euo pipefail
 # 1. no lan0-udp-ports yet (before the first --open-firewall): the would-close
 #    check read the missing list and the plan died after printing half of itself
-rm -f "$SANDBOX/t-udp"; printf '443  # Apache https\n' > "$SANDBOX/t-tcp"
-cp "$TN" "$SANDBOX/tnft.conf"
-LP="$SANDBOX/t-tcp" UP="$SANDBOX/t-udp" CHAT_SETUP_NFT_CONF="$SANDBOX/tnft.conf" CHAT_SETUP_NFT_RULESET="$TN.live" \
-  CHAT_SETUP_ROUTER="$SANDBOX/router-new" talkd --firewall-plan > "$OUT" 2>&1
-check "no UDP list yet: the whole plan, the would-close check included" '[ $? = 0 ] && has "$OUT" "then run setup-router.sh fw" && has "$OUT" "REFUSED: that reload would close udp 5353" && ! has "$OUT" "ERROR"'
+rm -f "$TD/lan0-udp-ports"; printf '443  # Apache https\n' > "$TD/lan0-tcp-ports"
+RS="$TN.live" tplan router-new
+check "no UDP list yet: the whole plan, the would-close check included" '[ $? = 0 ] && has "$OUT" "then run setup-router.sh fw" && has "$OUT" "REFUSED: that reload would close" && has "$OUT" "udp/5353" && ! has "$OUT" "ERROR"'
 # 2. nothing on UDP 518: the empty "who holds it" pipeline ended the install
 eval "$(sed -n '/^port_holder() {/,/^}/p' "$K")"
 ss() { printf '%s' "${SS_OUT:-}"; }

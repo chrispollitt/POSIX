@@ -24,9 +24,9 @@
 #      login required, relaying only for logged-in users.  It uses Postfix's
 #      own certificate (the distro's self-signed one unless you set another),
 #      so clients need to accept it (tvchat: verify = false);
-#   5. on a cmpi-router box (/etc/router-setup/lan0-tcp-ports exists) lists 587
-#      there so `setup-router.sh fw` keeps it open; with ufw active, opens it;
-#      otherwise says so if an nftables input chain drops by default;
+#   5. opens 587 for the LAN with ../../net-utils/lan-port (on a cmpi-router box:
+#      listed in its port list, `setup-router.sh fw` reloaded, checked; elsewhere
+#      it says which nft rule would); with ufw active, opens it there;
 #   6. logs in to IMAP (993) and SMTP (587) as each NEW user to prove it works,
 #      and prints the tvchat.conf lines for it.
 #
@@ -74,7 +74,6 @@ done
 
 DROP=/etc/dovecot/conf.d/96-mail-setup-submission.conf
 OLDDROP=/etc/dovecot/conf.d/96-delta-submission.conf
-LANLIST=/etc/router-setup/lan0-tcp-ports
 POSTCONF=$(command -v postconf 2>/dev/null || echo /usr/sbin/postconf)
 
 # the settings of the submission service, one "name=value" per line
@@ -210,20 +209,10 @@ fi
 # ---------------------------------------------------------------------------
 step "Firewall (587)"
 # ---------------------------------------------------------------------------
-if [ -f "$LANLIST" ]; then
-  if grep -qx 587 "$LANLIST"; then
-    log "587 is already in $LANLIST"
-  else
-    $SUDO sh -c "echo 587 >> '$LANLIST'"
-    log "587 added to $LANLIST - now run:  sudo setup-router.sh fw"
-  fi
-elif command -v ufw >/dev/null 2>&1 && $SUDO ufw status 2>/dev/null | grep -q '^Status: active'; then
+if command -v ufw >/dev/null 2>&1 && $SUDO ufw status 2>/dev/null | grep -q '^Status: active'; then
   $SUDO ufw allow 587/tcp >/dev/null && log "ufw: 587/tcp allowed"
-elif command -v nft >/dev/null 2>&1 && $SUDO nft list ruleset 2>/dev/null | grep -q 'policy drop'; then
-  warn "an nftables input chain drops by default: open tcp 587 there, or clients just time out"
-else
-  log "no firewall list to change"
 fi
+lan_ports_keep 587 "Postfix submission (mail-setup configure-delta.sh)"
 
 # ---------------------------------------------------------------------------
 step "Logins"

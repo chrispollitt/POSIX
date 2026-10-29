@@ -121,28 +121,34 @@ user_bindir() {
   echo "${MAIL_SETUP_BINDIR:-$HOME/bin}"
 }
 
-# cmpi-router's list of TCP ports open to the LAN: its `setup-router.sh fw`
-# rebuilds the firewall from this file, so a port opened only at runtime
-# (`nft add rule`) closes on the next reload - 143/993/4190 did, Oct 2026.
-LAN_PORTS_FILE="${MAIL_SETUP_LAN_PORTS:-/etc/router-setup/lan0-tcp-ports}"
-
-# lan_ports_record PORT COMMENT -> add "PORT  # COMMENT" to that list.
-#   0 added, 1 already there, 2 not a cmpi-router box (no list): nothing done
-lan_ports_record() {
-  [ -f "$LAN_PORTS_FILE" ] || return 2
-  grep -Eq "^[[:space:]]*$1([[:space:]]|\$)" "$LAN_PORTS_FILE" && return 1
-  printf '%s  # %s\n' "$1" "$2" | ${SUDO:-} tee -a "$LAN_PORTS_FILE" >/dev/null || return 2
-  return 0
+# --------------------------------------------------------------------------
+# firewall: net-utils/lan-port is the one script that knows how to open a LAN
+# port.  cmpi-router's `setup-router.sh fw` rebuilds the firewall from its port
+# lists, so a port opened only at runtime (`nft add rule`) closes on the next
+# reload - 143/993/4190 did, Oct 2026.  lan-port lists the port, reloads with
+# `setup-router.sh fw` and confirms it is open; elsewhere it plans (or, only
+# when asked, adds) a runtime nft rule.  Nothing in mail-setup or chat-setup
+# reads `nft list ruleset` or edits a list itself.
+# --------------------------------------------------------------------------
+LAN_PORT="${LAN_PORT:-$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")" && pwd)/../../net-utils/lan-port}"
+lan_port() {   # lan_port ARGS... -> lan-port, with this script's SUDO
+  [ -x "$LAN_PORT" ] || die "lan-port not found at $LAN_PORT (POSIX/net-utils/lan-port: fetch it with the rest of POSIX)"
+  SUDO="$SUDO" "$LAN_PORT" "$@"
 }
 
-# lan_ports_keep PORT COMMENT -> lan_ports_record, and say what happened
+# lan_ports_keep PORT WHY [PORT WHY]... -> open those tcp ports for the LAN.  On
+# a cmpi-router box: listed, the firewall reloaded once, confirmed open.
+# Elsewhere nothing is opened unless $OPEN_FW is 1 (the script's
+# --open-firewall); the nft rule is shown.
+# $LAN_PORT_LIKE names ports of the same service, to find the interface by.
 lan_ports_keep() {
   local rc=0
-  lan_ports_record "$1" "$2" || rc=$?
+  if [ "${OPEN_FW:-0}" = 1 ]; then lan_port add "$@" || rc=$?
+  else LAN_PORT_RUNTIME=0 lan_port add "$@" || rc=$?; fi
   case $rc in
-    0) log "firewall    : $1 added to $LAN_PORTS_FILE - kept open across cmpi-router's"
-       log "              'setup-router.sh fw' (run it to open $1 now, if it isn't)" ;;
-    1) log "firewall    : $1 already in $LAN_PORTS_FILE" ;;
+    0) ;;
+    2) warn "firewall: not opened - the rule above does it${OPEN_FW+ (or re-run with --open-firewall)}" ;;
+    *) warn "firewall: lan-port could not open it (see above): clients on the LAN cannot reach it yet" ;;
   esac
   return 0
 }

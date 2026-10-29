@@ -7,18 +7,29 @@
 # A port opened any other way (a runtime `nft add rule`, an edit of /etc/nftables.conf) is lost, or makes
 # `fw` refuse, at the next reload.  Every project that listens on the LAN should call this, not do its own:
 #
-#   lan-port list                       what is listed, with its comment (the owner)
-#   lan-port check                      listed vs open now; open now but unlisted; listening but blocked
-#   lan-port plan  PORT[/udp] [WHY]     what `add` would do; changes nothing
-#   lan-port add   PORT[/udp] WHY       list it, reload with `setup-router.sh fw`, confirm it is open
-#   lan-port remove PORT[/udp]          unlist it and reload
+#   lan-port list                              what is listed, with its comment (the owner)
+#   lan-port check                             listed vs open now; open now but unlisted; listening but blocked
+#   lan-port plan  SPEC [WHY] [SPEC [WHY]]...  what `add` would do; changes nothing
+#   lan-port add   SPEC WHY   [SPEC WHY]...    list them, reload once with `setup-router.sh fw`, confirm they are open
+#   lan-port remove SPEC...                    unlist them and reload once
 #
-# WHY is "what it is (project)", e.g. "web-ttyd https (nginx)".  Uses sudo for what needs root.
-# Elsewhere than a cmpi-router box (no list file) it prints the nft rule to add and stops.
+# SPEC is PORT, PORT/udp, or a range LO-HI[/udp] of at most 64 ports (tcp unless /udp).  WHY is "what it is
+# (project)", e.g. "web-ttyd https (nginx)": a word or sentence, not just a number.  Uses sudo for what needs root.
+#
+# `plan` prints what it would do and exits 0 (nothing to do), 3 (something to change) or 1 (refused).  `add`
+# refuses, changing nothing, when the reload would close a port that is open now but in no list, or when
+# setup-router.sh has no UDP list; it does not reload when everything is already listed and open.
+#
+# Elsewhere than a cmpi-router box (no $LAN_PORT_DIR) there are no lists: `plan` prints the `nft add rule`
+# for every input chain that drops by default and does not accept the port, and `add` runs the ones that
+# name an interface (a runtime rule - lost when nftables reloads).  Which interface: $LAN_PORT_IIF if set
+# (empty: unknown, every interface), else those on which the chain already accepts one of the ports in
+# $LAN_PORT_LIKE (e.g. "143 993" for a mail service), else $LAN_PORT_IF.
 #
 # Environment (for tests and other layouts): LAN_PORT_IF (lan0), LAN_PORT_DIR (/etc/router-setup),
 # LAN_PORT_RULESET (a file to read instead of `nft list ruleset`), LAN_PORT_ROUTER (setup-router.sh),
-# LAN_PORT_DRY=1 (print the commands that change anything, do not run them).
+# LAN_PORT_DRY=1 (print the commands that change anything, do not run them), LAN_PORT_IIF, LAN_PORT_LIKE,
+# LAN_PORT_RUNTIME=0 (off a cmpi-router box, `add` opens nothing at runtime: it prints the rules, exit 2).
 set -euo pipefail
 
 IF=${LAN_PORT_IF:-lan0}
@@ -30,14 +41,33 @@ list_of() { echo "$DIR/$IF-$1-ports"; }                       # list_of tcp|udp
 
 run() { if [ "${LAN_PORT_DRY:-0}" = 1 ]; then echo "  would run: $*"; else "$@"; fi; }
 
-spec() {   # spec 8444[/udp] -> sets PORT, PROTO
-  PORT=${1%%/*}; PROTO=tcp; case $1 in */*) PROTO=${1#*/} ;; esac
-  [[ $PORT =~ ^[0-9]+$ ]] && (( PORT >= 1 && PORT <= 65535 )) || die "not a port: $1"
-  case $PROTO in tcp|udp) ;; *) die "protocol must be tcp or udp: $1" ;; esac
+# ---- the specs on the command line ----------------------------------------------------------------------------
+SPEC_RE='^([0-9]+)(-([0-9]+))?(/(tcp|udp))?$'
+is_spec() { [[ $1 =~ $SPEC_RE ]]; }
+P_PROTO=(); P_PORT=(); P_WHY=(); N=0
+parse_specs() {   # parse_specs SPEC [WHY] [SPEC [WHY]]... -> P_PROTO[] P_PORT[] P_WHY[] (ranges expanded), N
+  local arg lo hi proto why p
+  P_PROTO=(); P_PORT=(); P_WHY=(); N=0
+  while [ $# -gt 0 ]; do
+    arg=$1; is_spec "$arg" || die "not a port: $arg"
+    lo=${BASH_REMATCH[1]}; hi=${BASH_REMATCH[3]:-$lo}; proto=${BASH_REMATCH[5]:-tcp}
+    shift; why=
+    if [ $# -gt 0 ] && ! is_spec "$1"; then why=${1//$'\n'/ }; shift; fi
+    (( 10#$lo >= 1 && 10#$lo <= 10#$hi && 10#$hi <= 65535 )) || die "not a port (1-65535): $arg"
+    (( 10#$hi - 10#$lo < 64 )) || die "at most 64 ports in a range: $arg"
+    for (( p = 10#$lo; p <= 10#$hi; p++ )); do P_PROTO+=("$proto"); P_PORT+=("$p"); P_WHY+=("$why"); N=$((N + 1)); done
+  done
+  [ $N -gt 0 ] || die "give a port"
 }
+spec_list() { local i; for i in "${!P_PORT[@]}"; do printf '%s/%s ' "${P_PORT[i]}" "${P_PROTO[i]}"; done; }
+is_spec_port() { local i; for i in "${!P_PORT[@]}"; do [ "${P_PROTO[i]}/${P_PORT[i]}" = "$1" ] && return 0; done; return 1; }
+
+# ---- what the lists and the live firewall say ---------------------------------------------------------------------
 listed() { awk -v p="$2" '$1 == p { f = 1 } END { exit !f }' "$(list_of "$1")" 2>/dev/null; }   # listed tcp 8444
+listed_ports() { { [ ! -r "$(list_of "$1")" ] || awk '$1 ~ /^[0-9]+$/ { print $1 }' "$(list_of "$1")"; } | sort -u; }
 
 ruleset() { if [ -n "${LAN_PORT_RULESET:-}" ]; then cat "$LAN_PORT_RULESET"; else $SUDO nft list ruleset; fi; }
+soft_ruleset() { ruleset 2>/dev/null || true; }                 # empty if there is none, or it cannot be read
 accepted() {   # accepted tcp|udp < ruleset: the ports input chains accept on $IF, one per line
   awk -v proto="$1" -v iif="$IF" '
     /^[ \t]*chain / { hook = 0; next }
@@ -52,7 +82,21 @@ accepted() {   # accepted tcp|udp < ruleset: the ports input chains accept on $I
       }
     }' | sort -u
 }
-listed_ports() { awk '$1 ~ /^[0-9]+$/ { print $1 }' "$(list_of "$1")" 2>/dev/null | sort -u; }
+LIVE_tcp=; LIVE_udp=
+load_live() { LIVE_tcp=$(printf '%s\n' "$1" | accepted tcp); LIVE_udp=$(printf '%s\n' "$1" | accepted udp); }   # load_live RULESET
+live_has() { local v=LIVE_$1; grep -qx "$2" <<<"${!v}"; }                                                        # live_has tcp 8444
+
+unlisted_open() {   # unlisted_open: "tcp/143" ... open now (LIVE_*) but in no list, so a reload closes them
+  local pr p v lst
+  for pr in tcp udp; do
+    lst=$(listed_ports $pr); v=LIVE_$pr
+    for p in $(comm -13 <(echo "$lst") <(echo "${!v}")); do
+      # the fixed rules (SSH, DNS, DHCP) are in cmpi-router's template, not in a list
+      case "$pr/$p" in tcp/22|tcp/53|udp/53|udp/67) continue ;; esac
+      echo "$pr/$p"
+    done
+  done
+}
 
 router_script() {   # cmpi-router's setup-router.sh
   local u h
@@ -75,6 +119,174 @@ reload() {
   fi
 }
 
+# ---- a cmpi-router box: the lists ----------------------------------------------------------------------------------
+TOADD=(); NOTOPEN=(); OKL=(); KNOWN=0
+classify() {   # sort the specs into TOADD (not listed), NOTOPEN (listed, not open now), OKL (listed, and open or unknown)
+  local i rs
+  TOADD=(); NOTOPEN=(); OKL=()
+  rs=$(soft_ruleset); KNOWN=0; [ -z "$rs" ] || KNOWN=1
+  load_live "$rs"
+  for i in "${!P_PORT[@]}"; do
+    if ! listed "${P_PROTO[i]}" "${P_PORT[i]}"; then TOADD+=("$i")
+    elif [ $KNOWN = 1 ] && ! live_has "${P_PROTO[i]}" "${P_PORT[i]}"; then NOTOPEN+=("$i")
+    else OKL+=("$i"); fi
+  done
+}
+names() { local i out=; for i in "$@"; do out+="${P_PORT[i]}/${P_PROTO[i]} "; done; echo "${out% }"; }   # names IDX... -> "518/udp 518/tcp"
+
+refusals() {   # why a reload now would be wrong, one line each (classify has run)
+  local i sr lost="" u
+  for i in "${!P_PORT[@]}"; do
+    if [ "${P_PROTO[i]}" = udp ] && sr=$(router_script) && ! grep -q LAN_UDP_PORTS_FILE "$sr" 2>/dev/null; then
+      echo "REFUSED: setup-router.sh has no UDP list ($IF-udp-ports) - update cmpi-router first"; break
+    fi
+  done
+  for u in $(unlisted_open); do is_spec_port "$u" || lost+="$u "; done
+  [ -z "$lost" ] || echo "REFUSED: that reload would close ${lost% } (open now, in no list): list them first (lan-port add PORT \"what it is\")"
+}
+
+plan_router() {
+  local i ref rc=0
+  classify
+  for i in ${TOADD[@]+"${TOADD[@]}"}; do echo "would add '${P_PORT[i]}  # ${P_WHY[i]}' to $(list_of "${P_PROTO[i]}")"; done
+  if [ ${#NOTOPEN[@]} -gt 0 ]; then echo "listed, not open now: $(names "${NOTOPEN[@]}")"; fi
+  if [ ${#OKL[@]} -gt 0 ]; then
+    if [ $KNOWN = 1 ]; then echo "already listed and open: $(names "${OKL[@]}")"; else echo "already listed: $(names "${OKL[@]}")"; fi
+  fi
+  [ $(( ${#TOADD[@]} + ${#NOTOPEN[@]} )) -eq 0 ] || { echo "then run setup-router.sh fw"; rc=3; }
+  ref=$(refusals)
+  if [ -n "$ref" ] && [ $rc -ne 0 ]; then printf '%s\n' "$ref"; rc=1; fi
+  return $rc
+}
+
+add_router() {
+  local i ref lf ok
+  classify
+  for i in "${!P_PORT[@]}"; do [ -n "${P_WHY[i]}" ] || die "give a comment (what it is, and the project): lan-port add ${P_PORT[i]}/${P_PROTO[i]} \"...\""; done
+  if [ $(( ${#TOADD[@]} + ${#NOTOPEN[@]} )) -eq 0 ] && [ $KNOWN = 1 ]; then
+    echo "already listed and open: $(names "${OKL[@]}")"; return 0
+  fi
+  ref=$(refusals)
+  if [ -n "$ref" ]; then printf 'lan-port: %s\n' "$ref" >&2; die "nothing was changed"; fi
+  for i in ${TOADD[@]+"${TOADD[@]}"}; do
+    lf=$(list_of "${P_PROTO[i]}")
+    [ -e "$lf" ] || [ "${P_PROTO[i]}" = tcp ] || run $SUDO touch "$lf"
+    if [ "${LAN_PORT_DRY:-0}" = 1 ]; then echo "  would run: append '${P_PORT[i]}  # ${P_WHY[i]}' to $lf"
+    else
+      # a list whose last line has no newline would swallow the new entry
+      { [ -z "$(tail -c1 "$lf" 2>/dev/null)" ] || echo; printf '%s  # %s\n' "${P_PORT[i]}" "${P_WHY[i]}"; } | $SUDO tee -a "$lf" >/dev/null
+      echo "listed: ${P_PORT[i]}/${P_PROTO[i]} in $lf"
+    fi
+  done
+  reload || exit 1
+  if [ "${LAN_PORT_DRY:-0}" != 1 ]; then
+    load_live "$(ruleset)"; ok=1
+    for i in "${!P_PORT[@]}"; do live_has "${P_PROTO[i]}" "${P_PORT[i]}" || { ok=0; echo "lan-port: ${P_PORT[i]}/${P_PROTO[i]} is listed but not open" >&2; }; done
+    [ $ok = 1 ] || die "the reload did not load them (see its message above)"
+    echo "open: $(spec_list)accepted on $IF"
+  fi
+}
+
+remove_router() {
+  local pr i lf tmp ports changed=0
+  for pr in tcp udp; do
+    lf=$(list_of $pr); ports=" "
+    for i in "${!P_PORT[@]}"; do
+      [ "${P_PROTO[i]}" = $pr ] || continue
+      if listed $pr "${P_PORT[i]}"; then ports+="${P_PORT[i]} "; else echo "${P_PORT[i]}/$pr is not listed in $lf"; fi
+    done
+    [ "$ports" != " " ] || continue
+    tmp=$(mktemp)
+    awk -v ports="$ports" 'BEGIN { n = split(ports, a, " "); for (i = 1; i <= n; i++) rm[a[i]] = 1 } !($1 in rm)' "$lf" > "$tmp"
+    if [ "${LAN_PORT_DRY:-0}" = 1 ]; then echo "  would run: remove$ports from $lf"
+    else $SUDO install -m "$(stat -c %a "$lf")" "$tmp" "$lf"; echo "unlisted:$ports from $lf"; fi
+    rm -f "$tmp"; changed=1
+  done
+  [ $changed = 0 ] || reload
+}
+
+# ---- elsewhere: runtime rules -----------------------------------------------------------------------------------------
+RULES=()   # "family<TAB>table<TAB>chain<TAB>interface (- for every one)<TAB>proto<TAB>port"
+runtime_rules() {   # RULES for every input chain that drops by default and does not accept the port
+  local rs mode iif i fam tbl chain f
+  rs=$(soft_ruleset); RULES=()
+  if [ "${LAN_PORT_IIF+set}" = set ]; then mode=fixed; iif=${LAN_PORT_IIF:--}
+  elif [ -n "${LAN_PORT_LIKE:-}" ]; then mode=infer; iif=
+  else mode=fixed; iif=$IF; fi
+  for i in "${!P_PORT[@]}"; do
+    while IFS=$'\t' read -r fam tbl chain f; do
+      [ -n "$fam" ] || continue
+      # names come from the ruleset text and end up in a command line: plain only
+      case "$fam$tbl$chain$f" in *[!A-Za-z0-9_.@:-]*) continue ;; esac
+      RULES+=("$fam"$'\t'"$tbl"$'\t'"$chain"$'\t'"$f"$'\t'"${P_PROTO[i]}"$'\t'"${P_PORT[i]}")
+    done < <(printf '%s\n' "$rs" | awk -v proto="${P_PROTO[i]}" -v port="${P_PORT[i]}" -v mode="$mode" -v iif="$iif" -v like="${LAN_PORT_LIKE:-}" '
+      function covers(line, p,   s, n, a, k, r) {   # does the "proto dport ..." in line list port p?
+        s = line; sub(".*" proto " dport[ \t]*", "", s)
+        if (s ~ /^\{/) { sub(/^\{/, "", s); sub(/\}.*/, "", s) } else sub(/[ \t].*/, "", s)
+        n = split(s, a, /[ ,\t]+/)
+        for (k = 1; k <= n; k++) {
+          if (a[k] == p) return 1
+          if (a[k] ~ /^[0-9]+-[0-9]+$/) { split(a[k], r, "-"); if (p + 0 >= r[1] + 0 && p + 0 <= r[2] + 0) return 1 }
+        }
+        return 0
+      }
+      BEGIN { nlike = split(like, L, " ") }
+      /^table / { fam = $2; tbl = $3; chain = ""; next }
+      /^[ \t]*chain / { chain = $2; hook = 0; drop = 0; ok = 0; n = 0; split("", seen); next }
+      chain != "" && /type filter hook input/ { hook = 1; drop = ($0 ~ /policy drop/); next }
+      chain != "" && hook && drop && index($0, proto " dport") && /accept/ {
+        if (covers($0, port)) { ok = 1; next }
+        if (mode == "infer") for (k = 1; k <= nlike; k++) if (covers($0, L[k])) {
+          f = "-"; if (match($0, /iifname "[^"]+"/)) f = substr($0, RSTART + 9, RLENGTH - 10)
+          if (!(f in seen)) { seen[f] = 1; order[++n] = f }
+          break
+        }
+        next
+      }
+      /^[ \t]*}/ && chain != "" {
+        if (hook && drop && !ok) {
+          if (mode != "infer") printf "%s\t%s\t%s\t%s\n", fam, tbl, chain, iif
+          else if (n == 0) printf "%s\t%s\t%s\t-\n", fam, tbl, chain
+          else for (k = 1; k <= n; k++) printf "%s\t%s\t%s\t%s\n", fam, tbl, chain, order[k]
+        }
+        chain = ""
+      }')
+  done
+}
+rule_text() {   # rule_text FAM TBL CHAIN IIF PROTO PORT
+  local t="nft add rule $1 $2 $3"; [ "$4" = - ] || t+=" iifname \"$4\""; echo "$t $5 dport $6 accept"
+}
+nothing_to_open() { echo "nothing to open: no input chain that drops by default lacks $(spec_list)"; }
+
+plan_runtime() {
+  local r f
+  runtime_rules
+  [ ${#RULES[@]} -gt 0 ] || { nothing_to_open; return 0; }
+  for r in "${RULES[@]}"; do IFS=$'\t' read -r -a f <<<"$r"; rule_text "${f[@]}"; done
+  return 3
+}
+
+add_runtime() {
+  local r f applied=0 unapplied=0
+  runtime_rules
+  [ ${#RULES[@]} -gt 0 ] || { nothing_to_open; return 0; }
+  if [ "${LAN_PORT_RUNTIME:-1}" = 0 ]; then
+    echo "lan-port: not a cmpi-router box ($DIR missing), so $(spec_list)is not listed anywhere; it needs a runtime rule:" >&2
+    for r in "${RULES[@]}"; do IFS=$'\t' read -r -a f <<<"$r"; rule_text "${f[@]}"; done
+    return 2
+  fi
+  for r in "${RULES[@]}"; do
+    IFS=$'\t' read -r -a f <<<"$r"
+    if [ "${f[3]}" = - ]; then rule_text "${f[@]}"; unapplied=1; continue; fi
+    run $SUDO nft add rule "${f[0]}" "${f[1]}" "${f[2]}" iifname "${f[3]}" "${f[4]}" dport "${f[5]}" accept
+    applied=1; [ "${LAN_PORT_DRY:-0}" = 1 ] || echo "opened: $(rule_text "${f[@]}")"
+  done
+  [ $unapplied = 0 ] || echo "lan-port: the rule(s) above are for EVERY interface, so not run: name the LAN one (LAN_PORT_IIF) or add iifname \"...\"" >&2
+  [ $applied = 0 ] || echo "lan-port: a runtime rule is lost when nftables reloads: add the port to the rule in your ruleset file too" >&2
+  [ $unapplied = 0 ] || return 2
+}
+
+# ---- the commands -----------------------------------------------------------------------------------------------------------
 cmd=${1:-}; shift || true
 case $cmd in
   list)
@@ -85,66 +297,37 @@ case $cmd in
 
   check)
     rs=$(ruleset) || die "cannot read the ruleset (try with sudo)"; bad=0
+    load_live "$rs"
+    for u in $(unlisted_open); do
+      echo "OPEN BUT UNLISTED  ${u#*/}/${u%/*}: open now, in no list: the next 'setup-router.sh fw' will refuse or close it  ->  lan-port add ${u#*/}/${u%/*} \"...\""; bad=1
+    done
     for pr in tcp udp; do
       [ -e "$(list_of $pr)" ] || [ "$pr" = tcp ] || continue
-      live=$(printf '%s\n' "$rs" | accepted $pr); lst=$(listed_ports $pr)
-      for p in $(comm -13 <(echo "$lst") <(echo "$live")); do
-        # the fixed rules (SSH, DNS, DHCP) are in cmpi-router's template, not in a list
-        case "$pr/$p" in tcp/22|tcp/53|udp/53|udp/67) continue ;; esac
-        echo "OPEN BUT UNLISTED  $p/$pr: open now, in no list: the next 'setup-router.sh fw' will refuse or close it  ->  lan-port add $p/$pr \"...\""; bad=1
-      done
-      for p in $(comm -23 <(echo "$lst") <(echo "$live")); do
+      v=LIVE_$pr
+      for p in $(comm -23 <(listed_ports $pr) <(echo "${!v}")); do
         echo "LISTED, NOT OPEN   $p/$pr: in $(list_of $pr) but not open now  ->  sudo setup-router.sh fw"; bad=1
       done
     done
     # informational: something listens on the LAN side but the firewall drops it
-    open=$(printf '%s\n' "$rs" | accepted tcp)
-    ss -ltnH 2>/dev/null | awk '{ n = split($4, a, ":"); port = a[n]; addr = substr($4, 1, length($4) - length(port) - 1);
+    { ss -ltnH 2>/dev/null || true; } | awk '{ n = split($4, a, ":"); port = a[n]; addr = substr($4, 1, length($4) - length(port) - 1);
                                   if (addr !~ /^(127\.|\[?::1\]?$)/) print port, $4 }' | sort -un | while read -r p a; do
-      grep -qx "$p" <<<"$open" || echo "info: $a is listening but $p/tcp is not open on $IF (fine if it is for another interface)"
+      grep -qx "$p" <<<"$LIVE_tcp" || echo "info: $a is listening but $p/tcp is not open on $IF (fine if it is for another interface)"
     done
     [ $bad = 0 ] && echo "lists and live firewall agree" || exit 1 ;;
 
   plan|add)
-    [ -n "${1:-}" ] || die "usage: lan-port $cmd PORT[/udp] \"what it is\""
-    spec "$1"; why=${2:-}
-    [ "$cmd" = add ] && [ -z "$why" ] && die "give a comment (what it is, and the project): lan-port add $1 \"...\""
-    why=${why//$'\n'/ }
-    lf=$(list_of $PROTO)
-    if [ ! -e "$DIR" ]; then
-      echo "not a cmpi-router box ($DIR missing): open $PORT/$PROTO yourself, e.g."
-      echo "  nft add rule inet filter input iifname \"$IF\" $PROTO dport $PORT accept     (and keep it in your ruleset file)"
-      exit 2
-    fi
-    if listed $PROTO "$PORT"; then echo "$PORT/$PROTO is already listed in $lf"
-    elif [ "$cmd" = plan ]; then
-      echo "would add '$PORT  # $why' to $lf, then run setup-router.sh fw"
-      exit 0
-    else
-      [ -e "$lf" ] || [ "$PROTO" = tcp ] || run $SUDO touch "$lf"
-      if [ "${LAN_PORT_DRY:-0}" = 1 ]; then echo "  would run: append '$PORT  # $why' to $lf"
-      else
-        # a list whose last line has no newline would swallow the new entry
-        { [ -z "$(tail -c1 "$lf" 2>/dev/null)" ] || echo; printf '%s  # %s\n' "$PORT" "$why"; } | $SUDO tee -a "$lf" >/dev/null
-        echo "listed: $PORT/$PROTO in $lf"
-      fi
-    fi
-    [ "$cmd" = plan ] && exit 0
-    reload || exit 1
-    if [ "${LAN_PORT_DRY:-0}" != 1 ]; then
-      if ruleset | accepted $PROTO | grep -qx "$PORT"; then echo "open: $PORT/$PROTO is accepted on $IF"
-      else die "$PORT/$PROTO is listed but not open: the reload did not load it (see its message above)"; fi
-    fi ;;
+    [ -n "${1:-}" ] || die "usage: lan-port $cmd PORT[/udp] \"what it is\" [PORT[/udp] \"what it is\"]..."
+    parse_specs "$@"
+    rc=0
+    if [ -e "$DIR" ]; then "${cmd}_router" || rc=$?
+    else "${cmd}_runtime" || rc=$?; fi
+    exit $rc ;;
 
   remove)
-    [ -n "${1:-}" ] || die "usage: lan-port remove PORT[/udp]"
-    spec "$1"; lf=$(list_of $PROTO)
-    listed $PROTO "$PORT" || { echo "$PORT/$PROTO is not listed in $lf"; exit 0; }
-    tmp=$(mktemp); trap 'rm -f "$tmp"' EXIT
-    awk -v p="$PORT" '$1 != p' "$lf" > "$tmp"
-    if [ "${LAN_PORT_DRY:-0}" = 1 ]; then echo "  would run: remove the $PORT line from $lf"
-    else $SUDO install -m "$(stat -c %a "$lf")" "$tmp" "$lf"; echo "unlisted: $PORT/$PROTO from $lf"; fi
-    reload ;;
+    [ -n "${1:-}" ] || die "usage: lan-port remove PORT[/udp]..."
+    parse_specs "$@"
+    [ -e "$DIR" ] || die "not a cmpi-router box ($DIR missing): no lists to remove from"
+    remove_router ;;
 
-  *) sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; [ -z "$cmd" ] || exit 2 ;;
+  *) awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"; [ -z "$cmd" ] || exit 2 ;;
 esac
