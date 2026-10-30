@@ -6,7 +6,7 @@ maximise, drag, resize).  Written for cpbee.
 
     https://192.168.10.1:8444/                 the list of apps
     https://192.168.10.1:8444/maze4/           read-only, a new game per tab
-    https://192.168.10.1:8444/bidet/           a text prompt that draws pictures (SIXEL), not a shell
+    https://192.168.10.1:8444/bidet/           an imitation bash (pipes, figlet, fortune, cowsay ... and bidet, which draws pictures in SIXEL), not a real shell
     https://192.168.10.1:8444/cpvax/           the OpenVMS VAX: a VT100 login over telnet to 192.168.20.30
     https://192.168.10.1:8444/cpvax-console/   the simh console (127.0.0.1:2323), one client at a time
     https://192.168.10.1:8444/waxweb/          WAX & TAPE: a web page (not a terminal) that drives the VAX's collection program
@@ -19,9 +19,15 @@ maximise, drag, resize).  Written for cpbee.
 | `frame.html` | the window around the terminal, served at `/APP/`; the terminal is ttyd at `/APP/term/` in the iframe |
 | `web-ttyd-APP.service` | systemd user units; each runs that app's `ttyd/run-ttyd.sh` |
 
-The launchers live with the apps: `Games/maze4/ttyd/`, `CWPutils/BIDeT/4D/ttyd/` (with `bidet-web.sh`, the prompt)
-and `VAX/simh/ttyd/` (with `cpvax-term.sh`, the telnet session).  They need `~/bin/ttyd` (the static release binary)
-and, for bidet, a venv with numpy and Pillow (`~/venvs/bidet`).
+The launchers live with the apps: `Games/maze4/ttyd/`, `CWPutils/BIDeT/4D/ttyd/` (with `bidet-web.sh` and `bidetsh.py`, the
+imitation shell) and `VAX/simh/ttyd/` (with `cpvax-term.sh`, the telnet session).  They need `~/bin/ttyd` (the static release
+binary) and, for bidet, a venv with numpy and Pillow (`~/venvs/bidet`).
+
+bidet's window is `bidetsh.py`, not bash: only bidet, figlet, toilet, cowsay, cowthink, fortune, lolcat and banner (each with a
+fixed list of options, those installed on cpbee; `sudo apt install figlet toilet fortune-mod fortunes-min cowsay lolcat
+sysvbanner`) and some builtins run, joined by `|`, `;`, `&&`, `||`.  Redirections, `&`, `$(...)`, globs and loops are refused, and the
+files you can see are pretend.  Programs are started from argument lists with a fixed environment, in an empty scratch directory,
+30 seconds at most.
 
 ## waxweb: the odd one out
 
