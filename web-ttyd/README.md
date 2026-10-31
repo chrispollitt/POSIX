@@ -32,12 +32,12 @@ files you can see are pretend.  Programs are started from argument lists with a 
 
 ## waxweb: the odd one out
 
-`waxweb` (`VAX/waxweb`) is an ordinary web server on `127.0.0.1:8088`, so it has no `frame.html` window and no
+`waxweb` (`VAX/apps/waxweb`) is an ordinary web server on `127.0.0.1:8088`, so it has no `frame.html` window and no
 `/APP/term/`: one `location /waxweb/` in `web-ttyd.conf` proxies it (the trailing `/` on `proxy_pass` strips the
 prefix, and the page's URLs are relative, so it works here and at its own root).  Its unit is
 `web-ttyd-waxweb.service`.  It logs in to OpenVMS (192.168.20.30:23) as the unprivileged `WAXWEB` account whose
 password is in `~/.config/waxweb.env` (mode 600; `install.sh` refuses to go on without it: see
-`VAX/waxweb/deploy/waxweb.env.example`).  nginx does the authentication, so waxweb's own `WAXWEB_AUTH` stays unset.
+`VAX/apps/waxweb/deploy/waxweb.env.example`).  nginx does the authentication, so waxweb's own `WAXWEB_AUTH` stays unset.
 The page can power the VAX on (`VAX_UNIT=vax.service`, the same sudoers line as the cpvax window).
 
 ## cpvax web: just a link
