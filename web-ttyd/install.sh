@@ -8,7 +8,7 @@
 #   ./install.sh -u      take it all out again (units, nginx files; keeps the htpasswd and the firewall entry)
 #
 # Needs: nginx, openssl, systemd (user units), ~/bin/ttyd, and the run-ttyd.sh launchers in ~/gh_cp:
-# Games/maze4/ttyd, CWPutils/BIDeT/4D/ttyd and VAX/simh/ttyd; and for waxweb ~/gh_cp/VAX/waxweb and
+# Games/maze4/ttyd, CWPutils/BIDeT/4D/ttyd and VAX/simh/ttyd; and for waxweb ~/gh_cp/VAX/apps/waxweb and
 # ~/.config/waxweb.env (mode 600).
 # The firewall port goes through ../net-utils/lan-port (cmpi-router's port list), not a hand edit.
 set -euo pipefail
@@ -53,9 +53,9 @@ fi
 # --- checks, before anything changes ---
 [ -x "$HOME/bin/ttyd" ] || { echo "no ~/bin/ttyd" >&2; exit 1; }
 for l in "${launchers[@]}"; do [ -x "$l" ] || { echo "missing or not executable: $l" >&2; exit 1; }; done
-[ -f "$HOME/gh_cp/VAX/waxweb/waxweb.py" ] || { echo "missing: $HOME/gh_cp/VAX/waxweb/waxweb.py" >&2; exit 1; }
+[ -f "$HOME/gh_cp/VAX/apps/waxweb/waxweb.py" ] || { echo "missing: $HOME/gh_cp/VAX/apps/waxweb/waxweb.py" >&2; exit 1; }
 # waxweb holds the VMS password in this file; do not start it without one, or with one others can read
-[ -f "$waxweb_env" ] || { echo "no $waxweb_env: copy VAX/waxweb/deploy/waxweb.env.example there, set VAX_PASS, chmod 600" >&2; exit 1; }
+[ -f "$waxweb_env" ] || { echo "no $waxweb_env: copy VAX/apps/waxweb/deploy/waxweb.env.example there, set VAX_PASS, chmod 600" >&2; exit 1; }
 [ "$(stat -c %a "$waxweb_env")" = 600 ] || { echo "$waxweb_env must be mode 600 (it holds a password)" >&2; exit 1; }
 [ -x "$lanport" ] || { echo "missing or not executable: $lanport" >&2; exit 1; }
 [ -x /usr/sbin/nginx ] || command -v nginx >/dev/null || { echo "nginx not found" >&2; exit 1; }
