@@ -10,6 +10,7 @@ maximise, drag, resize).  Written for cpbee.
     https://192.168.10.1:8444/cpvax/           the OpenVMS VAX: a VT100 login over telnet to 192.168.20.30
     https://192.168.10.1:8444/cpvax-console/   the simh console (127.0.0.1:2323), one client at a time
     https://192.168.10.1:8444/waxweb/          WAX & TAPE: a web page (not a terminal) that drives the VAX's collection program
+    http://cpvax.cmnet/                        a tile on the list, not an nginx path: the VAX's own web server (VAX/httpd), plain http, no password
 
 | file | what |
 |---|---|
@@ -38,6 +39,13 @@ prefix, and the page's URLs are relative, so it works here and at its own root).
 password is in `~/.config/waxweb.env` (mode 600; `install.sh` refuses to go on without it: see
 `VAX/waxweb/deploy/waxweb.env.example`).  nginx does the authentication, so waxweb's own `WAXWEB_AUTH` stays unset.
 The page can power the VAX on (`VAX_UNIT=vax.service`, the same sudoers line as the cpvax window).
+
+## cpvax web: just a link
+
+The `cpvax web` tile in `index.html` points straight at `http://cpvax.cmnet/` (the DEC C server in `VAX/httpd`), so it
+bypasses nginx: no TLS, no password, and it does not power the VAX on (that is the `cpvax/` tile).  It is not proxied under
+`/cpvax-www/` because the pages and CGI forms there use absolute paths (`/test.cgi`), which a path prefix would break.
+cpbee's `https://cpbee/servers/` lists it too, with its state from `status.php` (`vax_http`, a TCP connect to 192.168.20.30:80).
 
 ## Adding an app
 
