@@ -54,7 +54,7 @@
 #
 # Options:
 #   --user NAME         the Unix / mailbox user (default: floyd)
-#   --nick NICK         his IRC nick and NickServ account (default: Floyd)
+#   --nick NICK         his IRC nick and NickServ account (default: floyd-bot)
 #   --address ADDR      the address mail for him arrives at (default:
 #                       cwp+floyd@u-l.ca)
 #   --mail-host HOST    Dovecot / Postfix as seen from this box (default: localhost)
@@ -92,7 +92,7 @@ set -euo pipefail
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 
 USERNAME=floyd
-NICK=Floyd
+NICK=floyd-bot
 ADDRESS="cwp+floyd@u-l.ca"
 MAILHOST=localhost
 IRCPORT=6667

@@ -10,7 +10,7 @@
 # NO PASSWORDS HERE.  Floyd's NickServ password goes in /etc/tvchat/floyd.env
 # (chmod 600) as
 #   TVCHAT_PASS_CPBEE=...
-# or in the service user's ~/.netrc:  machine cpbee  login Floyd  password ...
+# or in the service user's ~/.netrc:  machine cpbee  login floyd-bot  password ...
 # configure-floyd.sh registers the nick and writes that file.
 
 [account:cpbee]
@@ -20,10 +20,10 @@ host     = cpbee
 port     = 6697
 tls      = true
 cafile   = /opt/ergo/ca.pem
-nick     = Floyd
+nick     = floyd-bot
 realname = Floyd, B-19-7 (a robot)
 # his services account; the password is looked up as above
-sasl     = Floyd
+sasl     = floyd-bot
 # joined on every start; anyone can also /invite him or /msg him
 channels = #test
 

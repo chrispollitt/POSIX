@@ -384,7 +384,7 @@ check "-h prints the usage" '"$FL" -h | grep -q "^Usage:"'
 fl --print-config > "$SANDBOX/floyd.conf" 2> "$OUT"
 check "--print-config: exit 0, no root needed" '[ $? = 0 ]'
 FC="$SANDBOX/floyd.conf"
-check "  the nick, account and admins of the defaults" 'grep -qx "\[account:cpbee\]" "$FC" && grep -qx "nick     = Floyd" "$FC" && grep -qx "sasl     = Floyd" "$FC" && grep -qx "admins   = chris" "$FC" && grep -qx "attach   = cpbee/\*" "$FC"'
+check "  the nick, account and admins of the defaults" 'grep -qx "\[account:cpbee\]" "$FC" && grep -qx "nick     = floyd-bot" "$FC" && grep -qx "sasl     = floyd-bot" "$FC" && grep -qx "admins   = chris" "$FC" && grep -qx "attach   = cpbee/\*" "$FC"'
 check "  Claude works in the service user's home" 'grep -qx "claude_dir      = ~" "$FC"'
 check "  it still parses as a tvchat.conf" '"$PY" -c "
 import configparser, sys
