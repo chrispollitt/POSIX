@@ -1,0 +1,512 @@
+#!/usr/bin/env python3
+"""identity - who is who: one list of the logins a person uses on each service, for every project to ask.
+
+Chris is `chris` on the mail server, `chris-pollitt` on IRC, `chris@cpbee.cmnet` in a netrc line and an
+admin of Floyd under two of those.  Each tool kept its own idea of that (tvchat's [people] table for invitations,
+Floyd's admins = list, the logins in ~/.netrc and ~/.mu-tickets ...).  This is the one list, modelled on
+lan-port: a plain file, one tool every project calls (not its own copy), `plan` before `add`, a reason on every
+line, and `check` to compare the list with what the configurations really say.  It holds NO passwords.
+
+THE LIST   $IDENTITY_FILE, else ~/.config/identities  (and /etc/identities, read-only, when there is one)
+    # PERSON  SCHEME@HOST          LOGIN             [admin] [bot]   # why
+    chris     imaps@cpbee.cmnet    chris                             # mail: the Unix and Dovecot user
+    chris     *@cpbee.cmnet        chris                             # any other service there
+    chris     irc@irc.libera.chat  chris-pollitt     admin           # my Libera account
+  SCHEME is imaps, smtp, irc, https, lhc, talk ... or * (any); imap/imaps, smtp/smtps, irc/ircs and http/https are
+  one scheme each for matching.  HOST may carry a port (ignored when matching).  A bare host name gets the LAN domain
+  (cmnet): cpbee is cpbee.cmnet.  `admin` marks a login that answers for the bots (Floyd's admins); `bot` a login
+  that is a program.  One login per person per scheme and host.
+  `@host NAME ALIAS...` says that other spellings are the same machine: `@host cpbee.cmnet 192.168.10.1`.
+
+COMMANDS (for scripts: the answer on stdout, exit 1 when there is none)
+  list [PERSON]                      the whole list, or one person's lines
+  login PERSON SCHEME HOST           that person's login there (the exact scheme first, then *)
+  person SCHEME HOST LOGIN           who that login is
+  admins [SCHEME[@HOST]]             the logins flagged admin, one per line
+  plan add PERSON SCHEME@HOST LOGIN [admin] [bot] --why TEXT     what `add` would do; changes nothing
+  add  PERSON SCHEME@HOST LOGIN [admin] [bot] --why TEXT         exit 0 done or already there, 1 refused
+  remove PERSON SCHEME@HOST [LOGIN]
+  check                              compare the list with the configuration files (below); read-only
+`plan` exits 0 (nothing to do), 3 (something to change) or 1 (refused).  `add` refuses a login that is another
+person's on that scheme and host, and a second login for one person there (--also allows it: say why).  The
+list is backed up (FILE.bak-DATE) before any change.
+
+CHECK reads, when they exist (each can be named: --tickets --netrc --tvchat-conf --tvmail-conf --tvcal-conf
+--floyd-conf --mail-conf; pass a name more than once; --no-default-files reads only the ones named):
+  ~/.mu-tickets  ~/.netrc  ~/.config/tvchat/tvchat.conf  ~/.config/tvmail/tvmail.conf  ~/.config/tvcal/tvcal.conf
+  ~/.mail (GNU Mailutils)  and, to audit the central Floyd, a copy of /etc/tvchat/floyd.conf (--floyd-conf FILE).
+It reports (passwords are never read into the report):
+  UNREGISTERED  a login in use that the list does not know
+  CONFLICT      one login listed for two people on the same scheme and host
+  DUPLICATE     one person with two logins on the same scheme and host
+  ADMIN         a Floyd admins / invite_from / contact name that is not a registered admin login
+  note DIFFERS  one person under different logins on one host (chris and chris-pollitt on cpbee.cmnet)
+  note UNSEEN   (-v) a listed login no file mentions
+Exit 0 when nothing but notes was found (--strict: notes count), 3 when there is a finding, 1 on a usage error.
+
+--floyd-local HOST says that 127.0.0.1 / localhost in the --floyd-conf files means HOST (a copy of cpbee's floyd.conf:
+cpbee).
+Options: --file FILE (the list to change; default as above)  --domain DOMAIN  --no-domain  -v  -h
+"""
+import argparse
+import configparser
+import os
+import re
+import sys
+import time
+from urllib.parse import unquote
+
+GROUP = {"imap": "imap", "imaps": "imap", "smtp": "smtp", "smtps": "smtp", "submission": "smtp", "irc": "irc",
+         "ircs": "irc", "http": "http", "https": "http", "caldav": "http", "caldavs": "http", "lhc": "lhc"}
+NAME_RX = re.compile(r"^[A-Za-z0-9._-]+$")
+FLAGS = ("admin", "bot")
+URL = re.compile(r"^(?P<scheme>\*|[A-Za-z][\w+.-]*)://(?:(?P<user>[^:@/]*)(?::[^@/]*)?@)?(?P<host>[^:/]+)")  # allowlist secret
+
+
+class Err(Exception):
+    pass
+
+
+# ------------------------------------------------------------------ names ---
+def scheme_of(s):
+    s = (s or "").lower()
+    return s if s == "*" else GROUP.get(s, s)
+
+
+def host_of(h, domain):
+    """lower-case host, port dropped, a bare name qualified with the LAN domain."""
+    h = (h or "").strip().lower()
+    h = re.sub(r":\d+$", "", h) if h.count(":") == 1 else h
+    if domain and h and "." not in h and ":" not in h and h != "localhost" and not h.isdigit():
+        h = "%s.%s" % (h, domain.strip("."))
+    return h
+
+
+class Reg:
+    """The list: entries (person, scheme, host, login, flags, why, source)."""
+
+    def __init__(self, domain):
+        self.domain = domain
+        self.rows = []
+        self.alias = {}                  # other spelling of a machine -> its list name
+
+    def host(self, h):
+        h = host_of(h, self.domain)
+        return self.alias.get(h, h)
+
+    def finish(self):
+        """Rows speak of a machine by its list name, whichever alias they were written with."""
+        for r in self.rows:
+            r["host"] = self.alias.get(r["host"], r["host"])
+
+    def load(self, path, source):
+        try:
+            with open(path, encoding="utf-8") as fh:
+                lines = fh.read().splitlines()
+        except OSError:
+            return False
+        for n, ln in enumerate(lines, 1):
+            body, _, why = ln.partition("#")
+            f = body.split()
+            if not f:
+                continue
+            if f[0] == "@host":
+                if len(f) < 3:
+                    raise Err("%s:%d: want @host NAME ALIAS..." % (path, n))
+                for other in f[2:]:
+                    self.alias[host_of(other, self.domain)] = host_of(f[1], self.domain)
+                continue
+            if len(f) < 3 or "@" not in f[1]:
+                raise Err("%s:%d: want PERSON SCHEME@HOST LOGIN [admin] [bot]  # why" % (path, n))
+            person, spec, login, flags = f[0], f[1], f[2], f[3:]
+            scheme, _, host = spec.partition("@")
+            if not NAME_RX.match(person) or not host or any(x not in FLAGS for x in flags):
+                raise Err("%s:%d: a person is letters, digits . _ - ; flags are admin, bot; host needed" % (path, n))
+            self.rows.append({"person": person, "scheme": scheme_of(scheme), "host": host_of(host, self.domain),
+                              "login": login, "flags": set(flags), "why": why.strip(), "src": source, "line": n})
+        return True
+
+    def for_person(self, p):
+        return [r for r in self.rows if r["person"] == p]
+
+    def login(self, person, scheme, host):
+        sch, h = scheme_of(scheme), self.host(host)
+        rows = [r for r in self.rows if r["person"] == person and r["host"] == h]
+        for want in (sch, "*"):
+            for r in rows:
+                if r["scheme"] == want:
+                    return r["login"]
+        return None
+
+    def who(self, scheme, host, login):
+        sch, h = scheme_of(scheme), self.host(host)
+        for want in (sch, "*"):
+            for r in self.rows:
+                if r["host"] == h and r["login"] == login and r["scheme"] == want:
+                    return r["person"]
+        return None
+
+
+# --------------------------------------------------------------- the files ---
+def read_text(path):
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            return fh.read()
+    except OSError:
+        return None
+
+
+def obs_tickets(path):
+    t = read_text(path)
+    for ln in (t or "").splitlines():
+        ln = ln.strip()
+        m = URL.match(ln) if ln and not ln.startswith("#") else None
+        if m and m.group("user"):
+            yield scheme_of(unquote(m.group("scheme"))), m.group("host"), unquote(m.group("user")), "~/.mu-tickets"
+
+
+def obs_netrc(path):
+    t = read_text(path)
+    if t is None:
+        return
+    toks = [x.strip('"') for ln in t.splitlines() if not ln.lstrip().startswith("#") for x in ln.split()]
+    mach = login = None
+    for i, w in enumerate(toks):
+        if w == "machine" and i + 1 < len(toks):
+            mach, login = toks[i + 1], None
+        elif w == "login" and i + 1 < len(toks) and mach:
+            yield "*", mach, toks[i + 1], "~/.netrc"          # no protocol is named there
+
+
+def ini(path):
+    t = read_text(path)
+    if t is None:
+        return None
+    c = configparser.ConfigParser(interpolation=None, strict=False)
+    try:
+        c.read_string(t)
+    except configparser.Error:
+        return None
+    return c
+
+
+def obs_chat(path, label, local=None):
+    """Logins and admin claims of a tvchat.conf / floyd.conf; local: what 127.0.0.1 / localhost means in it."""
+    c = ini(path)
+    if c is None:
+        return [], []
+    obs, claims = [], []
+    for sec in c.sections():
+        if not sec.startswith("account:"):
+            continue
+        o = c[sec]
+        proto = (o.get("protocol") or "").strip().lower()
+        host = (o.get("host") or "").strip()
+        if local and host in ("127.0.0.1", "localhost", "::1"):
+            host = local
+        if proto == "irc" and host and o.get("sasl"):
+            obs.append(("irc", host, o["sasl"].strip(), "%s [%s]" % (label, sec)))
+        elif proto == "talk" and host and o.get("user"):
+            obs.append(("talk", host, o["user"].strip(), "%s [%s]" % (label, sec)))
+        elif proto == "deltachat" and "@" in (o.get("addr") or ""):
+            a = o["addr"].strip()
+            obs.append(("deltachat", a.partition("@")[2], a, "%s [%s]" % (label, sec)))
+        elif proto in GROUP and host and o.get("user"):
+            obs.append((proto, host, o["user"].strip(), "%s [%s]" % (label, sec)))
+        for key in ("admins", "invite_from", "contact"):
+            if o.get(key):
+                for name in re.split(r"[,\s]+", o[key].strip()):
+                    if name:
+                        claims.append((key, name, "%s [%s]" % (label, sec)))
+    return obs, claims
+
+
+def obs_tvmail(path):
+    c = ini(path)
+    out = []
+    if c is not None:
+        for sec, scheme in (("imap", "imap"), ("smtp", "smtp")):
+            if c.has_section(sec) and c.get(sec, "host", fallback="") and c.get(sec, "user", fallback=""):
+                out.append((scheme, c.get(sec, "host").strip(), c.get(sec, "user").strip(), "tvmail.conf [%s]" % sec))
+    return out
+
+
+def obs_tvcal(path):
+    c = ini(path)
+    if c is not None and c.get("server", "url", fallback="") and c.get("server", "user", fallback=""):
+        m = URL.match(c.get("server", "url").strip())
+        if m:
+            return [("http", m.group("host"), c.get("server", "user").strip(), "tvcal.conf [server]")]
+    return []
+
+
+def obs_mailutils(path):
+    t = read_text(path)
+    out = []
+    for kind, rx in (("imap", r'mailbox-pattern\s+"([^"]+)"'), ("smtp", r'url\s+"([^"]+)"')):
+        for u in re.findall(rx, t or ""):
+            m = URL.match(u)
+            if m and m.group("user"):
+                out.append((scheme_of(m.group("scheme")), m.group("host"), unquote(m.group("user")), "~/.mail"))
+    return out
+
+
+# ------------------------------------------------------------------ check ---
+def check(reg, a):
+    home = os.path.expanduser("~")
+    named = lambda x: x if x else []
+    paths = {
+        "tickets": a.tickets or ([] if a.no_default_files else [os.environ.get("TVMAIL_MU_TICKETS") or home + "/.mu-tickets"]),
+        "netrc": a.netrc or ([] if a.no_default_files else [home + "/.netrc"]),
+        "tvchat": a.tvchat_conf or ([] if a.no_default_files else [home + "/.config/tvchat/tvchat.conf"]),
+        "tvmail": a.tvmail_conf or ([] if a.no_default_files else [home + "/.config/tvmail/tvmail.conf"]),
+        "tvcal": a.tvcal_conf or ([] if a.no_default_files else [home + "/.config/tvcal/tvcal.conf"]),
+        "floyd": a.floyd_conf or [],
+        "mail": a.mail_conf or ([] if a.no_default_files else [home + "/.mail"]),
+    }
+    obs, claims, read = [], [], []
+    for p in paths["tickets"]:
+        o = list(obs_tickets(p)); obs += o; read.append(p) if os.path.exists(p) else None
+    for p in paths["netrc"]:
+        o = list(obs_netrc(p)); obs += o; read.append(p) if os.path.exists(p) else None
+    for p in paths["tvchat"]:
+        o, c = obs_chat(p, "tvchat.conf"); obs += o; claims += c; read.append(p) if os.path.exists(p) else None
+    for p in paths["floyd"]:
+        o, c = obs_chat(p, "floyd.conf", a.floyd_local); obs += o; claims += c; read.append(p) if os.path.exists(p) else None
+    for p in paths["tvmail"]:
+        obs += obs_tvmail(p); read.append(p) if os.path.exists(p) else None
+    for p in paths["tvcal"]:
+        obs += obs_tvcal(p); read.append(p) if os.path.exists(p) else None
+    for p in paths["mail"]:
+        obs += obs_mailutils(p); read.append(p) if os.path.exists(p) else None
+
+    findings, notes = [], []
+    seen = set()                                            # registry rows some file mentions
+    reported = set()
+    for scheme, host, login, src in obs:
+        h = reg.host(host)
+        hit = [r for r in reg.rows if r["host"] == h and r["login"] == login
+               and (scheme == "*" or r["scheme"] in (scheme_of(scheme), "*"))]
+        if hit:
+            seen.update(id(r) for r in hit)
+            continue
+        key = (h, login, scheme)
+        if key in reported:
+            continue
+        reported.add(key)
+        findings.append("UNREGISTERED  %s login %s on %s   (%s)" % (
+            "any protocol" if scheme == "*" else scheme_of(scheme), login, h, src))
+
+    # the list itself
+    by = {}
+    for r in reg.rows:
+        by.setdefault((r["scheme"], r["host"], r["login"]), set()).add(r["person"])
+        by.setdefault((r["scheme"], r["host"], None), set()).add(r["person"])
+    for (sch, h, login), people in sorted(by.items(), key=lambda kv: str(kv[0])):
+        if login is not None and len(people) > 1:
+            findings.append("CONFLICT      %s on %s: login %s is listed for %s" % (sch, h, login, " and ".join(sorted(people))))
+    pairs = {}
+    for r in reg.rows:
+        pairs.setdefault((r["person"], r["scheme"], r["host"]), set()).add(r["login"])
+    for (p, sch, h), logins in sorted(pairs.items()):
+        if len(logins) > 1:
+            findings.append("DUPLICATE     %s has %d logins for %s on %s: %s" % (p, len(logins), sch, h, ", ".join(sorted(logins))))
+    byhost = {}
+    for r in reg.rows:
+        byhost.setdefault((r["person"], r["host"]), {}).setdefault(r["login"], set()).add(r["scheme"])
+    for (p, h), logins in sorted(byhost.items()):
+        if len(logins) > 1:
+            notes.append("note DIFFERS  %s on %s: %s" % (p, h, "; ".join(
+                "%s = %s" % (",".join(sorted(s)), l) for l, s in sorted(logins.items()))))
+
+    # Floyd's admins
+    admin_logins = {r["login"].lower() for r in reg.rows if "admin" in r["flags"]}
+    claimed = set()
+    for key, name, src in claims:
+        claimed.add(name.lower())
+        if name.lower() not in admin_logins:
+            findings.append("ADMIN         %s = %s is not a login the list flags admin   (%s)" % (key, name, src))
+    if claims:
+        for r in reg.rows:
+            if "admin" in r["flags"] and r["login"].lower() not in claimed and r["scheme"] in ("irc", "*", "talk"):
+                notes.append("note ADMIN   %s (%s@%s) is flagged admin but is in no Floyd admins/invite_from/contact" % (
+                    r["login"], r["scheme"], r["host"]))
+    if a.v:
+        for r in reg.rows:
+            if id(r) not in seen:
+                notes.append("note UNSEEN   %s %s@%s login %s: no file mentions it" % (r["person"], r["scheme"], r["host"], r["login"]))
+    return findings, notes, read
+
+
+# ------------------------------------------------------------------- edit ---
+def parse_spec(spec, reg):
+    scheme, at, host = spec.partition("@")
+    if not at or not host or not (scheme == "*" or re.match(r"^[A-Za-z][\w+.-]*$", scheme)):
+        raise Err("SCHEME@HOST wanted, not %r" % spec)
+    return scheme_of(scheme), reg.host(host)
+
+
+def plan_add(reg, a):
+    if not NAME_RX.match(a.person):
+        raise Err("a person is letters, digits . _ - only")
+    if any(f not in FLAGS for f in a.flags):
+        raise Err("flags are admin and bot")
+    if not (a.why or "").strip():
+        raise Err("say why: --why TEXT")
+    sch, h = parse_spec(a.spec, reg)
+    for r in reg.rows:
+        if r["scheme"] == sch and r["host"] == h:
+            if r["login"] == a.login and r["person"] == a.person:
+                return 0, "already there: %s %s@%s %s" % (a.person, sch, h, a.login)
+            if r["login"] == a.login:
+                return 1, "refused: %s on %s@%s is %s's, not %s's" % (a.login, sch, h, r["person"], a.person)
+            if r["person"] == a.person and not a.also:
+                return 1, ("refused: %s already uses %s on %s@%s; two logins for one person there is what this list is "
+                           "meant to end (--also allows it)" % (a.person, r["login"], sch, h))
+    return 3, "would add: %s %s %s %s  # %s" % (a.person, a.spec, a.login, " ".join(a.flags), a.why.strip())
+
+
+def rewrite(path, text):
+    d = os.path.dirname(os.path.abspath(path))
+    os.makedirs(d, exist_ok=True)
+    if os.path.exists(path):
+        b, n = "%s.bak-%s" % (path, time.strftime("%Y%m%d-%H%M%S")), 0
+        while os.path.exists(b):
+            n += 1
+            b = "%s.bak-%s-%d" % (path, time.strftime("%Y%m%d-%H%M%S"), n)
+        with open(path, "rb") as fh, open(b, "wb") as out:
+            out.write(fh.read())
+    tmp = "%s.tmp%d" % (path, os.getpid())
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    os.replace(tmp, path)
+
+
+# ------------------------------------------------------------------- main ---
+def main(argv=None):
+    ap = argparse.ArgumentParser(prog="identity", add_help=False)
+    ap.add_argument("cmd", nargs="?")
+    ap.add_argument("args", nargs="*")
+    ap.add_argument("--file")
+    ap.add_argument("--domain", default=os.environ.get("IDENTITY_DOMAIN", "cmnet"))
+    ap.add_argument("--no-domain", action="store_true")
+    ap.add_argument("--why")
+    ap.add_argument("--floyd-local")
+    ap.add_argument("--also", action="store_true")
+    ap.add_argument("--strict", action="store_true")
+    ap.add_argument("--no-default-files", action="store_true")
+    for n in ("tickets", "netrc", "tvchat-conf", "tvmail-conf", "tvcal-conf", "floyd-conf", "mail-conf"):
+        ap.add_argument("--" + n, action="append")
+    ap.add_argument("-v", action="store_true")
+    ap.add_argument("-h", "--help", action="store_true")
+    try:
+        a, rest = ap.parse_known_args(argv)
+    except SystemExit:
+        return 1
+    if a.help or not a.cmd:
+        print(__doc__.strip())
+        return 0
+    if rest:
+        print("identity: unknown option %s" % rest[0], file=sys.stderr)
+        return 1
+    reg = Reg(None if a.no_domain else a.domain)
+    user_file = a.file or os.environ.get("IDENTITY_FILE") or os.path.expanduser("~/.config/identities")
+    try:
+        system = os.environ.get("IDENTITY_SYSTEM", "/etc/identities")
+        if not a.file:
+            reg.load(system, "system")
+        reg.load(user_file, "user")
+        reg.finish()
+        cmd, args = a.cmd, a.args
+        if cmd == "plan" and args and args[0] == "add":
+            cmd, args = "plan-add", args[1:]
+        if cmd in ("add", "plan-add"):
+            if len(args) < 3:
+                raise Err("add PERSON SCHEME@HOST LOGIN [admin] [bot] --why TEXT")
+            a.person, a.spec, a.login, a.flags = args[0], args[1], args[2], args[3:]
+            rc, msg = plan_add(reg, a)
+            if cmd == "plan-add" or rc != 3:
+                print(msg)
+                return rc
+            sch, h = parse_spec(a.spec, reg)
+            line = "%-10s %-28s %-18s %-8s # %s\n" % (a.person, "%s@%s" % (a.spec.partition("@")[0], a.spec.partition("@")[2]),
+                                                       a.login, " ".join(a.flags), a.why.strip())
+            old = read_text(user_file) or ""
+            if old and not old.endswith("\n"):
+                old += "\n"
+            if not old:
+                old = "# PERSON  SCHEME@HOST  LOGIN  [admin] [bot]  # why     (identity --help)\n"
+            rewrite(user_file, old + line)
+            print("added: " + line.strip())
+            return 0
+        if cmd == "remove":
+            if len(args) < 2:
+                raise Err("remove PERSON SCHEME@HOST [LOGIN]")
+            sch, h = parse_spec(args[1], reg)
+            lines = (read_text(user_file) or "").splitlines()
+            keep, gone = [], 0
+            for ln in lines:
+                f = ln.partition("#")[0].split()
+                if len(f) >= 3 and "@" in f[1] and f[0] == args[0]:
+                    s2, _, h2 = f[1].partition("@")
+                    if scheme_of(s2) == sch and reg.host(h2) == h and (len(args) < 3 or f[2] == args[2]):
+                        gone += 1
+                        continue
+                keep.append(ln)
+            if not gone:
+                print("nothing to remove in %s" % user_file)
+                return 0
+            rewrite(user_file, "\n".join(keep) + "\n")
+            print("removed %d line%s from %s" % (gone, "" if gone == 1 else "s", user_file))
+            return 0
+        if cmd == "list":
+            for r in reg.rows:
+                if not args or r["person"] == args[0]:
+                    print("%-10s %-28s %-18s %-8s %s" % (r["person"], "%s@%s" % (r["scheme"], r["host"]), r["login"],
+                                                          " ".join(sorted(r["flags"])), ("# " + r["why"]) if r["why"] else ""))
+            return 0
+        if cmd == "login":
+            if len(args) != 3:
+                raise Err("login PERSON SCHEME HOST")
+            v = reg.login(*args)
+            if v is None:
+                return 1
+            print(v)
+            return 0
+        if cmd == "person":
+            if len(args) != 3:
+                raise Err("person SCHEME HOST LOGIN")
+            v = reg.who(*args)
+            if v is None:
+                return 1
+            print(v)
+            return 0
+        if cmd == "admins":
+            sch = h = None
+            if args:
+                sch, _, h = args[0].partition("@")
+                sch, h = scheme_of(sch), reg.host(h) if h else None
+            out = []
+            for r in reg.rows:
+                if "admin" in r["flags"] and (sch is None or r["scheme"] in (sch, "*")) and (h is None or r["host"] == h):
+                    if r["login"] not in out:
+                        out.append(r["login"])
+            print("\n".join(out)) if out else None
+            return 0 if out else 1
+        if cmd == "check":
+            findings, notes, read = check(reg, a)
+            print("list: %d line%s (%s)" % (len(reg.rows), "" if len(reg.rows) == 1 else "s", user_file))
+            print("read: " + (", ".join(read) if read else "no configuration file found"))
+            for x in findings + notes:
+                print(x)
+            bad = findings + (notes if a.strict else [])
+            print("%d finding%s, %d note%s" % (len(findings), "" if len(findings) == 1 else "s", len(notes), "" if len(notes) == 1 else "s"))
+            return 3 if bad else 0
+        raise Err("unknown command %r (identity --help)" % cmd)
+    except Err as e:
+        print("identity: %s" % e, file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

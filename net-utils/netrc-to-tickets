@@ -1,0 +1,394 @@
+#!/usr/bin/env python3
+"""netrc-to-tickets - move logins from ~/.netrc to ~/.mu-tickets, where tvmail, tvchat and tvcal look first.
+
+~/.netrc says "machine HOST login USER password PASS" and nothing about WHAT it is a login for
+(IMAP, SMTP, IRC, a web page ...), so the same host's mail login and its IRC login are told apart by the
+login only.  ~/.mu-tickets (GNU Mailutils' file, which tvmail, tvchat and tvcal share) names the protocol:
+
+    imaps://chris:PASS@cpbee.cmnet    user and password percent-encoded; scheme * matches any  # allowlist secret  # allowlist secret
+
+WHAT IT DOES
+  1. every complete entry of the netrc becomes a ticket (or several: see below);
+  2. every `*://` ticket already in the tickets file is offered a real protocol name, because a ticket for
+     "any" protocol is handed to whichever app asks first (an IRC login to the mail server ...).
+Nothing is done until you have seen the plan and said yes.  Passwords are never printed.  Both files are
+backed up first (FILE.bak-YYYYmmdd-HHMMSS, mode 600) and written mode 600.  Nothing else in either file
+is touched (comments, `default`, macdef, entries without a login or password).
+
+THE PROTOCOL NAME ("scheme")
+  - a known port decides it, without asking: machine HOST:PORT, or a `port N` in the entry -
+      993 imaps, 143 imap, 465 smtps, 587/25 smtp, 6697 ircs, 6667 irc, 5232/443 https, 80 http, 21 ftp, 22 ssh
+  - an entry WITHOUT a port (or with one not in that list) asks: at a terminal you are shown
+      scheme(s) for cpbee.cmnet login chris [imaps, smtp, irc, lhc, https, *]  (Enter = imaps):
+    and can answer one name, or several separated by commas or spaces (imaps,smtp): one ticket each,
+    which is what a mail login that serves IMAP and SMTP wants.  The Enter default is a guess from the host
+    name (irc.* irc, imap.* imaps, smtp.* smtp, lhc.* lhc), else --default-scheme (default *).
+  - --map HOST[:PORT]=SCHEME[,SCHEME] answers in advance (and settles an existing `*` ticket the same way)
+  - with --yes, or without a terminal, nothing is asked: the guess or --default-scheme is used for a netrc
+    entry, and an existing `*` ticket nothing decides is left as it is.  --prompt asks even when stdin is not a
+    terminal (reading the answers from stdin: for scripts and tests).
+  An existing `*://user:pass@host` ticket becomes `imaps://...` (or several lines) in place, password text untouched.  # allowlist secret
+
+HOST NAMES
+  A bare host name (cpbee, cpvax: no dot) gets the LAN domain appended - cpbee.cmnet - because the apps look
+  a ticket up by the host name exactly as their own configuration spells it, and the LAN's names are
+  fully qualified there. --domain DOMAIN names another (default cmnet, or $TICKETS_DOMAIN); --no-domain leaves
+  the names as they are. localhost, IP addresses and names that already have a dot are never changed.
+
+OTHER
+  An entry already in the tickets file (same host and login, same password) is not added twice; one whose
+  password DIFFERS is reported and left alone.  With --move the migrated entries are also taken out of the  # allowlist secret
+  netrc, after each ticket has been read back and found to hold the same password.
+
+Usage:
+  netrc-to-tickets [options]
+Options:
+  --netrc FILE            (default ~/.netrc)
+  --tickets FILE          (default $TVMAIL_MU_TICKETS, else ~/.mu-tickets)
+  --map HOST[:PORT]=SCHEME[,SCHEME]
+  --domain DOMAIN         appended to bare host names (default cmnet, or $TICKETS_DOMAIN)
+  --no-domain             leave host names as they are
+  --default-scheme S      for a netrc entry nothing else decides (default *)
+  --no-retag              do not touch the `*://` tickets already in the tickets file
+  --move                  also remove the migrated entries from the netrc
+  -y, --yes               do not ask anything (no scheme questions, no confirmation)
+  --prompt                ask even when stdin is not a terminal
+  -n, --dry-run           only show the plan
+  -h, --help              this text
+Exit: 0 done (or nothing to do), 1 refused or failed, 2 a usage error.
+"""
+import argparse
+import os
+import re
+import sys
+import time
+from urllib.parse import quote, unquote
+
+PORT_SCHEME = {993: "imaps", 143: "imap", 465: "smtps", 587: "smtp", 25: "smtp", 6697: "ircs", 6667: "irc",
+               5232: "https", 443: "https", 80: "http", 21: "ftp", 22: "ssh"}
+HOST_SCHEME = [(r"^irc[.-]", "irc"), (r"^imap[.-]", "imaps"), (r"^smtp[.-]", "smtp"), (r"^lhc[.-]", "lhc")]
+SCHEME_RX = re.compile(r"^(\*|[A-Za-z][\w+.-]*)$")
+TOKEN = re.compile(r'"[^"]*"|\S+')
+URL = re.compile(r'^(?P<scheme>\*|[A-Za-z][\w+.-]*)://(?:(?P<user>[^:@/]*)(?::(?P<pass>[^@/]*))?@)?'  # allowlist secret
+                 r'(?P<host>[^:/]+)(?::(?P<port>\d+))?(?P<path>/.*)?$')
+
+
+class Entry:
+    def __init__(self, start):
+        self.start, self.end = start, start
+        self.machine = self.login = self.password = None
+        self.kwport = None
+        self.host, self.port = None, None
+        self.schemes, self.why = [], ""
+        self.pending = None
+
+
+def parse_netrc(text):
+    """The `machine` entries of a netrc: [Entry], each with its character span in text."""
+    entries, cur, skipping = [], None, False
+    off = 0
+    for line in text.splitlines(True):
+        if skipping:
+            if not line.strip():
+                skipping = False
+            off += len(line)
+            continue
+        if line.lstrip().startswith("#"):
+            off += len(line)
+            continue
+        for m in TOKEN.finditer(line):
+            t = m.group(0)
+            val = t[1:-1] if t.startswith('"') else t
+            a, b = off + m.start(), off + m.end()
+            if cur is not None and cur.pending:
+                setattr(cur, "kwport" if cur.pending == "port" else cur.pending, val)
+                cur.pending = None
+                cur.end = b
+            elif t == "machine":
+                cur = Entry(a)
+                cur.pending = "machine"
+                entries.append(cur)
+            elif t == "default":
+                cur = None
+            elif t == "macdef":
+                cur, skipping = None, True
+                break
+            elif cur is not None and t in ("login", "password", "account", "port"):
+                cur.pending = t
+                cur.end = b
+        off += len(line)
+    for e in entries:
+        mach = e.machine or ""
+        m = re.match(r"^(.*):(\d+)$", mach)
+        e.host, e.port = (m.group(1), int(m.group(2))) if m else (mach, None)
+        if e.port is None and e.kwport and str(e.kwport).isdigit():
+            e.port = int(e.kwport)
+    return entries
+
+
+def parse_url(u):
+    m = URL.match(u.strip())
+    if not m:
+        return None
+    d = m.groupdict()
+    return {"scheme": d["scheme"], "user": unquote(d["user"]) if d["user"] else None,
+            "pass": unquote(d["pass"]) if d["pass"] is not None else None,
+            "host": d["host"], "port": int(d["port"]) if d["port"] else None}
+
+
+def read_tickets(path):
+    """(lines, parsed): the file's lines, and a parse of each (None for blanks, comments, junk)."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            lines = fh.read().splitlines()
+    except OSError:
+        return [], []
+    parsed = []
+    for ln in lines:
+        s = ln.strip()
+        parsed.append(parse_url(s) if s and not s.startswith("#") else None)
+    return lines, parsed
+
+
+def host_guess(host):
+    for rx, sch in HOST_SCHEME:
+        if re.match(rx, host or "", re.I):
+            return sch
+    return None
+
+
+def split_schemes(text):
+    out = []
+    for w in re.split(r"[,\s]+", text.strip()):
+        if w and w not in out:
+            out.append(w)
+    return out
+
+
+def decide(host, port, maps):
+    """([schemes], why) without asking: --map HOST:PORT, the well-known port, --map HOST; else ([], "")."""
+    h = (host or "").lower()
+    if port and ("%s:%d" % (h, port)) in maps:
+        return maps["%s:%d" % (h, port)], "--map"
+    if port and port in PORT_SCHEME:
+        return [PORT_SCHEME[port]], "port %d" % port
+    if h in maps:
+        return maps[h], "--map"
+    return [], ""
+
+
+def qualified(host, domain):
+    """host with the LAN domain added when it is a bare name; else unchanged."""
+    if (not domain or not host or "." in host or ":" in host or host.lower() == "localhost"
+            or host.isdigit()):
+        return host
+    return "%s.%s" % (host, domain.strip("."))
+
+
+def ticket_line(scheme, e):
+    return "%s://%s:%s@%s%s" % (scheme, quote(e.login, safe=""), quote(e.password, safe=""), e.out_host,  # allowlist secret
+                                (":%d" % e.port) if e.port else "")
+
+
+def write_private(path, text):
+    tmp = "%s.tmp%d" % (path, os.getpid())
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+    os.chmod(path, 0o600)
+
+
+def backup(path, stamp):
+    try:
+        with open(path, "rb") as fh:
+            data = fh.read()
+    except OSError:
+        return None
+    b, n = "%s.bak-%s" % (path, stamp), 0
+    while os.path.exists(b):                  # a second run within the same second
+        n += 1
+        b = "%s.bak-%s-%d" % (path, stamp, n)
+    fd = os.open(b, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(data)
+    return b
+
+
+def remove_spans(text, spans):
+    """text without the character spans; a line left empty goes with its newline."""
+    for a, b in sorted(spans, reverse=True):
+        ls = text.rfind("\n", 0, a) + 1
+        le = text.find("\n", b)
+        le = len(text) if le < 0 else le + 1
+        if not text[ls:a].strip() and not text[b:le].strip():
+            a, b = ls, le
+        text = text[:a] + text[b:]
+    return text
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(prog="netrc-to-tickets", add_help=False)
+    ap.add_argument("--netrc", default=os.path.expanduser("~/.netrc"))
+    ap.add_argument("--tickets", default=os.environ.get("TVMAIL_MU_TICKETS") or os.path.expanduser("~/.mu-tickets"))
+    ap.add_argument("--map", action="append", default=[])
+    ap.add_argument("--default-scheme", default="*")
+    ap.add_argument("--domain", default=os.environ.get("TICKETS_DOMAIN", "cmnet"))
+    ap.add_argument("--no-domain", action="store_true")
+    ap.add_argument("--no-retag", action="store_true")
+    ap.add_argument("--move", action="store_true")
+    ap.add_argument("-y", "--yes", action="store_true")
+    ap.add_argument("--prompt", action="store_true")
+    ap.add_argument("-n", "--dry-run", action="store_true")
+    ap.add_argument("-h", "--help", action="store_true")
+    try:
+        a = ap.parse_args(argv)
+    except SystemExit:
+        return 2
+    if a.help:
+        print(__doc__.strip())
+        return 0
+    maps = {}
+    for spec in a.map:
+        k, eq, v = spec.partition("=")
+        names = split_schemes(v)
+        if not eq or not k or not names or not all(SCHEME_RX.match(n) for n in names):
+            print("netrc-to-tickets: --map wants HOST[:PORT]=SCHEME[,SCHEME], not %r" % spec, file=sys.stderr)
+            return 2
+        maps[k.lower()] = names
+    if not SCHEME_RX.match(a.default_scheme):
+        print("netrc-to-tickets: not a scheme: %r" % a.default_scheme, file=sys.stderr)
+        return 2
+
+    try:
+        with open(a.netrc, encoding="utf-8", errors="replace") as fh:
+            text = fh.read()
+    except OSError as e:
+        print("netrc-to-tickets: cannot read %s: %s" % (a.netrc, e), file=sys.stderr)
+        return 1
+    entries = parse_netrc(text)
+    lines, parsed = read_tickets(a.tickets)
+    have = [t for t in parsed if t]
+    interactive = (a.prompt or (sys.stdin.isatty() and sys.stdout.isatty())) and not a.yes and not a.dry_run
+
+    def ask_schemes(label, default, hint):
+        while True:
+            ans = input("scheme(s) for %s [%s]  (Enter = %s): " % (label, hint, " ".join(default))).strip()
+            if not ans:
+                return default, "default"
+            names = split_schemes(ans)
+            if all(SCHEME_RX.match(n) for n in names):
+                return names, "you"
+            print("  not a scheme name: letters, digits and + . - only, or *")
+
+    HINT = "imaps, imap, smtp, irc, lhc, https, *"
+    todo, same, differ, skipped = [], [], [], []
+    for e in entries:
+        e.label = "%s%s login %s" % (e.host, (":%d" % e.port) if e.port else "", e.login)
+        if not e.host or not e.login or e.password is None:
+            skipped.append("machine %s: no login or password (left in place)" % (e.machine or "?"))
+            continue
+        e.out_host = qualified(e.host, None if a.no_domain else a.domain)
+        twins = [t for t in have if (t["host"] or "").lower() == e.out_host.lower() and t["user"] == e.login]
+        if any(t["pass"] == e.password for t in twins):
+            same.append(e)
+            continue
+        if twins:
+            differ.append(e.label)
+            continue
+        e.schemes, e.why = decide(e.host, e.port, maps)
+        if not e.schemes:                                     # no (known) port: ask
+            default = [host_guess(e.host) or a.default_scheme]
+            if interactive:
+                e.schemes, e.why = ask_schemes(e.label if e.out_host == e.host else "%s (%s)" % (e.label, e.out_host),
+                                               default, HINT)
+            else:
+                e.schemes, e.why = default, "host name" if host_guess(e.host) else "default"
+        if e.out_host.lower() != e.host.lower():
+            e.why += "; host %s -> %s" % (e.host, e.out_host)
+        todo.append(e)
+
+    # the `*://` tickets already there: offer a real protocol name
+    retag = {}                                                # line index -> [schemes]
+    if not a.no_retag:
+        for i, t in enumerate(parsed):
+            if not t or t["scheme"] != "*" or not t["user"]:
+                continue
+            label = "%s@%s%s" % (t["user"], t["host"], (":%d" % t["port"]) if t["port"] else "")
+            names, why = decide(t["host"], t["port"], maps)
+            if not names and interactive:
+                names, why = ask_schemes("the existing *:// ticket %s" % label, [host_guess(t["host"]) or "*"], HINT)
+            elif not names and host_guess(t["host"]):
+                names, why = [host_guess(t["host"])], "host name"
+            if names and names != ["*"]:
+                retag[i] = (names, why, label)
+
+    print("%s: %d entr%s" % (a.netrc, len(entries), "y" if len(entries) == 1 else "ies"))
+    for e in todo:
+        print("  add    %-20s %s   (%s)" % (",".join(s + "://" for s in e.schemes), e.label, e.why))
+    for i, (names, why, label) in sorted(retag.items()):
+        print("  retag  *:// -> %-12s %s   (%s)" % (",".join(s + "://" for s in names), label, why))
+    for e in same:
+        print("  there  %s   (already in %s)" % (e.label, a.tickets))
+    for d in differ:
+        print("  DIFFER %s   (%s has another password for it: left alone, in both files)" % (d, a.tickets))
+    for s in skipped:
+        print("  skip   " + s)
+    movable = todo + same if a.move else []
+    if not todo and not retag and not movable:
+        print("nothing to do")
+        return 0
+    if a.move:
+        print("with --move, %d entr%s leave %s" % (len(movable), "y" if len(movable) == 1 else "ies", a.netrc))
+    if a.dry_run:
+        print("dry run: nothing was changed")
+        return 0
+    if not a.yes:
+        if not (sys.stdin.isatty() or a.prompt):
+            print("netrc-to-tickets: nothing was asked and nothing changed (say --yes, or run it at a terminal)", file=sys.stderr)
+            return 1
+        if input("go ahead? [y/N] ").strip().lower() not in ("y", "yes"):
+            print("nothing was changed")
+            return 0
+
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    if todo or retag:
+        b = backup(a.tickets, stamp)
+        out = []
+        for i, ln in enumerate(lines):
+            if i in retag:
+                rest = ln.strip()[len("*://"):]
+                out.extend("%s://%s" % (s, rest) for s in retag[i][0])
+            else:
+                out.append(ln)
+        if not lines:
+            out.append("# ~/.mu-tickets: scheme://user:pass@host[:port]  (user and pass percent-encoded; scheme * matches any)")  # allowlist secret  # allowlist secret
+        for e in todo:
+            out.extend(ticket_line(s, e) for s in e.schemes)
+        os.makedirs(os.path.dirname(os.path.abspath(a.tickets)), exist_ok=True)
+        write_private(a.tickets, "\n".join(out) + "\n")
+        _, back = read_tickets(a.tickets)
+        back = [t for t in back if t]
+        for e in todo:      # each one must read back with the same password before anything leaves the netrc  # allowlist secret
+            for s in e.schemes:
+                if not any(t["scheme"] == s and t["user"] == e.login and (t["host"] or "").lower() == e.out_host.lower()
+                           and t["pass"] == e.password for t in back):
+                    print("netrc-to-tickets: the ticket for %s did not read back; %s is untouched%s" %
+                          (e.label, a.netrc, (" (the tickets file is restored from %s)" % b) if b else ""), file=sys.stderr)
+                    if b:
+                        os.replace(b, a.tickets)
+                    else:
+                        os.unlink(a.tickets)
+                    return 1
+        print("tickets: %d added, %d re-tagged in %s%s" % (sum(len(e.schemes) for e in todo), len(retag), a.tickets,
+                                                          (" (backup %s)" % b) if b else ""))
+    if movable:
+        b = backup(a.netrc, stamp)
+        write_private(a.netrc, remove_spans(text, [(e.start, e.end) for e in movable]))
+        print("removed %d from %s (backup %s)" % (len(movable), a.netrc, b))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
