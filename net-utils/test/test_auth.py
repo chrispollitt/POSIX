@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Tests for auth, on a throwaway gpg home and vault in a temp directory (nothing real is read or changed).
 
-    python3 net-utils/test_auth.py
+    python3 net-utils/test/test_auth.py
 """
 import os
 import shutil
@@ -11,7 +11,8 @@ import tempfile
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-TOOL = os.path.join(HERE, "auth")
+TOOLS = os.path.dirname(HERE)   # net-utils, the folder above
+TOOL = os.path.join(TOOLS, "auth")
 
 NETRC = "# comment\nmachine cpvax login system password s3cr3t-vax\n"        # allowlist secret
 TICKETS = ("imaps://chris:pa%40ss%2Fword@cpbee.cmnet\n"                      # allowlist secret
@@ -29,7 +30,7 @@ class T(unittest.TestCase):
         cls.env = dict(os.environ, GNUPGHOME=cls.gh, AUTH_LOCAL="1", HOME=os.path.join(cls.d, "home"),
                        AUTH_VAULT=os.path.join(cls.d, "vault.gpg"), AUTH_GPG_ARGS="--pinentry-mode loopback --passphrase ''",
                        IDENTITY_FILE=os.path.join(cls.d, "identities"), IDENTITY_SYSTEM=os.path.join(cls.d, "none"),
-                       AUTH_PERSON="chris", PATH=HERE + os.pathsep + os.environ["PATH"])
+                       AUTH_PERSON="chris", PATH=TOOLS + os.pathsep + os.environ["PATH"])
         os.makedirs(cls.env["HOME"])
 
     @classmethod

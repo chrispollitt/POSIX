@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Tests for netrc-to-tickets, on throwaway files in a temp directory (nothing real is touched).
 
-    python3 net-utils/test_netrc_to_tickets.py
+    python3 net-utils/test/test_netrc_to_tickets.py
 """
 import os
 import stat
@@ -11,7 +11,8 @@ import tempfile
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-TOOL = os.path.join(HERE, "netrc-to-tickets")
+TOOLS = os.path.dirname(HERE)   # net-utils, the folder above
+TOOL = os.path.join(TOOLS, "netrc-to-tickets")
 
 NETRC = """# my logins
 machine cpbee login chris-pollitt password "irc pw 1"
@@ -218,7 +219,7 @@ class T(unittest.TestCase):
         self.run_tool("-y", "--map", "cpbee=imaps")
         import importlib.machinery
         import importlib.util
-        path = os.path.join(HERE, "..", "..", "TUIs", "tvmail", "backend", "tvmail-backend")
+        path = os.path.join(TOOLS, "..", "..", "TUIs", "tvmail", "backend", "tvmail-backend")
         if not os.path.exists(path):
             self.skipTest("tvmail not beside this repository")
         loader = importlib.machinery.SourceFileLoader("tvm", path)

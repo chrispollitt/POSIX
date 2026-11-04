@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Tests for identity, on throwaway files in a temp directory (nothing real is read or changed).
 
-    python3 net-utils/test_identity.py
+    python3 net-utils/test/test_identity.py
 """
 import os
 import shutil
@@ -11,7 +11,8 @@ import tempfile
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-TOOL = os.path.join(HERE, "identity")
+TOOLS = os.path.dirname(HERE)   # net-utils, the folder above
+TOOL = os.path.join(TOOLS, "identity")
 
 LIST = """# PERSON SCHEME@HOST LOGIN flags # why
 chris   imaps@cpbee        chris           # mail: the Unix and Dovecot user

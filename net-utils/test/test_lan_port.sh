@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #
 # test_lan_port.sh - tests for lan-port, against fixture lists and rulesets in a throwaway directory.
+# Usage: bash net-utils/test/test_lan_port.sh
 # Nothing outside it is touched: LAN_PORT_DIR, LAN_PORT_RULESET and LAN_PORT_ROUTER point into the sandbox,
 # SUDO is empty and there is no nft.  Runs anywhere bash does (Linux, macOS, Cygwin).
 #
@@ -8,7 +9,7 @@
 set -uo pipefail
 
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-LP="$here/lan-port"
+LP="$here/../lan-port"
 
 PASS=0; FAIL=0; CUR=""
 t()    { CUR="$*"; }
