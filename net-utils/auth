@@ -26,6 +26,13 @@ COMMANDS (answers on stdout, exit 1 when there is none)
   set SCHEME@HOST LOGIN [--kind K] [--note TEXT] [--stdin]
                                      store a secret: prompted without echo, or one line on stdin with --stdin  # allowlist secret
   remove SCHEME@HOST LOGIN
+  totp HOST [LOGIN] [--digits N]     the current 6-digit code (RFC 6238, 30 s) from the record of kind totp for that
+                                     host; computed on the server, only the code crosses; the last stdout line is
+                                     the code (what ssh-wwl wants from get2fa_code.py).  Store a seed:
+                                     auth set 2fa@HOST LOGIN --kind totp   (base32 text, as the site shows it)
+  import foo [FILE] [--key KEYFILE] [--lan NAME]... [--skip LABEL]... [-n]
+                                     take the entries of the old ~/.foo/bar password manager (decrypted with the  # allowlist secret
+                                     old ssh key, default ~/.ssh-OLD/id_rsa) into the vault, kept out of every file
   import netrc|tickets [FILE]        take the logins of ~/.netrc or ~/.mu-tickets into the vault (-n: plan only;
                                      the same login with another secret is reported and left alone)
   render tickets|netrc [--out FILE]  write the vault's passwords into the file (default ~/.mu-tickets, ~/.netrc)
@@ -58,7 +65,7 @@ GROUP = {"imap": "imap", "imaps": "imap", "smtp": "smtp", "smtps": "smtp", "subm
 NETRC_SCHEMES = ("ftp", "telnet")
 BEGIN, END = "# BEGIN auth (written by auth render; edit the vault, not this block)", "# END auth"
 URL = re.compile(r"^(?P<scheme>\*|[A-Za-z][\w+.-]*)://(?:(?P<user>[^:@/]*)(?::(?P<pw>[^@/]*))?@)?(?P<host>[^:/]+)(?::(?P<port>\d+))?")  # allowlist secret
-SPEC = re.compile(r"^(\*|[A-Za-z][\w+.-]*)@([^@\s]+)$")
+SPEC = re.compile(r"^(\*|[A-Za-z0-9][\w+.-]*)@([^@\s]+)$")
 
 
 class Err(Exception):
@@ -288,7 +295,7 @@ def from_foo(path, keyfile, lan, domain):
         host, what = label, ""
         if ":" in label and not label.startswith("["):
             host, _, what = label.rpartition(":")
-        kind = "totp" if what == "2fa" else "password"
+        kind = "password"
         scheme = FOO_SCHEME.get(what.lower(), what.lower() if what else "*")
         port = ":" + what if what.isdigit() else ""
         h = host.lower().rpartition("@")[2]                          # "whatwelo@localhost" is user@host
@@ -297,6 +304,26 @@ def from_foo(path, keyfile, lan, domain):
         found.append({"scheme": scheme, "host": h, "hostspec": h + port, "login": user, "kind": kind, "secret": secret,  # allowlist secret
                       "note": "from ~/.foo: %s" % label, "vaultonly": True, "label": label})
     return found, bad
+
+
+def totp_code(secret, now, digits=6, step=30):
+    """RFC 6238 (HMAC-SHA1, 30 s steps) from a base32 seed as authenticator apps and Google 2FA use; ValueError if not base32."""
+    import base64
+    import binascii
+    import hashlib
+    import hmac
+    import struct
+    s = re.sub(r"[\s-]", "", secret).upper().rstrip("=")
+    try:
+        key = base64.b32decode(s + "=" * (-len(s) % 8))
+    except (binascii.Error, ValueError):
+        raise ValueError("not base32")
+    if not key:
+        raise ValueError("empty")
+    mac = hmac.new(key, struct.pack(">Q", int(now) // step), hashlib.sha1).digest()
+    off = mac[-1] & 15
+    num = (struct.unpack(">I", mac[off:off + 4])[0] & 0x7FFFFFFF) % (10 ** digits)
+    return str(num).zfill(digits)
 
 
 def tickets_block(recs):
@@ -426,6 +453,7 @@ def main(argv=None):
     ap.add_argument("--stdin", action="store_true")
     ap.add_argument("--out")
     ap.add_argument("--key")
+    ap.add_argument("--digits", type=int, default=6)
     ap.add_argument("--lan", action="append")
     ap.add_argument("--skip", action="append")
     ap.add_argument("-n", "--dry-run", action="store_true")
@@ -481,7 +509,7 @@ def main(argv=None):
             return 0 if r.returncode == 0 else 4
 
         # ---- forwarded as they are
-        if cmd in ("get", "list") and not is_server():
+        if cmd in ("get", "list", "totp") and not is_server():
             rc, out = ssh([cmd] + args + (["--no-domain"] if a.no_domain else ["--domain", a.domain]))
             sys.stdout.write(out.decode("utf-8", errors="replace"))
             return rc
@@ -509,6 +537,25 @@ def main(argv=None):
                 return 1
             hits.sort(key=lambda r: scheme_of(r["scheme"]) != sch)           # the exact scheme before *
             print(hits[0]["secret"])
+            return 0
+
+        if cmd == "totp":
+            if len(args) not in (1, 2):
+                raise Err("totp HOST [LOGIN]", 2)
+            h = host_of(args[0], dom)
+            hits = [r for r in load_local() if r.get("kind") == "totp" and r["host"] == h and (len(args) < 2 or r["login"] == args[1])]
+            if len(hits) != 1:
+                if not hits:
+                    return 1
+                raise Err("which login? %s" % ", ".join(sorted(r["login"] for r in hits)))
+            try:
+                now = float(os.environ.get("AUTH_NOW") or time.time())
+                code = totp_code(hits[0]["secret"], now, a.digits)
+            except ValueError:
+                raise Err("the stored secret for %s %s is not a base32 TOTP seed" % (h, hits[0]["login"]))
+            print(code)
+            if sys.stderr.isatty():
+                print("(valid for %d more seconds)" % (30 - int(now) % 30), file=sys.stderr)
             return 0
 
         if cmd == "set":

@@ -170,7 +170,7 @@ class T(unittest.TestCase):
         rc, out, err = self.run_auth("import", "foo", foo, "--key", keyf, "-n")
         self.assertEqual(rc, 3, err)                                           # one entry would not decrypt
         self.assertIn("UNREADABLE  lost:web", out)
-        self.assertIn("would add  2fa@whatwelove.org whatwelo (totp)", out)
+        self.assertIn("would add  2fa@whatwelove.org whatwelo (password)", out)
         self.assertIn("would add  https@cmpi.cmnet Chris (password)", out)       # a LAN host gets the domain
         self.assertIn("would add  sudo@cmpi.cmnet root", out)
         self.assertIn("would add  *@mesh.cmnet mesh", out)
@@ -188,6 +188,27 @@ class T(unittest.TestCase):
         self.assertNotIn("cmpi", open(out_t).read())
         self.assertEqual(self.run_auth("import", "foo", foo, "--key", os.path.join(self.d, "nokey"))[0], 1)
 
+
+    def test_totp(self):
+        self.fresh()
+        seed = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"                    # RFC 6238 test key "12345678901234567890"
+        self.run_auth("set", "2fa@wwl.example", "me", "--kind", "totp", "--stdin", stdin="gezd gnbv-gy3t qojq gezd gnbv gy3t qojq" + chr(10))
+        for now, want in (("59", "287082"), ("1111111109", "081804"), ("1111111111", "050471"), ("20000000000", "353130")):
+            env = dict(self.env, AUTH_NOW=now)
+            rc, out, err = self.run_auth("totp", "wwl.example", env=env)
+            self.assertEqual((rc, out.strip()), (0, want), err)             # the RFC vectors, spaces and case in the seed ignored
+        self.assertEqual(self.run_auth("totp", "wwl.example", "me", env=dict(self.env, AUTH_NOW="59"))[1], "287082" + chr(10))
+        self.assertEqual(self.run_auth("totp", "wwl.example", "nobody")[0], 1)
+        self.assertEqual(self.run_auth("totp", "elsewhere.example")[0], 1)
+        self.run_auth("set", "2fa@bad.example", "x", "--kind", "totp", "--stdin", stdin="not base32 !" + chr(10))
+        rc, out, err = self.run_auth("totp", "bad.example")
+        self.assertEqual(rc, 1)
+        self.assertIn("not a base32", err)
+        self.assertNotIn("not base32 !", err)
+        self.run_auth("set", "2fa@wwl.example", "other", "--kind", "totp", "--stdin", stdin=seed + chr(10))
+        rc, _, err = self.run_auth("totp", "wwl.example")
+        self.assertEqual(rc, 1)
+        self.assertIn("which login", err)
 
     def test_render_dry_run_changes_nothing(self):
         self.fresh()
