@@ -8,7 +8,9 @@ THE VAULT   ~/.local/share/auth/vault.gpg on the server ($AUTH_VAULT), a GnuPG f
     named `auth-vault` ($AUTH_RECIPIENT) whose secret key has a passphrase.  Encrypting needs no passphrase,
     reading does: `auth unlock` (once, at a terminal) puts it in gpg-agent for its cache time, then scripts and
     `ssh cpbee auth get ...` work without being asked.  When it is locked a read says so and exits 4.
-    Each record: SCHEME@HOST + LOGIN -> secret, with a kind (password, totp ...) and a note.  Matching is as
+    Each record: SCHEME@HOST + LOGIN -> secret, with a kind (password, totp ...) and a note.  SCHEME may be a
+    comma list, `imaps,smtp@cpbee chris`: one secret for those schemes only (rendered as one ticket line each),
+    which is the exact-match alternative to a catch-all `*`.  Matching is as
     in `identity`: imap/imaps, smtp/smtps, irc/ircs, http/https are one scheme each; `*` is any scheme;
     a bare host gets the LAN domain (cmnet); a port is kept for rendering and ignored for matching.
 
@@ -65,13 +67,23 @@ GROUP = {"imap": "imap", "imaps": "imap", "smtp": "smtp", "smtps": "smtp", "subm
 NETRC_SCHEMES = ("ftp", "telnet")
 BEGIN, END = "# BEGIN auth (written by auth render; edit the vault, not this block)", "# END auth"
 URL = re.compile(r"^(?P<scheme>\*|[A-Za-z][\w+.-]*)://(?:(?P<user>[^:@/]*)(?::(?P<pw>[^@/]*))?@)?(?P<host>[^:/]+)(?::(?P<port>\d+))?")  # allowlist secret
-SPEC = re.compile(r"^(\*|[A-Za-z0-9][\w+.-]*)@([^@\s]+)$")
+SPEC = re.compile(r"^(\*|[A-Za-z0-9][\w+.-]*(?:,[A-Za-z0-9][\w+.-]*)*)@([^@\s]+)$")
 
 
 class Err(Exception):
     def __init__(self, msg, code=1):
         super().__init__(msg)
         self.code = code
+
+
+def sset(s):
+    """the normalized schemes of a record's scheme field: 'imaps,smtp' -> {imap, smtp}."""
+    return frozenset(scheme_of(x) for x in str(s).split(",") if x.strip())
+
+
+def schemes(r):
+    """the schemes of a record as written (one record may carry several, comma separated)."""
+    return [x.strip() for x in r["scheme"].split(",") if x.strip()]
 
 
 def scheme_of(s):
@@ -91,7 +103,7 @@ def split_spec(spec, domain):
     m = SPEC.match(spec or "")
     if not m:
         raise Err("SCHEME@HOST wanted, not %r" % spec, 2)
-    return scheme_of(m.group(1)), host_of(m.group(2), domain), m.group(2), m.group(1).lower()
+    return ",".join(sorted(sset(m.group(1)))), host_of(m.group(2), domain), m.group(2), m.group(1).lower()
 
 
 # ------------------------------------------------------------------ vault ---
@@ -175,12 +187,15 @@ class Vault:
 
 def find(recs, scheme, host, login=None):
     return [r for r in recs if r["host"] == host and (login is None or r["login"] == login)
-            and scheme_of(r["scheme"]) in (scheme, "*")]
+            and sset(r["scheme"]) & {scheme, "*"}]
 
 
 def exact(recs, scheme, host, login):
+    """the record for this login on this host: for one scheme, any record that carries it; for several (a comma
+    list), the record that carries exactly those."""
+    want = sset(scheme)
     for r in recs:
-        if scheme_of(r["scheme"]) == scheme and r["host"] == host and r["login"] == login:
+        if r["host"] == host and r["login"] == login and (sset(r["scheme"]) == want if len(want) > 1 else want <= sset(r["scheme"])):
             return r
     return None
 
@@ -336,8 +351,9 @@ def tickets_block(recs):
         h = r["host"]
         if h.count(".") == 1 and not h.replace(".", "").isdigit():     # cpbee.cmnet: also the bare name apps are configured with
             names.append(h.split(".")[0] + spec[len(h):])
-        for n in names:
-            lines.append("%s://%s:%s@%s" % (r["scheme"], quote(r["login"], safe=""), quote(r["secret"], safe=""), n))  # allowlist secret
+        for sch in schemes(r):
+            for n in names:
+                lines.append("%s://%s:%s@%s" % (sch, quote(r["login"], safe=""), quote(r["secret"], safe=""), n))  # allowlist secret
     return lines
 
 
@@ -355,18 +371,18 @@ def netrc_block(recs):
 
 def is_netrc_only(r):
     """a record from a netrc (scheme *) or for ftp/telnet belongs in the netrc, not in the tickets."""
-    return bool(r.get("netrc")) or scheme_of(r["scheme"]) in NETRC_SCHEMES
+    return bool(r.get("netrc")) or bool(sset(r["scheme"]) & set(NETRC_SCHEMES))
 
 
 def is_netrc(r):
     """netrc carries a record that came from a netrc, or one for a protocol only a netrc can name (ftp, telnet)."""
-    return bool(r.get("netrc")) or scheme_of(r["scheme"]) in NETRC_SCHEMES
+    return bool(r.get("netrc")) or bool(sset(r["scheme"]) & set(NETRC_SCHEMES))
 
 
 def covered(kind, recs, domain):
     """a predicate: is this line of the old file one the vault now writes (same scheme+host+login)?"""
     if kind == "tickets":
-        keys = {(scheme_of(r["scheme"]), r["host"], r["login"]) for r in recs}
+        keys = {(x, r["host"], r["login"]) for r in recs for x in sset(r["scheme"])}
     else:
         keys = {(r["host"], r["login"]) for r in recs}
 
@@ -516,9 +532,9 @@ def main(argv=None):
 
         if cmd == "list":
             recs = load_local()
-            want = split_spec(args[0], dom)[:2] if args else None
+            want = split_spec(args[0].partition(",")[0] + "@" + args[0].partition("@")[2] if "," in args[0] else args[0], dom)[:2] if args else None
             for r in sorted(recs, key=lambda r: (r["host"], r["scheme"], r["login"])):
-                if want is None or (r["host"] == want[1] and scheme_of(r["scheme"]) in (want[0], "*")):
+                if want is None or (r["host"] == want[1] and sset(r["scheme"]) & {want[0], "*"}):
                     print("%-10s %-28s %-18s %-9s %s" % (r["scheme"], r["host"], r["login"], r.get("kind", "password"), ("# " + r["note"]) if r.get("note") else ""))
             return 0
         if cmd == "get":
@@ -535,7 +551,7 @@ def main(argv=None):
                 hits = [r for r in hits if r["login"] == logins[0]]
             if not hits:
                 return 1
-            hits.sort(key=lambda r: scheme_of(r["scheme"]) != sch)           # the exact scheme before *
+            hits.sort(key=lambda r: sch not in sset(r["scheme"]))           # the exact scheme before *
             print(hits[0]["secret"])
             return 0
 
@@ -591,9 +607,14 @@ def main(argv=None):
             if not r:
                 print("nothing to remove")
                 return 0
-            recs.remove(r)
+            left = [x for x in schemes(r) if scheme_of(x) not in sset(sch)] if len(sset(sch)) == 1 else []
+            if left:
+                before, r["scheme"] = r["scheme"], ",".join(left)
+                print("removed %s from %s@%s %s; it stays for %s" % (sch, before, h, args[1], r["scheme"]))
+            else:
+                recs.remove(r)
+                print("removed %s@%s %s" % (sch, h, args[1]))
             v.save(recs)
-            print("removed %s@%s %s" % (sch, h, args[1]))
             return 0
 
         if cmd == "import" and args and args[0] == "foo":
@@ -691,10 +712,11 @@ def main(argv=None):
                 raise Err("`identity list` is not available here")
             idset = {(scheme_of(s), host_of(h, dom), l) for s, h, l in rows}
             findings = []
-            for r in sorted(recs, key=lambda r: (r["host"], r["scheme"], r["login"])):
+            flat = [dict(r, scheme=x) for r in recs for x in schemes(r)]
+            for r in sorted(flat, key=lambda r: (r["host"], r["scheme"], r["login"])):
                 if (scheme_of(r["scheme"]), r["host"], r["login"]) not in idset and ("*", r["host"], r["login"]) not in idset:
                     findings.append("NOIDENTITY  vault has %s@%s %s; identity does not list that login" % (r["scheme"], r["host"], r["login"]))
-            have = {(scheme_of(r["scheme"]), r["host"], r["login"]) for r in recs}
+            have = {(scheme_of(r["scheme"]), r["host"], r["login"]) for r in flat}
             for s, h, l in sorted(idset):
                 if not any(x[1] == h and x[2] == l and x[0] in (s, "*") for x in have):
                     findings.append("NOSECRET    identity lists %s@%s %s; the vault holds no secret for it" % (s, h, l))

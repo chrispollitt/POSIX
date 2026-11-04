@@ -254,6 +254,47 @@ class T(unittest.TestCase):
         self.assertNotIn("mail-pw", txt)
         self.assertIn("(unchanged)", self.run_auth("render", "netrc", "--out", f)[1])
 
+    def test_one_record_for_several_schemes(self):
+        self.fresh()
+        rc, out, err = self.run_auth("set", "imaps,smtp@cpbee", "chris", "--stdin", stdin="multi-pw\n")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("added imaps,smtp@cpbee.cmnet chris", out)
+        self.assertEqual(self.run_auth("get", "imaps", "cpbee", "chris")[1], "multi-pw\n")
+        self.assertEqual(self.run_auth("get", "smtp", "cpbee", "chris")[1], "multi-pw\n")
+        self.assertEqual(self.run_auth("get", "smtps", "cpbee", "chris")[1], "multi-pw\n")      # smtp == smtps
+        self.assertEqual(self.run_auth("get", "irc", "cpbee", "chris")[0], 1)                   # not a catch-all
+        self.assertEqual(self.run_auth("list")[1].count("chris"), 1)                            # one record
+        self.assertIn("changed", self.run_auth("set", "smtp,imaps@cpbee", "chris", "--stdin", stdin="two-pw\n")[1])
+        self.assertEqual(self.run_auth("get", "imaps", "cpbee", "chris")[1], "two-pw\n")        # same set, other order
+        f = self.put("tickets.multi", "")
+        self.run_auth("render", "tickets", "--out", f)
+        txt = open(f).read()
+        for line in ("imaps://chris:two-pw@cpbee.cmnet", "imaps://chris:two-pw@cpbee", "smtp://chris:two-pw@cpbee.cmnet",  # allowlist secret
+                     "smtp://chris:two-pw@cpbee"):  # allowlist secret
+            self.assertIn(line + "\n", txt)
+        self.assertNotIn("*://", txt)
+        # a ticket line for one scheme of it is what render replaces, not a second copy
+        g = self.put("tickets.multi2", "imaps://chris:old@cpbee\n")  # allowlist secret
+        self.assertIn("1 older line", self.run_auth("render", "tickets", "--out", g)[1])
+        # one scheme comes off, the record stays for the other
+        rc, out, _ = self.run_auth("remove", "smtp@cpbee", "chris")
+        self.assertIn("it stays for imaps", out)
+        self.assertEqual(self.run_auth("get", "smtp", "cpbee", "chris")[0], 1)
+        self.assertEqual(self.run_auth("get", "imaps", "cpbee", "chris")[1], "two-pw\n")
+        self.run_auth("remove", "imaps@cpbee", "chris")
+        self.assertEqual(self.run_auth("list")[1].strip(), "")
+
+    def test_check_sees_each_scheme_of_a_multi_scheme_record(self):
+        self.fresh()
+        self.run_auth("set", "imaps,smtp@cpbee", "chris", "--stdin", stdin="x\n")
+        self.put("../identities", "chris imaps@cpbee.cmnet chris\nchris smtp@cpbee.cmnet chris\n")
+        rc, out, _ = self.run_auth("check")
+        self.assertEqual(rc, 0, out)
+        self.put("../identities", "chris imaps@cpbee.cmnet chris\n")
+        rc, out, _ = self.run_auth("check")
+        self.assertEqual(rc, 3)
+        self.assertIn("NOIDENTITY  vault has smtp@cpbee.cmnet chris", out)
+
     def test_render_dry_run_changes_nothing(self):
         self.fresh()
         self.run_auth("set", "*@cpvax", "system", "--stdin", stdin="pw\n")
