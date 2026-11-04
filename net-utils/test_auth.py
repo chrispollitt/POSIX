@@ -210,6 +210,50 @@ class T(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn("which login", err)
 
+    def test_render_tickets_replaces_older_lines_and_adds_bare_names(self):
+        self.fresh()
+        self.run_auth("set", "imaps@cpbee", "chris", "--stdin", stdin="new-pw\n")
+        self.run_auth("set", "https@cpbee:5232", "chris", "--stdin", stdin="cal-pw\n")
+        self.run_auth("set", "imaps@192.168.10.1", "chris", "--stdin", stdin="ip-pw\n")
+        old = ("# mine\n" "imaps://old:keep@elsewhere\n" "imaps://chris:stale@cpbee.cmnet\n" "imaps://chris:stale2@cpbee\n")  # allowlist secret
+        f = self.put("tickets.bare", old)
+        rc, out, err = self.run_auth("render", "tickets", "--out", f)
+        self.assertEqual(rc, 0, err)
+        self.assertIn("2 older lines", out)                                       # both spellings of the same login
+        txt = open(f).read()
+        self.assertNotIn("stale", txt)
+        self.assertTrue(txt.startswith("# mine\nimaps://old:keep@elsewhere\n"))   # foreign lines stay, in place  # allowlist secret
+        for line in ("imaps://chris:new-pw@cpbee.cmnet", "imaps://chris:new-pw@cpbee",  # allowlist secret
+                     "https://chris:cal-pw@cpbee.cmnet:5232", "https://chris:cal-pw@cpbee:5232"):  # the port is kept  # allowlist secret
+            self.assertIn(line + "\n", txt)
+        self.assertEqual(txt.count("ip-pw"), 1)                                   # an IP address has no bare name
+        self.assertEqual(txt.count("BEGIN auth"), 1)
+        self.assertIn("(unchanged)", self.run_auth("render", "tickets", "--out", f)[1])
+
+    def test_render_netrc_has_no_markers_and_replaces_its_own_lines(self):
+        self.fresh()
+        self.run_auth("set", "ftp@cpvax", "system", "--stdin", stdin="vax-pw\n")
+        self.run_auth("set", "imaps@cpbee", "chris", "--stdin", stdin="mail-pw\n")
+        old = ("# machine <hostname> login <username> password <pw>\n" "\n"  # allowlist secret
+               "machine other login u password p\n"
+               "machine cpvax login system password stale\n"  # allowlist secret
+               "# BEGIN auth (written by auth render; edit the vault, not this block)\n"
+               "machine cpvax.cmnet login system password stale2\n" "# END auth\n")  # allowlist secret
+        f = self.put("netrc.bare", old)
+        rc, out, err = self.run_auth("render", "netrc", "--out", f)
+        self.assertEqual(rc, 0, err)
+        txt = open(f).read()
+        self.assertNotIn("BEGIN", txt)                                            # Mailutils reads # as a word
+        self.assertNotIn("END auth", txt)
+        self.assertNotIn("stale", txt)
+        self.assertIn("machine other login u password p\n", txt)                  # foreign entries stay
+        self.assertTrue(txt.startswith("# machine <hostname>"))
+        self.assertIn("machine cpvax.cmnet login system password vax-pw\n", txt)  # both names ftp scripts may type  # allowlist secret
+        self.assertIn("machine cpvax login system password vax-pw\n", txt)  # allowlist secret
+        self.assertNotIn("cpbee", txt)                                            # a mail login never goes in the netrc
+        self.assertNotIn("mail-pw", txt)
+        self.assertIn("(unchanged)", self.run_auth("render", "netrc", "--out", f)[1])
+
     def test_render_dry_run_changes_nothing(self):
         self.fresh()
         self.run_auth("set", "*@cpvax", "system", "--stdin", stdin="pw\n")
