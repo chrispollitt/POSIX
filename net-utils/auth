@@ -1,0 +1,555 @@
+#!/usr/bin/env python3
+"""auth - the LAN's one place for passwords: an encrypted vault on cpbee, asked from any machine over ssh.
+
+`identity` says WHO is who (logins, no secrets).  `auth` holds the SECRETS for those logins and writes out the
+old files (~/.netrc, ~/.mu-tickets) so every existing tool keeps working.  Phase 1 of the auth-manager.
+
+THE VAULT   ~/.local/share/auth/vault.gpg on the server ($AUTH_VAULT), a GnuPG file encrypted to a key
+    named `auth-vault` ($AUTH_RECIPIENT) whose secret key has a passphrase.  Encrypting needs no passphrase,
+    reading does: `auth unlock` (once, at a terminal) puts it in gpg-agent for its cache time, then scripts and
+    `ssh cpbee auth get ...` work without being asked.  When it is locked a read says so and exits 4.
+    Each record: SCHEME@HOST + LOGIN -> secret, with a kind (password, totp ...) and a note.  Matching is as
+    in `identity`: imap/imaps, smtp/smtps, irc/ircs, http/https are one scheme each; `*` is any scheme;
+    a bare host gets the LAN domain (cmnet); a port is kept for rendering and ignored for matching.
+
+WHERE IT RUNS   On the server itself (hostname $AUTH_HOST, default cpbee) every command works on the vault
+    directly.  Anywhere else the commands run over `ssh $AUTH_HOST auth ...`; nothing is stored on the client.
+    `get` and `list` are forwarded as they are (only the one answer crosses); `set`, `import` and `render`
+    fetch or send the whole record list over the same ssh.  Secrets are never put on a command line.
+
+COMMANDS (answers on stdout, exit 1 when there is none)
+  init                               create the key and an empty vault (asks for the passphrase) - on the server
+  unlock                             ask for the passphrase now; the agent keeps it (use ssh -t from a client)
+  list [SCHEME@HOST]                 records, no secrets
+  get SCHEME HOST [LOGIN]            the secret; LOGIN may be left out when `identity login $AUTH_PERSON ...`
+                                     (person default: $USER) or the vault itself knows only one
+  set SCHEME@HOST LOGIN [--kind K] [--note TEXT] [--stdin]
+                                     store a secret: prompted without echo, or one line on stdin with --stdin  # allowlist secret
+  remove SCHEME@HOST LOGIN
+  import netrc|tickets [FILE]        take the logins of ~/.netrc or ~/.mu-tickets into the vault (-n: plan only;
+                                     the same login with another secret is reported and left alone)
+  render tickets|netrc [--out FILE]  write the vault's passwords into the file (default ~/.mu-tickets, ~/.netrc)
+                                     between `# BEGIN auth` / `# END auth` lines; the rest of the file is not
+                                     touched except older lines for the same scheme+host+login, which the block
+                                     replaces; backed up first; mode 600; -n shows the plan without secrets.
+                                     netrc takes only records that came from a netrc, or are ftp or telnet.
+  check                              the vault against `identity`: records with no identity line, and the reverse
+                                     (never prints a secret); exit 3 when something is off
+
+Options: --domain D (default cmnet or $AUTH_DOMAIN)  --no-domain  -n/--dry-run  -h
+Exit: 0 ok, 1 none/refused, 2 usage, 3 findings, 4 vault locked or missing.
+"""
+import argparse
+import getpass
+import json
+import os
+import re
+import shlex
+import shutil
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+from urllib.parse import quote, unquote
+
+GROUP = {"imap": "imap", "imaps": "imap", "smtp": "smtp", "smtps": "smtp", "submission": "smtp", "irc": "irc",
+         "ircs": "irc", "http": "http", "https": "http", "caldav": "http", "caldavs": "http"}
+NETRC_SCHEMES = ("ftp", "telnet")
+BEGIN, END = "# BEGIN auth (written by auth render; edit the vault, not this block)", "# END auth"
+URL = re.compile(r"^(?P<scheme>\*|[A-Za-z][\w+.-]*)://(?:(?P<user>[^:@/]*)(?::(?P<pw>[^@/]*))?@)?(?P<host>[^:/]+)(?::(?P<port>\d+))?")  # allowlist secret
+SPEC = re.compile(r"^(\*|[A-Za-z][\w+.-]*)@([^@\s]+)$")
+
+
+class Err(Exception):
+    def __init__(self, msg, code=1):
+        super().__init__(msg)
+        self.code = code
+
+
+def scheme_of(s):
+    s = (s or "").lower()
+    return s if s == "*" else GROUP.get(s, s)
+
+
+def host_of(h, domain):
+    h = (h or "").strip().lower()
+    h = re.sub(r":\d+$", "", h) if h.count(":") == 1 else h
+    if domain and h and "." not in h and ":" not in h and h != "localhost" and not h.isdigit():
+        h = "%s.%s" % (h, domain.strip("."))
+    return h
+
+
+def split_spec(spec, domain):
+    m = SPEC.match(spec or "")
+    if not m:
+        raise Err("SCHEME@HOST wanted, not %r" % spec, 2)
+    return scheme_of(m.group(1)), host_of(m.group(2), domain), m.group(2), m.group(1).lower()
+
+
+# ------------------------------------------------------------------ vault ---
+def gpg_cmd(*args):
+    return ["gpg", "--batch", "--quiet"] + shlex.split(os.environ.get("AUTH_GPG_ARGS", "")) + list(args)
+
+
+def vault_path():
+    return os.environ.get("AUTH_VAULT") or os.path.expanduser("~/.local/share/auth/vault.gpg")
+
+
+def recipient():
+    return os.environ.get("AUTH_RECIPIENT", "auth-vault")
+
+
+def load_local():
+    p = vault_path()
+    if not os.path.exists(p):
+        raise Err("no vault at %s (auth init)" % p, 4)
+    r = subprocess.run(gpg_cmd("--decrypt", p), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if r.returncode:
+        raise Err("vault is locked or unreadable: run 'auth unlock' (%s)" % r.stderr.decode(errors="replace").strip()[-120:], 4)
+    return json.loads(r.stdout.decode("utf-8") or "[]")
+
+
+def backup(path):
+    if os.path.exists(path):
+        b, n = "%s.bak-%s" % (path, time.strftime("%Y%m%d-%H%M%S")), 0
+        while os.path.exists(b):
+            n += 1
+            b = "%s.bak-%s-%d" % (path, time.strftime("%Y%m%d-%H%M%S"), n)
+        shutil.copy2(path, b)
+        os.chmod(b, 0o600)
+
+
+def save_local(recs):
+    p = vault_path()
+    os.makedirs(os.path.dirname(os.path.abspath(p)), exist_ok=True)
+    tmp = "%s.tmp%d" % (p, os.getpid())
+    r = subprocess.run(gpg_cmd("--yes", "--trust-model", "always", "--encrypt", "--recipient", recipient(), "--output", tmp),
+                       input=json.dumps(recs, indent=1).encode("utf-8"), stderr=subprocess.PIPE)
+    if r.returncode:
+        raise Err("cannot encrypt to %s (auth init?): %s" % (recipient(), r.stderr.decode(errors="replace").strip()[-160:]), 4)
+    backup(p)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, p)
+
+
+def server():
+    return os.environ.get("AUTH_HOST", "cpbee")
+
+
+def is_server():
+    return os.environ.get("AUTH_LOCAL") == "1" or socket.gethostname().split(".")[0].lower() == server().split(".")[0].lower()
+
+
+def ssh(args, data=None, tty=False):
+    cmd = ["ssh"] + (["-t"] if tty else ["-o", "BatchMode=yes"]) + [server(), "auth"] + [shlex.quote(a) for a in args]
+    r = subprocess.run(cmd, input=data, stdout=None if tty else subprocess.PIPE)
+    return r.returncode, (r.stdout or b"")
+
+
+class Vault:
+    """The record list, wherever it lives."""
+
+    def load(self):
+        if is_server():
+            return load_local()
+        rc, out = ssh(["_export"])
+        if rc:
+            raise Err("ssh %s auth _export failed (exit %d; locked? run: ssh -t %s auth unlock)" % (server(), rc, server()), 4 if rc == 4 else 1)
+        return json.loads(out.decode("utf-8") or "[]")
+
+    def save(self, recs):
+        if is_server():
+            return save_local(recs)
+        rc, _ = ssh(["_save"], data=json.dumps(recs).encode("utf-8"))
+        if rc:
+            raise Err("ssh %s auth _save failed (exit %d)" % (server(), rc))
+
+
+def find(recs, scheme, host, login=None):
+    return [r for r in recs if r["host"] == host and (login is None or r["login"] == login)
+            and scheme_of(r["scheme"]) in (scheme, "*")]
+
+
+def exact(recs, scheme, host, login):
+    for r in recs:
+        if scheme_of(r["scheme"]) == scheme and r["host"] == host and r["login"] == login:
+            return r
+    return None
+
+
+# -------------------------------------------------------------- the files ---
+def read_text(p):
+    try:
+        with open(p, encoding="utf-8", errors="replace") as fh:
+            return fh.read()
+    except OSError:
+        return None
+
+
+def from_tickets(text, domain):
+    out = []
+    for ln in (text or "").splitlines():
+        ln = ln.strip()
+        m = URL.match(ln) if ln and not ln.startswith("#") else None
+        if m and m.group("user") and m.group("pw") is not None:
+            host = m.group("host") + (":" + m.group("port") if m.group("port") else "")
+            out.append({"scheme": unquote(m.group("scheme")).lower(), "host": host_of(m.group("host"), domain),
+                        "hostspec": host_of(m.group("host"), domain) + (":" + m.group("port") if m.group("port") else ""),
+                        "login": unquote(m.group("user")), "kind": "password", "secret": unquote(m.group("pw")), "note": "from ~/.mu-tickets"})
+    return out
+
+
+def from_netrc(text, domain):
+    toks = [x.strip('"') for ln in (text or "").splitlines() if not ln.lstrip().startswith("#") for x in ln.split()]
+    out, cur = [], None
+    for i, w in enumerate(toks + ["machine"]):
+        if w in ("machine", "default"):
+            if cur and cur.get("login") and cur.get("password") is not None:
+                h = host_of(cur["machine"], domain)
+                out.append({"scheme": "*", "host": h, "hostspec": h, "login": cur["login"], "kind": "password",
+                            "secret": cur["password"], "note": "from ~/.netrc", "netrc": True})
+            cur = {"machine": toks[i + 1]} if w == "machine" and i + 1 < len(toks) else None
+        elif cur is not None and w in ("login", "password", "account", "port") and i + 1 < len(toks):
+            cur[w] = toks[i + 1]
+    return out
+
+
+def tickets_block(recs):
+    lines = []
+    for r in sorted(recs, key=lambda r: (r["host"], r["scheme"], r["login"])):
+        if r.get("kind", "password") != "password" or is_netrc_only(r):
+            continue
+        spec = r.get("hostspec") or r["host"]
+        names = [spec]
+        h = r["host"]
+        if h.count(".") == 1 and not h.replace(".", "").isdigit():     # cpbee.cmnet: also the bare name apps are configured with
+            names.append(h.split(".")[0] + spec[len(h):])
+        for n in names:
+            lines.append("%s://%s:%s@%s" % (r["scheme"], quote(r["login"], safe=""), quote(r["secret"], safe=""), n))  # allowlist secret
+    return lines
+
+
+def netrc_block(recs):
+    """one line per name: the qualified host (cpvax.cmnet) and the bare one (cpvax) that ftp/telnet scripts type."""
+    out = []
+    for r in sorted(recs, key=lambda r: (r["host"], r["login"])):
+        if r.get("kind", "password") == "password" and is_netrc(r):
+            names = [r["host"]]
+            if "." in r["host"] and not r["host"].replace(".", "").isdigit() and r["host"].count(".") == 1:
+                names.append(r["host"].split(".")[0])
+            out += ["machine %s login %s password %s" % (n, r["login"], r["secret"]) for n in names]
+    return out
+
+
+def is_netrc_only(r):
+    """a record from a netrc (scheme *) or for ftp/telnet belongs in the netrc, not in the tickets."""
+    return bool(r.get("netrc")) or scheme_of(r["scheme"]) in NETRC_SCHEMES
+
+
+def is_netrc(r):
+    """netrc carries a record that came from a netrc, or one for a protocol only a netrc can name (ftp, telnet)."""
+    return bool(r.get("netrc")) or scheme_of(r["scheme"]) in NETRC_SCHEMES
+
+
+def covered(kind, recs, domain):
+    """a predicate: is this line of the old file one the vault now writes (same scheme+host+login)?"""
+    if kind == "tickets":
+        keys = {(scheme_of(r["scheme"]), r["host"], r["login"]) for r in recs}
+    else:
+        keys = {(r["host"], r["login"]) for r in recs}
+
+    def test(ln):
+        s = ln.strip()
+        if kind == "tickets":
+            m = URL.match(s) if s and not s.startswith("#") else None
+            return bool(m and m.group("user") and m.group("pw") is not None and
+                        (scheme_of(unquote(m.group("scheme"))), host_of(m.group("host"), domain), unquote(m.group("user"))) in keys)
+        f = s.split()
+        return len(f) >= 6 and f[0] == "machine" and f[2] == "login" and f[4] == "password" and len(f) == 6 \
+            and (host_of(f[1], domain), f[3]) in keys
+    return test
+
+
+def splice(old, block, drop=None, markers=True):
+    """old text with the auth block replaced (or appended); lines `drop` accepts (now in the block) are removed;
+    everything else untouched."""
+    lines = (old or "").splitlines()
+    if not markers:
+        # a file whose reader takes no comments (Mailutils' netrc reads `#` as a word): no marker lines;
+        # an old marked block is removed, covered lines are dropped, the block goes last.
+        if BEGIN in lines and END in lines[lines.index(BEGIN):] or any(x.startswith("# machine-BEGIN") for x in lines):
+            i = next(n for n, x in enumerate(lines) if x == BEGIN or x.startswith("# machine-BEGIN") or x.startswith("#BEGIN auth"))
+            j = lines.index(END, i)
+            del lines[i:j + 1]
+        lines = [x for x in lines if not (drop and drop(x))]
+        while lines and not lines[-1].strip():
+            lines.pop()
+        if block:
+            lines += [""] + block if lines else block
+        return "\n".join(lines) + "\n"
+    if drop:
+        i = lines.index(BEGIN) if BEGIN in lines else len(lines)
+        j = lines.index(END, i) if BEGIN in lines and END in lines[i:] else i - 1
+        lines = [x for n, x in enumerate(lines) if not (drop(x) and not i <= n <= j)]
+    new = [BEGIN] + block + [END]
+    if BEGIN in lines and END in lines[lines.index(BEGIN):]:
+        i = lines.index(BEGIN)
+        j = lines.index(END, i)
+        lines[i:j + 1] = new
+    else:
+        if lines and lines[-1].strip():
+            lines.append("")
+        lines += new
+    return "\n".join(lines) + "\n"
+
+
+# --------------------------------------------------------------- identity ---
+def identity_login(scheme, host):
+    person = os.environ.get("AUTH_PERSON") or os.environ.get("USER") or getpass.getuser()
+    try:
+        r = subprocess.run(["identity", "login", person, scheme, host], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    except OSError:
+        return None
+    return r.stdout.decode().strip() if r.returncode == 0 and r.stdout.strip() else None
+
+
+def identity_rows():
+    try:
+        r = subprocess.run(["identity", "list"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    except OSError:
+        return None
+    if r.returncode:
+        return None
+    rows = []
+    for ln in r.stdout.decode().splitlines():
+        f = ln.partition("#")[0].split()
+        if len(f) >= 3 and "@" in f[1]:
+            s, _, h = f[1].partition("@")
+            rows.append((s, h, f[2]))
+    return rows
+
+
+# ------------------------------------------------------------------- main ---
+def main(argv=None):
+    ap = argparse.ArgumentParser(prog="auth", add_help=False)
+    ap.add_argument("cmd", nargs="?")
+    ap.add_argument("args", nargs="*")
+    ap.add_argument("--domain", default=os.environ.get("AUTH_DOMAIN", "cmnet"))
+    ap.add_argument("--no-domain", action="store_true")
+    ap.add_argument("--kind", default="password")
+    ap.add_argument("--note", default="")
+    ap.add_argument("--stdin", action="store_true")
+    ap.add_argument("--out")
+    ap.add_argument("-n", "--dry-run", action="store_true")
+    ap.add_argument("-h", "--help", action="store_true")
+    try:
+        a, rest = ap.parse_known_args(argv)
+    except SystemExit:
+        return 2
+    if a.help or not a.cmd:
+        print(__doc__.strip())
+        return 0
+    if rest:
+        print("auth: unknown option %s" % rest[0], file=sys.stderr)
+        return 2
+    dom = None if a.no_domain else a.domain
+    cmd, args = a.cmd, a.args
+    v = Vault()
+    try:
+        # ---- on the server only
+        if cmd in ("init", "unlock", "_export", "_save") and not is_server():
+            if cmd == "unlock":
+                return ssh(["unlock"], tty=True)[0]
+            if cmd == "init":
+                return ssh(["init"], tty=True)[0]
+            raise Err("%s is for the server" % cmd, 2)
+        if cmd == "_export":
+            json.dump(load_local(), sys.stdout)
+            return 0
+        if cmd == "_save":
+            save_local(json.load(sys.stdin))
+            return 0
+        if cmd == "init":
+            if os.path.exists(vault_path()):
+                print("vault exists: %s" % vault_path())
+                return 0
+            have = subprocess.run(gpg_cmd("--list-keys", recipient()), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+            if not have:
+                print("creating the key %s: choose a passphrase (this is what `auth unlock` asks)" % recipient())
+                r = subprocess.run(["gpg", "--batch" if os.environ.get("AUTH_GPG_ARGS") else "--yes"]
+                                   + shlex.split(os.environ.get("AUTH_GPG_ARGS", ""))
+                                   + ["--quick-gen-key", "%s <auth@%s>" % (recipient(), socket.gethostname()), "default", "default", "never"])
+                if r.returncode:
+                    raise Err("key creation failed", 4)
+            save_local([])
+            print("vault created: %s   (back up the secret key: gpg --export-secret-keys --armor %s)" % (vault_path(), recipient()))
+            return 0
+        if cmd == "unlock":
+            p = vault_path()
+            if not os.path.exists(p):
+                raise Err("no vault at %s (auth init)" % p, 4)
+            r = subprocess.run(["gpg", "--decrypt", "--output", os.devnull] + shlex.split(os.environ.get("AUTH_GPG_ARGS", "")) + [p])
+            print("unlocked" if r.returncode == 0 else "not unlocked")
+            return 0 if r.returncode == 0 else 4
+
+        # ---- forwarded as they are
+        if cmd in ("get", "list") and not is_server():
+            rc, out = ssh([cmd] + args + (["--no-domain"] if a.no_domain else ["--domain", a.domain]))
+            sys.stdout.write(out.decode("utf-8", errors="replace"))
+            return rc
+
+        if cmd == "list":
+            recs = load_local()
+            want = split_spec(args[0], dom)[:2] if args else None
+            for r in sorted(recs, key=lambda r: (r["host"], r["scheme"], r["login"])):
+                if want is None or (r["host"] == want[1] and scheme_of(r["scheme"]) in (want[0], "*")):
+                    print("%-10s %-28s %-18s %-9s %s" % (r["scheme"], r["host"], r["login"], r.get("kind", "password"), ("# " + r["note"]) if r.get("note") else ""))
+            return 0
+        if cmd == "get":
+            if len(args) not in (2, 3):
+                raise Err("get SCHEME HOST [LOGIN]", 2)
+            sch, h = scheme_of(args[0]), host_of(args[1], dom)
+            recs = load_local()
+            login = args[2] if len(args) == 3 else identity_login(args[0], args[1])
+            hits = find(recs, sch, h, login)
+            if login is None:
+                logins = sorted({r["login"] for r in hits})
+                if len(logins) != 1:
+                    raise Err("which login? %s" % (", ".join(logins) if logins else "none stored for %s@%s" % (sch, h)))
+                hits = [r for r in hits if r["login"] == logins[0]]
+            if not hits:
+                return 1
+            hits.sort(key=lambda r: scheme_of(r["scheme"]) != sch)           # the exact scheme before *
+            print(hits[0]["secret"])
+            return 0
+
+        if cmd == "set":
+            if len(args) != 2:
+                raise Err("set SCHEME@HOST LOGIN [--kind K] [--note TEXT] [--stdin]", 2)
+            sch, h, spec_host, raw = split_spec(args[0], dom)
+            if a.stdin:
+                secret = sys.stdin.readline().rstrip("\r\n")
+            else:
+                secret = getpass.getpass("secret for %s@%s %s: " % (sch, h, args[1]))
+                if getpass.getpass("again: ") != secret:
+                    raise Err("the two did not match")
+            if not secret:
+                raise Err("empty secret refused")
+            recs = v.load()
+            r = exact(recs, sch, h, args[1])
+            port = re.search(r":(\d+)$", spec_host)
+            rec = {"scheme": raw, "host": h, "hostspec": h + (":" + port.group(1) if port else ""), "login": args[1],
+                   "kind": a.kind, "secret": secret, "note": a.note or (r or {}).get("note", "")}  # allowlist secret
+            if r:
+                recs[recs.index(r)] = rec
+            else:
+                recs.append(rec)
+            v.save(recs)
+            print("%s %s@%s %s" % ("changed" if r else "added", raw, h, args[1]))
+            return 0
+        if cmd == "remove":
+            if len(args) != 2:
+                raise Err("remove SCHEME@HOST LOGIN", 2)
+            sch, h, _, _raw = split_spec(args[0], dom)
+            recs = v.load()
+            r = exact(recs, sch, h, args[1])
+            if not r:
+                print("nothing to remove")
+                return 0
+            recs.remove(r)
+            v.save(recs)
+            print("removed %s@%s %s" % (sch, h, args[1]))
+            return 0
+
+        if cmd == "import":
+            if not args or args[0] not in ("netrc", "tickets"):
+                raise Err("import netrc|tickets [FILE]", 2)
+            path = args[1] if len(args) > 1 else os.path.expanduser("~/.netrc" if args[0] == "netrc" else "~/.mu-tickets")
+            text = read_text(path)
+            if text is None:
+                raise Err("cannot read %s" % path)
+            if BEGIN in text:                                   # our own block is not a source
+                lines = text.splitlines()
+                i = lines.index(BEGIN)
+                j = lines.index(END, i) if END in lines[i:] else len(lines) - 1
+                text = "\n".join(lines[:i] + lines[j + 1:])
+            found = (from_netrc if args[0] == "netrc" else from_tickets)(text, dom)
+            recs = v.load()
+            add = same = clash = 0
+            for f in found:
+                have = exact(recs, scheme_of(f["scheme"]), f["host"], f["login"])
+                if have is None:
+                    add += 1
+                    print("%s  %s@%s %s" % ("would add" if a.dry_run else "add", f["scheme"], f["host"], f["login"]))
+                    recs.append(f)
+                elif have["secret"] == f["secret"]:
+                    same += 1
+                    if f.get("netrc") and not have.get("netrc"):          # remember it came from a netrc
+                        have["netrc"] = True
+                        add += 1
+                else:
+                    clash += 1
+                    print("DIFFERS  %s@%s %s: the vault holds another secret; left alone" % (f["scheme"], f["host"], f["login"]))
+            if add and not a.dry_run:
+                v.save(recs)
+            print("%d to add, %d already there, %d differ" % (add, same, clash))
+            return 3 if clash else 0
+
+        if cmd == "render":
+            if not args or args[0] not in ("tickets", "netrc"):
+                raise Err("render tickets|netrc [--out FILE]", 2)
+            path = a.out or os.path.expanduser("~/.mu-tickets" if args[0] == "tickets" else "~/.netrc")
+            allrecs = v.load()
+            block = (tickets_block if args[0] == "tickets" else netrc_block)(allrecs)
+            old = read_text(path)
+            used = [r for r in allrecs if r.get("kind", "password") == "password" and
+                    (is_netrc(r) if args[0] == "netrc" else not is_netrc_only(r))]
+            drop = covered(args[0], used, dom)
+            new = splice(old, block, drop, markers=(args[0] == "tickets"))
+            gone = sum(1 for x in (old or "").splitlines() if drop(x))
+            print("%s: %d line%s in the auth block%s%s" % (path, len(block), "" if len(block) == 1 else "s",
+                                                           ", %d older line%s of the same logins replaced by it" % (gone, "" if gone == 1 else "s") if gone else "",
+                                                           " (unchanged)" if new == old else ""))
+            if a.dry_run or new == old:
+                return 0
+            backup(path) if old is not None else None
+            tmp = "%s.tmp%d" % (path, os.getpid())
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(new)
+            os.replace(tmp, path)
+            os.chmod(path, 0o600)
+            return 0
+
+        if cmd == "check":
+            recs = v.load()
+            rows = identity_rows()
+            if rows is None:
+                raise Err("`identity list` is not available here")
+            idset = {(scheme_of(s), host_of(h, dom), l) for s, h, l in rows}
+            findings = []
+            for r in sorted(recs, key=lambda r: (r["host"], r["scheme"], r["login"])):
+                if (scheme_of(r["scheme"]), r["host"], r["login"]) not in idset and ("*", r["host"], r["login"]) not in idset:
+                    findings.append("NOIDENTITY  vault has %s@%s %s; identity does not list that login" % (r["scheme"], r["host"], r["login"]))
+            have = {(scheme_of(r["scheme"]), r["host"], r["login"]) for r in recs}
+            for s, h, l in sorted(idset):
+                if not any(x[1] == h and x[2] == l and x[0] in (s, "*") for x in have):
+                    findings.append("NOSECRET    identity lists %s@%s %s; the vault holds no secret for it" % (s, h, l))
+            print("vault: %d record%s; identity: %d line%s" % (len(recs), "" if len(recs) == 1 else "s", len(rows), "" if len(rows) == 1 else "s"))
+            for f in findings:
+                print(f)
+            print("%d finding%s" % (len(findings), "" if len(findings) == 1 else "s"))
+            return 3 if findings else 0
+
+        raise Err("unknown command %r (auth --help)" % cmd, 2)
+    except Err as e:
+        print("auth: %s" % e, file=sys.stderr)
+        return e.code
+    except json.JSONDecodeError as e:
+        print("auth: bad data: %s" % e, file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
