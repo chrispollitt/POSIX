@@ -215,6 +215,90 @@ def from_netrc(text, domain):
     return out
 
 
+# ----------------------------------------------------------- ~/.foo/bar ---
+# The old password manager (Foo_Bar.php and its bash, C, JS, Perl, Python wrappers).  One line per entry:  # allowlist secret
+#     USER <TAB> BASE64(AES-256-CBC) <TAB> LABEL        LABEL = HOST or HOST:WHAT   (web, sudo, 2fa, 465 ...)
+# key and IV: six chained SHA-256 rounds over (the bytes of ~/.ssh-OLD/id_rsa + LABEL): key = bytes 0-31, IV = 32-47.
+# The text is padded by hand (control characters) and again by OpenSSL; both are taken off.
+DEFAULT_LAN = ("cpbee", "cpvax", "cmpi", "cmlaptop", "mesh")
+FOO_SCHEME = {"web": "https", "sftp": "sftp", "sudo": "sudo", "mysql": "mysql", "pg": "postgres", "cpanel": "https",
+              "465": "smtps", "587": "smtp", "2fa": "2fa"}
+
+
+def foo_key_iv(password, label):
+    import hashlib
+    data = password + label.encode("utf-8")
+    h = hashlib.sha256(data).digest()
+    out = h
+    for _ in range(5):
+        h = hashlib.sha256(h + data).digest()
+        out += h
+    return out[:32], out[32:48]
+
+
+def foo_decrypt(b64, password, label):
+    """the clear text, or None.  Uses `openssl enc` (the key is on its command line for a moment: this machine only)."""
+    import base64
+    import binascii
+    try:
+        raw = base64.b64decode(b64, validate=True)
+    except (binascii.Error, ValueError):
+        return None
+    if not raw or len(raw) % 16:
+        return None
+    key, iv = foo_key_iv(password, label)
+    r = subprocess.run(["openssl", "enc", "-d", "-aes-256-cbc", "-nopad", "-K", key.hex(), "-iv", iv.hex()],
+                       input=raw, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    if r.returncode or not r.stdout:
+        return None
+    clear = r.stdout
+    n = clear[-1]
+    if 1 <= n <= 16 and clear.endswith(bytes([n]) * n):             # OpenSSL's padding
+        clear = clear[:-n]
+    else:
+        return None
+    clear = clear.rstrip(bytes(range(32)))                          # the hand-made padding
+    try:
+        text = clear.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    return text if text and text.isprintable() else None
+
+
+def from_foo(path, keyfile, lan, domain):
+    """records from ~/.foo/bar: (found, labels that did not decrypt).  Each is vaultonly: never rendered to a file."""
+    try:
+        with open(keyfile, "rb") as fh:
+            password = fh.read()
+    except OSError as e:
+        raise Err("cannot read the key file %s (%s); --key FILE" % (keyfile, e.strerror))
+    text = read_text(path)
+    if text is None:
+        raise Err("cannot read %s" % path)
+    found, bad = [], []
+    for ln in text.splitlines():
+        f = ln.split("\t")
+        if len(f) != 3 or not f[2]:
+            continue
+        user, enc, label = f
+        secret = foo_decrypt(enc, password, label)
+        if secret is None:
+            bad.append(label)
+            continue
+        host, what = label, ""
+        if ":" in label and not label.startswith("["):
+            host, _, what = label.rpartition(":")
+        kind = "totp" if what == "2fa" else "password"
+        scheme = FOO_SCHEME.get(what.lower(), what.lower() if what else "*")
+        port = ":" + what if what.isdigit() else ""
+        h = host.lower().rpartition("@")[2]                          # "whatwelo@localhost" is user@host
+        if h in lan:
+            h = host_of(h, domain)
+        found.append({"scheme": scheme, "host": h, "hostspec": h + port, "login": user, "kind": kind, "secret": secret,  # allowlist secret
+                      "note": "from ~/.foo: %s" % label, "vaultonly": True, "label": label})
+    return found, bad
+
+
 def tickets_block(recs):
     lines = []
     for r in sorted(recs, key=lambda r: (r["host"], r["scheme"], r["login"])):
@@ -341,6 +425,9 @@ def main(argv=None):
     ap.add_argument("--note", default="")
     ap.add_argument("--stdin", action="store_true")
     ap.add_argument("--out")
+    ap.add_argument("--key")
+    ap.add_argument("--lan", action="append")
+    ap.add_argument("--skip", action="append")
     ap.add_argument("-n", "--dry-run", action="store_true")
     ap.add_argument("-h", "--help", action="store_true")
     try:
@@ -462,9 +549,37 @@ def main(argv=None):
             print("removed %s@%s %s" % (sch, h, args[1]))
             return 0
 
+        if cmd == "import" and args and args[0] == "foo":
+            path = args[1] if len(args) > 1 else os.path.expanduser("~/.foo/bar")
+            keyfile = a.key or os.path.expanduser("~/.ssh-OLD/id_rsa")
+            lan = set(x.lower() for x in (a.lan if a.lan is not None else DEFAULT_LAN))
+            found, bad = from_foo(path, keyfile, lan, dom)
+            recs = v.load()
+            add = same = clash = 0
+            for f in found:
+                if any(x.lower() in (f["label"].lower(), f["host"]) for x in (a.skip or [])):
+                    print("skip  %s" % f["label"])
+                    continue
+                have = exact(recs, scheme_of(f["scheme"]), f["host"], f["login"])
+                where = "%s@%s %s (%s)" % (f["scheme"], f["host"], f["login"], f["kind"])
+                if have is None:
+                    add += 1
+                    print("%s  %s   <- %s" % ("would add" if a.dry_run else "add", where, f["label"]))
+                    recs.append({k: f[k] for k in f if k != "label"})
+                elif have["secret"] == f["secret"]:
+                    same += 1
+                else:
+                    clash += 1
+                    print("DIFFERS  %s: the vault holds another secret; left alone" % where)
+            for label in bad:
+                print("UNREADABLE  %s: did not decrypt with %s" % (label, keyfile))
+            if add and not a.dry_run:
+                v.save(recs)
+            print("%d to add, %d already there, %d differ, %d unreadable" % (add, same, clash, len(bad)))
+            return 3 if clash or bad else 0
         if cmd == "import":
             if not args or args[0] not in ("netrc", "tickets"):
-                raise Err("import netrc|tickets [FILE]", 2)
+                raise Err("import netrc|tickets|foo [FILE]", 2)
             path = args[1] if len(args) > 1 else os.path.expanduser("~/.netrc" if args[0] == "netrc" else "~/.mu-tickets")
             text = read_text(path)
             if text is None:
@@ -500,7 +615,7 @@ def main(argv=None):
             if not args or args[0] not in ("tickets", "netrc"):
                 raise Err("render tickets|netrc [--out FILE]", 2)
             path = a.out or os.path.expanduser("~/.mu-tickets" if args[0] == "tickets" else "~/.netrc")
-            allrecs = v.load()
+            allrecs = [r for r in v.load() if not r.get("vaultonly")]       # imported from ~/.foo: never written to a file
             block = (tickets_block if args[0] == "tickets" else netrc_block)(allrecs)
             old = read_text(path)
             used = [r for r in allrecs if r.get("kind", "password") == "password" and

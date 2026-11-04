@@ -138,6 +138,57 @@ class T(unittest.TestCase):
         self.assertIn("machine cpvax.cmnet login system password s3cr3t-vax", txt)  # allowlist secret
         self.assertNotIn("cpbee", txt)
 
+    def _foo_line(self, user, secret, label, password):
+        """an entry as Foo_Bar.php writes it: hand padding, then OpenSSL's, base64."""
+        import base64
+        import hashlib
+        data = password + label.encode()
+        h = hashlib.sha256(data).digest()
+        out = h
+        for _ in range(5):
+            h = hashlib.sha256(h + data).digest()
+            out += h
+        key, iv = out[:32], out[32:48]
+        pad = 16 - (len(secret) % 16)
+        ct = secret.encode() + bytes([pad]) * pad
+        r = subprocess.run(["openssl", "enc", "-aes-256-cbc", "-K", key.hex(), "-iv", iv.hex()], input=ct,
+                           stdout=subprocess.PIPE, check=True)
+        return "%s\t%s\t%s" % (user, base64.b64encode(r.stdout).decode(), label)
+
+    def test_import_foo(self):
+        self.fresh()
+        pw = b"-----BEGIN RSA PRIVATE KEY-----\nnot a real key\n"  # allowlist secret
+        keyf = os.path.join(self.env["HOME"], "oldkey")
+        with open(keyf, "wb") as fh:
+            fh.write(pw)
+        lines = [self._foo_line("whatwelo", "t0tp-seed", "whatwelove.org:2fa", pw),
+                 self._foo_line("Chris", "pw with space & 16chars!", "cmpi:web", pw),
+                 self._foo_line("root", "x", "cmpi:sudo", pw),
+                 self._foo_line("mesh", "m", "mesh", pw),
+                 self._foo_line("bad", "zzz", "lost:web", b"another key")]
+        foo = self.put("bar", "\n".join(lines) + "\n")
+        rc, out, err = self.run_auth("import", "foo", foo, "--key", keyf, "-n")
+        self.assertEqual(rc, 3, err)                                           # one entry would not decrypt
+        self.assertIn("UNREADABLE  lost:web", out)
+        self.assertIn("would add  2fa@whatwelove.org whatwelo (totp)", out)
+        self.assertIn("would add  https@cmpi.cmnet Chris (password)", out)       # a LAN host gets the domain
+        self.assertIn("would add  sudo@cmpi.cmnet root", out)
+        self.assertIn("would add  *@mesh.cmnet mesh", out)
+        for s in ("t0tp-seed", "pw with space"):
+            self.assertNotIn(s, out)
+        self.assertEqual(self.run_auth("list")[1].strip(), "")                  # -n changed nothing
+        self.run_auth("import", "foo", foo, "--key", keyf, "--skip", "cmpi:sudo")
+        self.assertEqual(self.run_auth("get", "https", "cmpi", "Chris")[1], "pw with space & 16chars!\n")
+        self.assertEqual(self.run_auth("get", "2fa", "whatwelove.org", "whatwelo")[1], "t0tp-seed\n")
+        self.assertEqual(self.run_auth("get", "sudo", "cmpi", "root")[0], 1)    # skipped
+        self.assertIn("0 to add, 3 already", self.run_auth("import", "foo", foo, "--key", keyf, "--skip", "cmpi:sudo")[1])
+        # imported entries are for the vault only: render never writes them to a file
+        out_t = self.put("tickets.foo", "")
+        self.run_auth("render", "tickets", "--out", out_t)
+        self.assertNotIn("cmpi", open(out_t).read())
+        self.assertEqual(self.run_auth("import", "foo", foo, "--key", os.path.join(self.d, "nokey"))[0], 1)
+
+
     def test_render_dry_run_changes_nothing(self):
         self.fresh()
         self.run_auth("set", "*@cpvax", "system", "--stdin", stdin="pw\n")
