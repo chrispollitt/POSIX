@@ -1,0 +1,79 @@
+net-utils TO-DO  (written 2026-11-04)
+=====================================
+
+Where things stand
+  identity  who-is-who list of logins (no secrets); phase 1 done, list active (~/.config/identities).
+  auth      password vault on cpbee (gpg), live: tickets/netrc/foo imported, `auth totp`, multi-scheme records
+            (imap,imaps,smtp,smtps@cpbee), `render tickets|netrc`.  ssh-wwl logs in with it.
+  Both are committed on main (latest 1d5ddc2).  NOTHING IS PUSHED.
+
+Soon
+  [ ] auth check: it reports 33 findings (was 7 before the multi-scheme change).  Find out why (maybe
+      `identity list` output now has more lines, or the comma schemes); fix the check or the lists.
+  [ ] ssh-wwl (~/bin/ssh-wwl line 7): `getcode` points at DUMMY_CMD.py, a test setting.  Put back
+      /home/chris/bin/get2fa_code.py as the fallback, or leave it to rely on the vault alone (your call).
+  [ ] Push the commits in POSIX when you are happy (git push).
+  [ ] Delta Chat (tvchat [account:delta_chris], port 587, user chris) is the real user of the smtp:// ticket:
+      look at it once in tvchat and see that it still connects.  (tvmail sends on port 25 with no login.)
+  [ ] Test an outgoing mail from cmlaptop to an OUTSIDE address: the new lan-canonical rule should make the
+      sender chris@cpbee.cmnet (then the generic map makes it cwp+chris@u-l.ca) and clear u-l.ca's sender check.
+  [ ] If wanted: `auth smtp-test` (login only on port 587, pinned cert, no mail sent) in the repo; the throw-away
+      version proved the ticket works on 2026-11-04 (235 Authentication successful).
+
+Phase 2 leftovers (auth)
+  [ ] `auth ca`: hand out cpbee's CA file (~/.config/tvchat/cpbee-ca.pem, ~/.config/tvcal/cpbee-ca.pem) to every
+      machine that needs it, so nobody copies it by hand.  Note port 587 presents its own self-signed cert
+      (CN=cpbee.cmnet), not that CA.
+  [ ] ssh keys: `auth ssh-check` to list which key opens which host (id_rsa, id_ed25519_github, id_rsa.pub.ppk,
+      the old ~/.ssh/OLD).  Keys stay on the machines; the vault does not store private keys.
+  [ ] git credential helper that asks `auth get`.
+  [ ] Retire the old stores once you trust the vault: ~/.foo/bar and the Foo_Bar.* code (bash, C, js, perl, php,
+      python), ~/.ssh-OLD/id_rsa (it is the key that decrypts ~/.foo), bin/get2fa_code.py and bin/.2fa/tokens.json.
+      Until then `auth import foo` re-adds the placeholder entry `host` (use --skip host).
+  [ ] Confirm the old plaintext backups are gone: ~/.mu-tickets.bak-*, ~/.netrc.bak-* (TO_BE_RUN script
+      remove-old-backups.sh, rm -i).
+
+identity (the who-is-who list; `identity check` gives 0 findings, 3 notes on 2026-11-04)
+  Original plan was 4 phases; phase 1 (list, commands, check) is done.
+  [x] phase 2, netrc-to-tickets taking logins from the list: not needed, `auth import/render` replaced it.
+  [ ] phase 3: Floyd's admins / invite_from / contact and tvchat's [people] table derived from the list.
+  [ ] phase 4: the setup scripts use it (see Phase 3 below for the same scripts calling `auth render`).
+  [ ] master copy: root-owned /etc/identities on cpbee (it drives privilege: who may command Floyd).
+  [ ] audit gaps: Live Helper Chat user "floyd", joy's login in floyd.conf, the `floyd` calendar login are not in
+      the list yet (so `identity check` cannot see them).  Use --floyd-conf with a copy of cpbee's floyd.conf.
+  [ ] ~/.config/identities still has a "DRAFT for review ... rename when it is right" header; the file is live,
+      so drop that line (and the "Not listed on purpose" notes at the bottom, now settled: the netrc
+      chris@cpbee.cmnet login is gone).
+  [ ] the 3 notes (chris = chris/chris-pollitt/chris@cpbee.cmnet on cpbee, cpollitt/system on the VAX, Floyd's
+      four names): see "Decisions" about unifying or only recording them.
+  [ ] `auth check` says `*@cpvax.cmnet cpollitt` has no vault secret: add one (auth set) or drop the line.
+  [ ] idea: `identity check` could also read the vault's record list (auth list) so one command audits both.
+
+Phase 3 (the tools use auth and identity instead of their own copies)
+  [ ] tvmail, tvchat, tvcal, Floyd: ask `auth get` / `identity login` (today they read ~/.mu-tickets, ~/.netrc and
+      their own confs).
+  [ ] Floyd's passwords (floyd.conf on cpbee) into the vault; Floyd's admins / invite_from / contact and tvchat's
+      [people] table derived from `identity`.
+  [ ] identity list: add the lhc user "floyd", joy's login, and the `floyd` calendar login (identity add floyd
+      http@cpbee.cmnet floyd --why ...); `auth check` then has something real to compare.
+  [ ] Setup scripts (mail-setup, chat-setup ...) call `auth render` instead of writing tickets their own way.
+  [ ] A root-owned master list /etc/identities on cpbee (it drives privilege), read by the clients over ssh.
+  [ ] netrc-to-tickets: superseded by `auth import` + `auth render`; retire it once nothing calls it.
+
+Decisions still yours
+  [ ] Unify the logins (chris on mail/calendar, chris-pollitt on IRC, cpollitt on the VAX) or only record them.
+  [ ] `*@cpbee.cmnet chris admin` in ~/.config/identities: keep as the admin line, or move the flag onto
+      explicit scheme lines (the vault no longer has a catch-all; this only affects identity).
+  [ ] Whether tvmail should send on 587 WITH a login (then the ticket is used) or keep port 25 on the LAN.
+
+Later / ideas
+  [ ] Phase 4 (optional): a small SSH CA so keys expire instead of living forever.
+  [ ] Postfix on cpbee warns "smtp_use_tls will be removed; specify smtp_tls_security_level" (/etc/postfix/main.cf).
+  [ ] Vault passphrase is cached 8 h (max 24) in gpg-agent on cpbee: shorter if cpbee is ever shared.
+
+Facts worth remembering
+  - Mailutils reads `#` in a netrc as a word, so the rendered ~/.netrc has no marker comment lines; the tickets
+    file may keep them.
+  - tvmail asks for imap://, so the vault record carries imap, imaps, smtp and smtps; each is rendered under
+    cpbee.cmnet and bare cpbee.
+  - The vault's secret key is backed up off-site (done by Chris, 2026-11-04).
