@@ -23,6 +23,7 @@ param(
     [int]    $Port,
     [string] $VmOptions = (Join-Path $env:APPDATA 'BiglyBT\java.vmoptions'),
     [string] $Exe       = 'C:\Program Files\BiglyBT\BiglyBT.exe',
+    [string] $DescUrl,      # router's UPnP description URL, e.g. http://192.168.10.1:5000/rootDesc.xml (skips discovery)
     [switch] $CleanupOnExit
 )
 
@@ -55,12 +56,30 @@ Say "this PC is $ip, gateway $($route.NextHop)"
 $upnpc = Get-Command upnpc.exe -ErrorAction SilentlyContinue
 $added = @()
 
+function Upnpc([string[]]$a) {
+    # native stderr must not trip $ErrorActionPreference = 'Stop'
+    $old = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { (& $upnpc.Source @a 2>&1 | ForEach-Object { "$_" }) -join "`n" } finally { $ErrorActionPreference = $old }
+}
+
 if ($upnpc) {
-    foreach ($p in $Protos) {
-        & $upnpc.Source -e $Desc -a $ip $Port $Port $p 2>&1 | ForEach-Object { Write-Verbose $_ }
-        # some routers answer the post-add check with an error although the mapping exists; judge by the list
-        $listed = & $upnpc.Source -l 2>&1 | Select-String -SimpleMatch "$p" | Select-String -Pattern "\b$Port->$ip"
-        if ($listed) { Say "$Port/$p forwarded to $ip (upnpc)"; $added += $p } else { Say "WARNING: $Port/$p not in the router's list" }
+    # Multicast discovery picks the wrong adapter on a PC with many virtual ones: bind it to our LAN address (-m),
+    # and if the router still isn't found, go straight to its description URL (miniupnpd: gateway:5000/rootDesc.xml).
+    $base = @('-m', $ip)
+    if ($DescUrl) { $base = @('-u', $DescUrl) }
+    elseif ((Upnpc ($base + '-l')) -notmatch 'Found valid IGD') {
+        $base = @('-u', "http://$($route.NextHop):5000/rootDesc.xml")
+        Say "SSDP found nothing, trying $($base[1])"
+    }
+    if ((Upnpc ($base + '-l')) -notmatch 'Found valid IGD') {
+        Say 'WARNING: no UPnP router answered.  Starting BiglyBT anyway.'
+    } else {
+        foreach ($p in $Protos) {
+            [void](Upnpc ($base + @('-e', $Desc, '-a', $ip, "$Port", "$Port", $p)))
+            # some routers answer the post-add check with an error although the mapping exists; judge by the list
+            $listed = (Upnpc ($base + '-l')) -split "`n" | Where-Object { $_ -match "\b$p\s+$Port->$([regex]::Escape($ip)):" }
+            if ($listed) { Say "$Port/$p forwarded to $ip (upnpc)"; $added += $p } else { Say "WARNING: $Port/$p not in the router's list" }
+        }
     }
 } else {
     try {
@@ -89,7 +108,7 @@ if ($CleanupOnExit) {
     Start-Process -FilePath $Exe -Wait
     foreach ($p in $added) {
         try {
-            if ($upnpc) { & $upnpc.Source -d $Port $p | Out-Null } else { $map.Remove($Port, $p) }
+            if ($upnpc) { [void](Upnpc ($base + @('-d', "$Port", $p))) } else { $map.Remove($Port, $p) }
             Say "removed $Port/$p"
         } catch { Say "could not remove $Port/${p}: $($_.Exception.Message)" }
     }
