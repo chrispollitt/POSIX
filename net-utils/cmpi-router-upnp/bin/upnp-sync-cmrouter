@@ -1,0 +1,82 @@
+#!/bin/bash
+# upnp-sync-cmrouter: make the upstream router (cmrouter, the default gateway on wan0) forward the same ports that
+# cpbee's own UPnP server (miniupnpd, for the LAN) has opened, so a LAN client's UPnP request really reaches the internet.
+#
+#   LAN client --UPnP--> cpbee miniupnpd: wan0:PORT -> client:PORT        (nftables DNAT on cpbee)
+#   this script  --UPnP--> cmrouter:      its WAN:PORT -> cpbee wan0:PORT  (same port number on both)
+#
+# Reads miniupnpd's lease file (PROTO:eport:iaddr:iport:expiry:description), adds what is missing on the upstream
+# router, deletes what it added before and is no longer wanted.  Run by upnp-sync-cmrouter.path (when the lease file
+# changes) and upnp-sync-cmrouter.timer (refresh: mappings are leased for an hour).  Installed by `setup-router.sh upnp`.
+# If the upstream router has no UPnP (or it is switched off) this says so and exits 0: cpbee's own side still works.
+#
+#   upnp-sync-cmrouter            sync now
+#   upnp-sync-cmrouter status     print what the upstream router holds for us
+#   upnp-sync-cmrouter clear      delete everything we put on the upstream router
+#
+# Environment (for tests): UPNP_LEASES, UPNP_STATE, UPNP_WAN (wan0), UPNP_UPNPC (upnpc), UPNP_LEASE_SECS (3600)
+set -u
+
+LEASES=${UPNP_LEASES:-/var/lib/miniupnpd/upnp.leases}
+STATE=${UPNP_STATE:-/var/lib/miniupnpd/cmrouter.mapped}      # "tcp 13415" lines: what we put on the upstream router
+WAN=${UPNP_WAN:-wan0}
+UPNPC=${UPNP_UPNPC:-upnpc}
+SECS=${UPNP_LEASE_SECS:-3600}
+say() { echo "upnp-sync-cmrouter: $*"; }
+
+exec 9>"${STATE}.lock" && flock -w 60 9 || { say "busy"; exit 0; }
+
+wanip=$(ip -4 -o addr show dev "$WAN" 2>/dev/null | awk '{ sub("/.*", "", $4); print $4; exit }')
+gw=$(ip -4 route show default dev "$WAN" 2>/dev/null | awk '{ print $3; exit }')
+[ -n "$wanip" ] && [ -n "$gw" ] || { say "$WAN has no address or default route: nothing to do"; exit 0; }
+
+touch "$STATE"
+now=$(date +%s)
+want=$(awk -F: -v now="$now" '$1 ~ /^(TCP|UDP)$/ && ($5 == 0 || $5 > now) { print tolower($1), $2 }' "$LEASES" 2>/dev/null | sort -u)
+have=$(sort -u "$STATE")
+cmd=${1:-sync}
+
+# the root description URL of the IGD on the default gateway (one discovery per run, not one per port)
+desc=
+find_igd() {
+  desc=$("$UPNPC" -m "$wanip" -l 2>/dev/null | awk -v gw="$gw" '$1 == "desc:" && index($2, "//" gw ":") { print $2; exit }')
+  [ -n "$desc" ] || { say "no UPnP router answered at $gw on $WAN (is UPnP on in its settings?)"; return 1; }
+}
+
+case $cmd in
+  status)
+    find_igd || exit 0
+    "$UPNPC" -u "$desc" -l 2>/dev/null | awk -v ip="$wanip" '$0 ~ ip' ;;
+
+  clear) want= ;&          # same as sync with nothing wanted
+
+  sync)
+    if [ -z "$want$have" ]; then exit 0; fi
+    find_igd || exit 0
+    new=
+    # add / refresh everything wanted
+    while read -r proto port; do
+      [ -n "$port" ] || continue
+      out=$("$UPNPC" -u "$desc" -e "cpbee (LAN UPnP)" -a "$wanip" "$port" "$port" "$proto" "$SECS" 2>&1)
+      # success = upnpc says "is redirected".  cmrouter (Telus) answers 714 to the check upnpc makes right after adding, though the
+      # mapping is there, so that alone is not a refusal; a failed AddPortMapping is.
+      if grep -q "is redirected to internal" <<<"$out" ||
+         { ! grep -q "AddPortMapping.*failed" <<<"$out" && grep -q "GetSpecificPortMappingEntry.*714" <<<"$out"; }; then
+        new+="$proto $port"$'\n'
+        grep -qx "$proto $port" <<<"$have" || say "$gw now forwards $port/$proto to $wanip"
+      else
+        say "$gw refused $port/$proto: $(grep -i -m1 "fail\|error" <<<"$out" || echo "$out" | tail -1)"
+      fi
+    done <<<"$want"
+    # delete what we added earlier and nobody wants now
+    while read -r proto port; do
+      [ -n "$port" ] || continue
+      grep -qx "$proto $port" <<<"$want" && continue
+      out=$("$UPNPC" -u "$desc" -d "$port" "$proto" 2>&1)
+      if [ $? -eq 0 ] || grep -q "714\|NoSuchEntry" <<<"$out"; then say "$gw no longer forwards $port/$proto"
+      else new+="$proto $port"$'\n'; say "could not remove $port/$proto from $gw: $(tail -1 <<<"$out")"; fi
+    done <<<"$have"
+    printf '%s' "$new" | sort -u > "$STATE" ;;
+
+  *) say "usage: upnp-sync-cmrouter [sync|status|clear]"; exit 2 ;;
+esac

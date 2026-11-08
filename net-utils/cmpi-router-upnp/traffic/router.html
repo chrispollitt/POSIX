@@ -1,0 +1,299 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cpbee router</title>
+<style>
+:root {
+  color-scheme: light dark;
+  --page: #f9f9f7;  --surface: #fcfcfb;
+  --ink: #0b0b0b;   --ink2: #52514e;   --muted: #898781;
+  --grid: #e1e0d9;  --axis: #c3c2b7;   --border: rgba(11,11,11,.10);
+  --down: #2a78d6;  --up: #eb6834;     --ghost: rgba(11,11,11,.06);
+  --ok: #1a7f4b;    --warn: #b87503;   --crit: #d03b3b;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --page: #0d0d0d;  --surface: #1a1a19;
+    --ink: #ffffff;   --ink2: #c3c2b7;
+    --grid: #2c2c2a;  --axis: #383835;   --border: rgba(255,255,255,.10);
+    --down: #3987e5;  --up: #d95926;     --ghost: rgba(255,255,255,.08);
+    --ok: #3fb27f;    --warn: #fab219;   --crit: #e55b5b;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--page); color: var(--ink); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+.wrap { max-width: 1040px; margin: 0 auto; padding: 20px 16px 48px; }
+header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
+h1 { margin: 0; font-size: 20px; font-weight: 600; }
+h2 { margin: 0; font-size: 16px; font-weight: 600; }
+h3 { margin: 16px 0 4px; font-size: 13px; font-weight: 600; color: var(--ink2); }
+.sub { color: var(--ink2); font-size: 13px; }
+a { color: var(--down); }
+nav { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: var(--surface); }
+nav a { color: var(--ink2); text-decoration: none; padding: 6px 12px; border-right: 1px solid var(--border); }
+nav a:last-child { border-right: 0; }
+nav a:hover { background: var(--ghost); }
+nav a[aria-current="page"] { color: var(--ink); font-weight: 600; background: var(--ghost); box-shadow: inset 0 -2px 0 var(--ink); }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 16px 16px 12px; margin-bottom: 16px; }
+.card-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; flex-wrap: wrap; margin-bottom: 8px; }
+.tiles { display: flex; gap: 28px; flex-wrap: wrap; }
+.tile .lbl { color: var(--ink2); font-size: 12px; }
+.tile .val { font-size: 22px; font-weight: 600; line-height: 1.2; }
+.tile .val small { font-size: 13px; font-weight: 400; color: var(--ink2); }
+.tile .aux { font-size: 12px; color: var(--muted); }
+dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 20px; margin: 8px 0 0; }
+dt { color: var(--ink2); }
+dd { margin: 0; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.two { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 0 32px; }
+table { border-collapse: collapse; width: 100%; }
+th, td { padding: 6px 10px; text-align: left; border-bottom: 1px solid var(--grid); font-variant-numeric: tabular-nums; vertical-align: top; }
+th { font-weight: 500; color: var(--ink2); font-size: 12px; }
+td.r, th.r { text-align: right; }
+tbody tr:last-child td { border-bottom: 0; }
+.scroll { overflow-x: auto; }
+.ip, .mac { color: var(--muted); font-size: 12px; }
+.pill { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; font-size: 13px; }
+.dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); flex: none; }
+.pill.ok .dot { background: var(--ok); } .pill.ok { color: var(--ok); }
+.pill.warn .dot { background: var(--warn); } .pill.warn { color: var(--warn); }
+.pill.bad .dot { background: var(--crit); } .pill.bad { color: var(--crit); }
+.pill.off { color: var(--muted); font-weight: 500; }
+.note { color: var(--muted); font-size: 12px; margin-top: 8px; }
+.down { color: var(--down); } .up { color: var(--up); }
+.tag { font-size: 11px; color: var(--ink2); border: 1px solid var(--border); border-radius: 4px; padding: 0 5px; margin-left: 6px; white-space: nowrap; }
+ul.plain { margin: 6px 0 0; padding-left: 18px; }
+.diag { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 8px; }
+select, input[type=text], button { font: inherit; color: var(--ink); background: var(--surface); border: 1px solid var(--axis); border-radius: 8px; padding: 6px 10px; }
+input[type=text] { flex: 1 1 220px; min-width: 0; }
+button { cursor: pointer; }
+button:hover:not(:disabled) { background: var(--ghost); }
+button:disabled { opacity: .55; cursor: default; }
+button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px solid var(--ink); outline-offset: 1px; }
+pre { margin: 10px 0 0; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--page); overflow: auto; max-height: 340px; font: 12.5px/1.45 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; }
+.hidden { display: none; }
+@media (max-width: 560px) { .tile .val { font-size: 19px; } .tiles { gap: 16px; } dl { grid-template-columns: 1fr; gap: 0; } dt { margin-top: 6px; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1 id="title">Router</h1>
+    <nav aria-label="Pages"><a href="/">Traffic</a><a href="/router" aria-current="page">Router</a></nav>
+    <div class="sub" id="status">connecting…</div>
+  </header>
+
+  <section class="card" id="summary" aria-live="polite"><div class="tiles" id="tiles"></div></section>
+
+  <section class="card" id="wan"></section>
+  <section class="card" id="lan"></section>
+  <section class="card" id="others"></section>
+  <section class="card hidden" id="phonecard"></section>
+  <section class="card" id="fw"></section>
+
+  <section class="card" id="diag">
+    <h2>Diagnostics</h2>
+    <div class="sub">Run a test from the router itself. Nothing here changes any setting.</div>
+    <form class="diag" id="diagform">
+      <select id="tool" aria-label="Test">
+        <option value="ping">Ping</option>
+        <option value="traceroute">Traceroute</option>
+        <option value="lookup">Name lookup</option>
+        <option value="internet">Internet check</option>
+      </select>
+      <input type="text" id="target" value="example.com" autocomplete="off" spellcheck="false" aria-label="Host name or IP address" maxlength="253">
+      <button type="submit" id="run">Run</button>
+    </form>
+    <pre id="out" class="hidden" aria-live="polite"></pre>
+    <div class="note">Only one test runs at a time. Ping and traceroute send a handful of small packets; the internet check opens two short TCP connections (a few hundred bytes), which matters only on a metered link.</div>
+  </section>
+
+  <section class="card" id="sys"></section>
+</div>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+function el(tag, attrs, ...kids) {
+  const e = document.createElement(tag);
+  for (const k in (attrs || {})) { if (k === "class") e.className = attrs[k]; else e.setAttribute(k, attrs[k]); }
+  for (const c of kids) e.append(c instanceof Node ? c : document.createTextNode(String(c)));
+  return e;
+}
+const T = (s) => document.createTextNode(s);
+function rate(Bps) {                      // bytes/s -> bits/s text
+  if (Bps == null) return "–";
+  const b = Bps * 8;
+  if (b >= 1e9) return (b / 1e9).toFixed(2) + " Gbit/s";
+  if (b >= 1e6) return (b / 1e6).toFixed(b >= 1e8 ? 0 : 1) + " Mbit/s";
+  if (b >= 1e3) return (b / 1e3).toFixed(0) + " kbit/s";
+  return b.toFixed(0) + " bit/s";
+}
+function bytes(b) {
+  if (b == null) return "–";
+  const u = ["B", "kB", "MB", "GB", "TB"]; let i = 0;
+  while (b >= 1000 && i < u.length - 1) { b /= 1000; i++; }
+  return (i === 0 ? b.toFixed(0) : b >= 100 ? b.toFixed(0) : b.toFixed(1)) + " " + u[i];
+}
+function dur(s) {
+  if (s == null) return "–";
+  const d = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600), m = Math.floor(s % 3600 / 60);
+  return d ? `${d} d ${h} h` : h ? `${h} h ${m} min` : `${m} min`;
+}
+function leaseText(s) {
+  if (s == null) return "no expiry";
+  const d = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600), m = Math.floor(s % 3600 / 60);
+  return d ? `${d} d ${h} h left` : h ? `${h} h ${m} min left` : `${m} min left`;
+}
+function pill(kind, text) { return el("span", { class: "pill " + kind }, el("i", { class: "dot" }), text); }
+function tile(lbl, val, aux) {
+  return el("div", { class: "tile" }, el("div", { class: "lbl" }, lbl), el("div", { class: "val" }, ...(Array.isArray(val) ? val : [val])), el("div", { class: "aux" }, aux || ""));
+}
+function kv(rows) {
+  const dl = el("dl");
+  for (const [k, v] of rows) { if (v == null || v === "") continue; dl.append(el("dt", {}, k), el("dd", {}, v instanceof Node ? v : String(v))); }
+  return dl;
+}
+function fill(sec, ...kids) { sec.replaceChildren(...kids); }
+function linkText(l) {
+  if (!l.present) return "not present";
+  if (!l.carrier) return "no cable / no link";
+  return (l.speed_mbit ? (l.speed_mbit >= 1000 ? l.speed_mbit / 1000 + " Gbit/s" : l.speed_mbit + " Mbit/s") : "up") + (l.duplex ? ", " + l.duplex + " duplex" : "");
+}
+function busText(l) {
+  const bus = { usb: "USB Ethernet adapter", pci: "built-in Ethernet", wifi: "Wi-Fi", virtual: "virtual" }[l.bus] || l.bus;
+  return l.driver ? `${bus} (driver ${l.driver})` : bus;
+}
+function addrText(l) { return (l.addrs || []).map(a => `${a.ip}/${a.prefix}`).join(", "); }
+
+function render(d) {
+  document.title = d.host + " router";
+  $("title").textContent = d.host + " router";
+  const w = d.wan, devs = d.devices;
+  const act = devs.filter(x => x.active === true).length, known = devs.filter(x => x.active != null).length;
+
+  /* ---- summary tiles ---- */
+  let wanState = !w.present ? ["bad", "No adapter"] : !w.carrier ? ["bad", "No cable"] : !w.addrs.length ? ["warn", "No address"] : !w.default_route ? ["warn", "No route"] : ["ok", "Connected"];
+  fill($("tiles"),
+    tile("Internet link", [pill(wanState[0], wanState[1])], w.present ? `${linkText(w)}${w.rate ? " · " + rate(w.rate[0]) + " down, " + rate(w.rate[1]) + " up" : ""}` : "wan0 not found"),
+    tile("Devices", [String(act), el("small", {}, known ? ` of ${known} active` : " checking…")], `${devs.length} known on the home network`),
+    tile("Up for", dur(d.system.up_s), d.system.load ? "load " + d.system.load.join(" ") : ""),
+    tile("Building Wi-Fi", [d.vr180.present && d.vr180.wifi && d.vr180.wifi.connected ? pill("ok", "Joined") : pill("bad", "Not joined")],
+      d.vr180.wifi && d.vr180.wifi.connected ? `${d.vr180.wifi.ssid || ""}${d.vr180.wifi.signal_dbm ? " · " + d.vr180.wifi.signal_dbm + " dBm" : ""}` : ""));
+
+  /* ---- WAN ---- */
+  const wk = [["Status", pill(wanState[0], wanState[1])]];
+  if (w.present) wk.push(["Interface", `wan0 · ${busText(w)}`], ["Link", linkText(w)], ["Connection type", w.method], ["IP address", addrText(w)],
+    ["Gateway", w.gateway], ["DNS servers", (w.dns || []).join(", ")],
+    ["Address lease", w.addrs[0] && w.addrs[0].dynamic ? leaseText(w.addrs[0].lease_s) : ""],
+    ["MAC address", w.mac], ["Current traffic", w.rate ? `${rate(w.rate[0])} down · ${rate(w.rate[1])} up` : ""]);
+  const wanBody = el("div", {}, kv(wk));
+  if (w.present && w.behind_nat) wanBody.append(el("div", { class: "note" }, "This address is private: the upstream device (the old Telus router) does its own NAT, so the internet sees that router's address, not this one. That is expected until the final cutover."));
+  if (!w.present) wanBody.append(el("div", { class: "note" }, "No WAN adapter is present. Check the USB adapter and its connector; `lsusb` on the router should list it."));
+  fill($("wan"), el("div", { class: "card-head" }, el("h2", {}, "Internet (WAN)"), el("a", { href: "/" }, "usage graphs →")), wanBody);
+
+  /* ---- LAN + devices ---- */
+  const l = d.lan;
+  const lk = [["Interface", `lan0 · ${busText(l)}`], ["Link", linkText(l)], ["Router address", addrText(l)],
+    ["DHCP pool", l.dhcp ? `${l.dhcp.from} – ${l.dhcp.to}${l.dhcp.lease ? " (leases " + l.dhcp.lease + ")" : ""}` : ""],
+    ["Current traffic", l.rate ? `${rate(l.rate[0])} to clients · ${rate(l.rate[1])} from clients` : ""]];
+  const tb = el("tbody");
+  for (const x of devs) {
+    const st = x.active == null ? pill("off", "checking…") : x.active ? pill("ok", "Active") : pill("off", "Inactive");
+    const lease = x.kind === "reserved" ? el("span", { class: "tag" }, "reserved") : x.kind === "dynamic" ? el("span", { class: "tag" }, "dynamic") : el("span", { class: "tag" }, x.kind);
+    const exp = x.expires ? leaseText(Math.max(0, x.expires - d.now)) : x.kind === "reserved" ? "fixed" : "";
+    tb.append(el("tr", {},
+      el("td", {}, x.name || "(unnamed)", lease, el("div", { class: "mac" }, x.mac || "")),
+      el("td", {}, x.ip), el("td", {}, st), el("td", {}, exp),
+      el("td", { class: "r" }, x.today ? el("span", {}, el("span", { class: "down" }, "↓ " + bytes(x.today.down)), T("  "), el("span", { class: "up" }, "↑ " + bytes(x.today.up))) : "–")));
+  }
+  const tbl = el("div", { class: "scroll" }, el("table", {}, el("thead", {}, el("tr", {}, ...["Device", "Address", "Status", "Lease"].map(h => el("th", {}, h)), el("th", { class: "r" }, "Internet today"))), tb));
+  fill($("lan"), el("div", { class: "card-head" }, el("h2", {}, "Home network (LAN)"), el("div", { class: "sub" }, d.devices_checked_at ? `devices checked ${Math.max(0, Math.round(d.now - d.devices_checked_at))} s ago, every ${d.sweep_s} s` : "devices not checked yet")),
+    kv(lk), el("h3", {}, `Devices (${devs.length})`), devs.length ? tbl : el("div", { class: "note" }, "No devices known yet."),
+    el("div", { class: "note" }, "Active = answers a ping or an ARP check. Devices behind the unmanaged switch are listed individually, but the switch's own ports and their speeds cannot be seen from here. Today's internet usage counts WAN traffic only."));
+
+  /* ---- other networks ---- */
+  const v = d.vr180, ox = el("div", { class: "two" });
+  const vk = [["Interface", v.present ? `vr180 · ${busText(v)}` : "not present"]];
+  if (v.present) {
+    const wf = v.wifi;
+    vk.push(["Wi-Fi network", wf && wf.connected ? `${wf.ssid || "?"}${wf.freq_mhz ? " · " + (wf.freq_mhz / 1000).toFixed(1) + " GHz" : ""}` : wf ? "not connected" : "(install iw for details)"],
+      ["Signal", wf && wf.signal_dbm ? `${wf.signal_dbm} dBm${wf.bitrate ? " · " + wf.bitrate : ""}` : ""],
+      ["IP address", addrText(v)], ["Internet via this link", v.default_route ? pill("warn", "yes (unexpected)") : "no (by design)"],
+      ["Current traffic", v.rate ? `${rate(v.rate[0])} down · ${rate(v.rate[1])} up` : ""]);
+  }
+  const vh = d.others.filter(o => o.net === "vr180"), xh = d.others.filter(o => o.net === "vax");
+  const hostList = (arr) => arr.length ? el("ul", { class: "plain" }, ...arr.map(o => el("li", {}, o.name, T(" "), el("span", { class: "ip" }, o.ip), T("  "), o.active == null ? pill("off", "checking…") : o.active ? pill("ok", "Active") : pill("off", "Inactive")))) : el("div", { class: "note" }, "none");
+  ox.append(el("div", {}, el("h3", {}, "Building network (VR180)"), kv(vk), el("h3", {}, "Hosts"), hostList(vh)),
+    el("div", {}, el("h3", {}, "VAX network (vaxtap)"), kv([["Interface", d.vax.present ? `vaxtap · ${d.vax.addrs.length ? addrText(d.vax) : ""}` : "not present"],
+      ["Tap link", d.vax.present ? (d.vax.carrier ? "up (the VAX is running)" : "down (the VAX is stopped; it starts by hand)") : ""]]), el("h3", {}, "Hosts"), hostList(xh)));
+  fill($("others"), el("h2", {}, "Other networks"), ox);
+
+  /* ---- phone (only when the phone is configured as a counter source) ---- */
+  const ph = d.phone, pc = $("phonecard");
+  if (ph && ph.enabled) {
+    pc.classList.remove("hidden");
+    const age = ph.last_ok ? Math.max(0, Math.round(d.now - ph.last_ok)) : null;
+    const pill_ = ph.connected ? pill("ok", "Connected") : pill("bad", "Not reachable");
+    fill(pc, el("div", { class: "card-head" }, el("h2", {}, "Phone (mobile data source)"), el("a", { href: "/" }, "usage graphs →")),
+      kv([["Status", pill_], ["Phone", ph.model ? `${ph.model}${ph.android ? " · Android " + ph.android : ""}` : ""],
+        ["Last reading", age == null ? "never" : `${age} s ago (every ${ph.poll_s} s)`],
+        ["Tethering upstream", ph.upstream && ph.upstream.length ? ph.upstream.join(", ") : ph.connected ? "none (tethering is off)" : ""],
+        ["Problem", ph.error]]),
+      el("div", { class: "note" }, "Read over adb from the phone's own byte counters (Phone cards on the traffic page). These include hotspot clients that never touch this router. If it says Not reachable: check the cable, that the phone is unlocked and has authorised this router (Always allow), and `sudo ./bin/setup-phone.sh check`."));
+  } else pc.classList.add("hidden");
+
+  /* ---- firewall ---- */
+  const f = d.firewall;
+  fill($("fw"), el("div", { class: "card-head" }, el("h2", {}, "Firewall and NAT"), el("div", { class: "sub" }, "from the router's config files")),
+    kv([["From the internet", f.inbound_from_wan], ["Port forwarding / UPnP", f.upnp], ["NAT", f.nat], ["Routing between networks", f.ip_forward ? "enabled" : pill("bad", "disabled")],
+      ["Building Wi-Fi → home network", f.building_to_lan], ["SSH from the building Wi-Fi", f.vr180_ssh_from.length ? f.vr180_ssh_from.join(", ") : "nobody"]]),
+    f.upnp_mappings && f.upnp_mappings.length ? el("h3", {}, "Ports opened on request (UPnP)") : "",
+    f.upnp_mappings && f.upnp_mappings.length ? el("div", { class: "scroll" }, el("table", {}, el("thead", {}, el("tr", {}, el("th", {}, "Port"), el("th", {}, "Goes to"), el("th", {}, "Passed on to the upstream router"), el("th", {}, "Expires"), el("th", {}, "Asked by"))),
+      el("tbody", {}, ...f.upnp_mappings.map(m => el("tr", {}, el("td", {}, m.port + "/" + m.proto), el("td", {}, m.client), el("td", {}, m.upstream ? pill("ok", "yes") : pill("warn", "no")),
+        el("td", {}, m.left_s == null ? "never" : dur(m.left_s)), el("td", {}, m.what || "")))))) : "",
+    el("h3", {}, "Services the home network may reach on this router"),
+    f.lan_open_ports.length ? el("div", { class: "scroll" }, el("table", {}, el("thead", {}, el("tr", {}, el("th", {}, "Port"), el("th", {}, "Service"))),
+      el("tbody", {}, ...f.lan_open_ports.map(p => el("tr", {}, el("td", {}, String(p.port)), el("td", {}, p.what || ""))))))
+      : el("div", { class: "note" }, "none beyond DNS, DHCP, SSH and ping"));
+
+  /* ---- system ---- */
+  const s = d.system;
+  fill($("sys"), el("h2", {}, "System"), kv([["Host", d.host], ["Operating system", s.os], ["Kernel", s.kernel], ["Uptime", dur(s.up_s)], ["Load average (1, 5, 15 min)", s.load ? s.load.join("  ") : ""]]));
+}
+
+let timer = null, failures = 0;
+async function load() {
+  try {
+    const r = await fetch("/api/router", { cache: "no-store" });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    render(await r.json());
+    failures = 0;
+    $("status").textContent = "updated " + new Date().toLocaleTimeString();
+  } catch (e) {
+    failures++;
+    $("status").textContent = "cannot reach the router page (" + e.message + ")";
+  }
+}
+function schedule() { clearInterval(timer); timer = setInterval(() => { if (!document.hidden) load(); }, 10000); }
+document.addEventListener("visibilitychange", () => { if (!document.hidden) load(); });
+
+$("tool").addEventListener("change", () => { const i = $("tool").value === "internet"; $("target").disabled = i; $("target").value = i ? "" : ($("target").value || "example.com"); });
+$("diagform").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const out = $("out"), btn = $("run");
+  btn.disabled = true; out.classList.remove("hidden"); out.textContent = "running…";
+  try {
+    const r = await fetch("/api/diag", { method: "POST", cache: "no-store",
+      headers: { "Content-Type": "application/json", "X-Requested-With": "cpbee-router" },
+      body: JSON.stringify({ tool: $("tool").value, target: $("target").value }) });
+    const j = await r.json();
+    out.textContent = j.output || j.error || ("HTTP " + r.status);
+  } catch (e) { out.textContent = "request failed: " + e.message; }
+  btn.disabled = false;
+});
+load(); schedule();
+</script>
+</body>
+</html>
