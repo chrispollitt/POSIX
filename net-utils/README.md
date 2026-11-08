@@ -104,6 +104,19 @@ yet. Safe to run again: an existing vault is left alone, so it also updates the 
 ./auth-on-cpbee.sh
 ```
 
+## Installing: make
+
+```bash
+sudo make install           # auth, identity, lan-port, netrc-to-tickets, traceroute-plus.sh -> /usr/local/bin
+sudo make install-cpbee     # on cpbee: upnp-sync-cmrouter -> /usr/local/sbin, the /router page -> /opt/trafficgraph
+                            # (traffic service restarted), setup-router.sh -> ~/cmpi-router/bin
+make diff                   # repo against the installed copies
+make pull                   # copy the live cpbee files back into cmpi-router-upnp/ (they are edited in place there)
+make check                  # syntax checks and the lan-port tests
+```
+
+`PREFIX`, `DESTDIR`, `CMPI_ROUTER` and `TRAFFIC_DIR` can be overridden (`make install DESTDIR=/tmp/stage` is a dry run).
+
 ## Tests
 
 The tests live in [test/](test) and use throwaway directories; they touch none of your real files. Run them from the
