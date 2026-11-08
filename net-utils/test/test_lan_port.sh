@@ -222,6 +222,17 @@ LAN_PORT_DRY=1 lp add 6697 "Ergo"
 check "LAN_PORT_DRY: would run nft, did not" '[ $RC = 0 ] && has "$OUT" "would run: nft add rule inet filter input iifname lan0 tcp dport 6697 accept"'
 lp remove 6697
 check "remove: needs the lists" '[ $RC = 1 ] && has "$OUT" "not a cmpi-router box"'
+t "upnp: what clients opened, and whether cmrouter has it"
+now=$(date +%s)
+printf 'TCP:13415:192.168.10.73:13415:%s:Vuze\nUDP:13415:192.168.10.73:13415:%s:Vuze: test\nTCP:9999:192.168.10.5:9:%s:expired\n' $((now + 1800)) $((now + 1800)) $((now - 5)) > "$SANDBOX/leases"
+printf 'tcp 13415\n' > "$SANDBOX/mapped"
+export LAN_PORT_UPNP_LEASES="$SANDBOX/leases" LAN_PORT_UPNP_MAPPED="$SANDBOX/mapped"
+lp upnp
+check "lists the live mappings, not the expired one" '[ $RC = 0 ] && [ "$(wc -l < "$OUT")" = 2 ] && has "$OUT" "13415/tcp" && ! has "$OUT" 9999'
+check "  says which one cmrouter forwards" 'grep "13415/tcp" "$OUT" | grep -q "cmrouter: forwarded" && grep "13415/udp" "$OUT" | grep -q "NOT forwarded"'
+check "  keeps a colon in the description" 'has "$OUT" "Vuze: test"'
+LAN_PORT_UPNP_LEASES="$SANDBOX/none" lp upnp
+check "no lease file: says UPnP is not set up, exit 1" '[ $RC = 1 ] && has "$OUT" "not set up"'
 
 echo
 echo "lan-port tests: $PASS passed, $FAIL failed"

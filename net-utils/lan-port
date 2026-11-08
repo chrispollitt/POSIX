@@ -12,6 +12,7 @@
 #   lan-port plan  SPEC [WHY] [SPEC [WHY]]...  what `add` would do; changes nothing
 #   lan-port add   SPEC WHY   [SPEC WHY]...    list them, reload once with `setup-router.sh fw`, confirm they are open
 #   lan-port remove SPEC...                    unlist them and reload once
+#   lan-port upnp                              the ports LAN clients opened by UPnP, and whether cmrouter forwards them too
 #
 # SPEC is PORT, PORT/udp, or a range LO-HI[/udp] of at most 64 ports (tcp unless /udp).  WHY is "what it is
 # (project)", e.g. "web-ttyd https (nginx)": a word or sentence, not just a number.  Uses sudo for what needs root.
@@ -26,7 +27,11 @@
 # (empty: unknown, every interface), else those on which the chain already accepts one of the ports in
 # $LAN_PORT_LIKE (e.g. "143 993" for a mail service), else $LAN_PORT_IF.
 #
-# Environment (for tests and other layouts): LAN_PORT_IF (lan0), LAN_PORT_DIR (/etc/router-setup),
+# UPnP is set up by `setup-router.sh upnp` (miniupnpd on lan0, plus a job that asks the router upstream of wan0, cmrouter,
+# to forward the same ports).  Its own lan0 ports (1900/udp, 5000/tcp, 5351/udp) are in the lists above like any other;
+# the ports clients open through it are not input ports, so `check` does not report them - `lan-port upnp` does.
+#
+# Environment (for tests and other layouts): LAN_PORT_UPNP_LEASES, LAN_PORT_UPNP_MAPPED (the two files `upnp` reads), LAN_PORT_IF (lan0), LAN_PORT_DIR (/etc/router-setup),
 # LAN_PORT_RULESET (a file to read instead of `nft list ruleset`), LAN_PORT_ROUTER (setup-router.sh),
 # LAN_PORT_DRY=1 (print the commands that change anything, do not run them), LAN_PORT_IIF, LAN_PORT_LIKE,
 # LAN_PORT_RUNTIME=0 (off a cmpi-router box, `add` opens nothing at runtime: it prints the rules, exit 2).
@@ -314,6 +319,18 @@ case $cmd in
       grep -qx "$p" <<<"$LIVE_tcp" || echo "info: $a is listening but $p/tcp is not open on $IF (fine if it is for another interface)"
     done
     [ $bad = 0 ] && echo "lists and live firewall agree" || exit 1 ;;
+
+  upnp)
+    leases=${LAN_PORT_UPNP_LEASES:-/var/lib/miniupnpd/upnp.leases}
+    mapped=${LAN_PORT_UPNP_MAPPED:-/var/lib/miniupnpd/cmrouter.mapped}
+    [ -r "$leases" ] || die "no UPnP lease file ($leases): UPnP is not set up (sudo setup-router.sh upnp)"
+    awk -F: -v now="$(date +%s)" -v mapped="$mapped" '
+      BEGIN { while ((getline l < mapped) > 0) m[l] = 1 }
+      $1 ~ /^(TCP|UDP)$/ && ($5 == 0 || $5 > now) {
+        p = tolower($1); left = ($5 == 0) ? "permanent" : sprintf("%dm left", ($5 - now + 59) / 60)
+        why = $6; for (i = 7; i <= NF; i++) why = why ":" $i
+        printf "%s/%s\t%s:%s\t%s\tcmrouter: %s\t%s\n", $2, p, $3, $4, left, ((p " " $2) in m) ? "forwarded" : "NOT forwarded", why; n++ }
+      END { if (!n) print "no UPnP mappings" }' "$leases" ;;
 
   plan|add)
     [ -n "${1:-}" ] || die "usage: lan-port $cmd PORT[/udp] \"what it is\" [PORT[/udp] \"what it is\"]..."

@@ -78,7 +78,11 @@ lan-port list
 lan-port check
 lan-port plan 8080 "my service (project)"     # changes nothing; then `add` with the same arguments
 lan-port remove 8080
+lan-port upnp                                 # ports LAN clients opened by UPnP, and whether cmrouter forwards them too
 ```
+
+UPnP itself is `sudo ./bin/setup-router.sh upnp` in cmpi-router: miniupnpd on lan0, whose mappings are passed on to the
+router upstream of cpbee (cmrouter), so e.g. Vuze's port test can pass through both NATs.
 
 ## traceroute-plus.sh
 
