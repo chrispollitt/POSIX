@@ -8,6 +8,7 @@
   2. Asks the router (cpbee's miniupnpd, which passes it on to cmrouter) to forward that port, TCP and UDP,
      to this PC.  Uses upnpc.exe (miniupnpc) if it is on PATH, otherwise Windows' built-in UPnP COM object
      (HNetCfg.NATUPnP), so nothing needs installing.
+  2b. Opens that port (TCP + UDP, inbound) in Windows Firewall, once; a UAC prompt appears if the rule must be created.
   3. Starts BiglyBT.exe.  With -CleanupOnExit it waits for BiglyBT to quit and removes the mappings.
 
   Run:   powershell -ExecutionPolicy Bypass -File .\biglybt-launch.ps1
@@ -24,7 +25,8 @@ param(
     [string] $VmOptions = (Join-Path $env:APPDATA 'BiglyBT\java.vmoptions'),
     [string] $Exe       = 'C:\Program Files\BiglyBT\BiglyBT.exe',
     [string] $DescUrl,      # router's UPnP description URL, e.g. http://192.168.10.1:5000/rootDesc.xml (skips discovery)
-    [switch] $CleanupOnExit
+    [switch] $CleanupOnExit,
+    [switch] $NoFirewall    # don't touch the Windows firewall
 )
 
 $ErrorActionPreference = 'Stop'
@@ -51,6 +53,39 @@ $ip = (Get-NetIPAddress -InterfaceIndex $route.ifIndex -AddressFamily IPv4 |
        Where-Object { $_.IPAddress -notlike '169.254.*' } | Select-Object -First 1).IPAddress
 if (-not $ip) { throw "no IPv4 address on interface $($route.ifIndex)" }
 Say "this PC is $ip, gateway $($route.NextHop)"
+
+# --- 2b. Windows Firewall: allow the port in (TCP + UDP).  Creating a rule needs administrator: if this window
+#         isn't elevated, only that small step is run elevated (one UAC prompt, and only when the rule is missing).
+if (-not $NoFirewall) {
+    $rule = "BiglyBT listen port $Port"
+    $have = Get-NetFirewallRule -DisplayName $rule -ErrorAction SilentlyContinue
+    $stale = Get-NetFirewallRule -DisplayName 'BiglyBT listen port *' -ErrorAction SilentlyContinue |
+             Where-Object { $_.DisplayName -ne $rule }          # left over from an earlier port number
+    if ($have -and -not $stale) {
+        Say "firewall: '$rule' already present"
+    } else {
+        $cmd = @"
+`$ErrorActionPreference = 'Stop'
+Get-NetFirewallRule -DisplayName 'BiglyBT listen port *' -ErrorAction SilentlyContinue | Where-Object { `$_.DisplayName -ne '$rule' } | Remove-NetFirewallRule
+if (-not (Get-NetFirewallRule -DisplayName '$rule' -ErrorAction SilentlyContinue)) {
+  foreach (`$p in 'TCP','UDP') { New-NetFirewallRule -DisplayName '$rule' -Direction Inbound -Action Allow -Protocol `$p -LocalPort $Port -Profile Any | Out-Null }
+}
+"@
+        $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
+                 ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+        try {
+            if ($admin) { & ([scriptblock]::Create($cmd)) }
+            else {
+                $enc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($cmd))
+                $pr = Start-Process powershell.exe -Verb RunAs -Wait -PassThru -WindowStyle Hidden `
+                      -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $enc
+                if ($pr.ExitCode -ne 0) { throw "elevated step exited $($pr.ExitCode)" }
+            }
+            if (Get-NetFirewallRule -DisplayName $rule -ErrorAction SilentlyContinue) { Say "firewall: opened $Port TCP+UDP inbound ('$rule')" }
+            else { Say 'WARNING: firewall rule was not created' }
+        } catch { Say "WARNING: could not open the Windows firewall: $($_.Exception.Message)" }
+    }
+}
 
 # --- 3. ask the router to forward it ----------------------------------------------------------------------
 $upnpc = Get-Command upnpc.exe -ErrorAction SilentlyContinue
