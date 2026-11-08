@@ -1,0 +1,11 @@
+# Fixed addresses for the wired machines behind cpbee (MIDDLE and FINAL).
+# Format:  name   mac                  ip              (# starts a comment)
+# The last octet matches the old 192.168.1.x numbering, and all of these are outside the dynamic pool (.100-.250).
+# MACs come from cmlaptop's hosts file; check them against the old router's client list before cutover.
+
+cmdesktop   2c:f0:5d:52:e4:0a   192.168.10.77
+cmlaptop    b0:6e:bf:4e:58:ec   192.168.10.73     # the WIRED adapter (hosts file calls it cmlaptopE); the Wi-Fi MAC f8:34:41:f7:5c:24 is not used at home
+cmprinter   00:80:87:d4:15:5b   192.168.10.66
+
+# Stays on the old router's LAN until its services move (reached through cpbee's NAT as 192.168.1.75):
+# cmpi      b8:27:eb:5c:54:bc   192.168.10.75

@@ -1,0 +1,656 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cpbee traffic</title>
+<style>
+:root {
+  color-scheme: light dark;
+  --page: #f9f9f7;  --surface: #fcfcfb;
+  --ink: #0b0b0b;   --ink2: #52514e;   --muted: #898781;
+  --grid: #e1e0d9;  --axis: #c3c2b7;   --border: rgba(11,11,11,.10);
+  --down: #2a78d6;  --up: #eb6834;
+  --track: #cde2fb; --fill: #2a78d6;
+  --warn: #fab219;  --crit: #d03b3b;   --ghost: rgba(11,11,11,.06);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --page: #0d0d0d;  --surface: #1a1a19;
+    --ink: #ffffff;   --ink2: #c3c2b7;
+    --grid: #2c2c2a;  --axis: #383835;   --border: rgba(255,255,255,.10);
+    --down: #3987e5;  --up: #d95926;
+    --track: #0d366b; --fill: #3987e5;
+    --ghost: rgba(255,255,255,.08);
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--page); color: var(--ink); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+.wrap { max-width: 1040px; margin: 0 auto; padding: 20px 16px 48px; }
+header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
+h1 { margin: 0; font-size: 20px; font-weight: 600; }
+.sub { color: var(--ink2); font-size: 13px; }
+h2 { margin: 0; font-size: 16px; font-weight: 600; }
+nav { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: var(--surface); }
+nav a { color: var(--ink2); text-decoration: none; padding: 6px 12px; border-right: 1px solid var(--border); }
+nav a:last-child { border-right: 0; }
+nav a:hover { background: var(--ghost); }
+nav a[aria-current="page"] { color: var(--ink); font-weight: 600; background: var(--ghost); box-shadow: inset 0 -2px 0 var(--ink); }
+
+/* filter row: one row above the charts, scopes everything below */
+.filters { display: flex; flex-wrap: wrap; gap: 12px 20px; align-items: center; margin-bottom: 16px; }
+.seg { display: inline-flex; max-width: 100%; border: 1px solid var(--border); border-radius: 8px; overflow-x: auto; scrollbar-width: none; background: var(--surface); }
+.seg button { white-space: nowrap; flex: none; font: inherit; color: var(--ink2); background: none; border: 0; padding: 6px 11px; cursor: pointer; border-right: 1px solid var(--border); }
+.seg button:last-child { border-right: 0; }
+.seg button:hover { background: var(--ghost); }
+.seg button[aria-pressed="true"] { color: var(--ink); font-weight: 600; background: var(--ghost); box-shadow: inset 0 -2px 0 var(--ink); }
+.seg button:focus-visible { outline: 2px solid var(--ink); outline-offset: -2px; }
+
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 16px 16px 12px; margin-bottom: 16px; }
+.card-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; flex-wrap: wrap; }
+.state { font-size: 12px; color: var(--ink2); }
+.state.off { color: var(--ink); }
+.tiles { display: flex; gap: 24px; flex-wrap: wrap; }
+.tile .lbl { display: flex; align-items: center; gap: 6px; color: var(--ink2); font-size: 12px; }
+.key { display: inline-block; width: 14px; height: 2px; border-radius: 1px; }
+.tile .val { font-size: 22px; font-weight: 600; line-height: 1.2; }
+.tile .val small { font-size: 13px; font-weight: 400; color: var(--ink2); }
+.tile .aux { font-size: 12px; color: var(--muted); }
+
+.plot { position: relative; margin-top: 8px; transition: opacity .15s; }
+.plot.loading { opacity: .55; }
+.plot svg { display: block; width: 100%; height: auto; touch-action: pan-y; }
+.plot svg:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; border-radius: 4px; }
+.axis text { fill: var(--muted); font-size: 11px; font-family: inherit; }
+.empty { fill: var(--ink2); font-size: 13px; }
+.tip { position: absolute; pointer-events: none; z-index: 2; min-width: 150px; padding: 8px 10px; border-radius: 8px; font-size: 12px;
+       background: var(--surface); border: 1px solid var(--axis); box-shadow: 0 4px 16px rgba(0,0,0,.15); }
+.tip .when, .dtip .when { color: var(--ink2); margin-bottom: 4px; }
+.tip .row, .dtip .row { display: flex; align-items: center; gap: 8px; }
+.tip .row b, .dtip .row b { font-size: 13px; font-weight: 600; }
+.tip .row span, .dtip .row span { color: var(--ink2); }
+.tip .tot, .dtip .tot { color: var(--muted); margin-top: 3px; }
+
+table { border-collapse: collapse; width: 100%; }
+th, td { padding: 6px 10px; text-align: right; border-bottom: 1px solid var(--grid); font-variant-numeric: tabular-nums; }
+th:first-child, td:first-child { text-align: left; }
+th { font-weight: 500; color: var(--ink2); font-size: 12px; }
+tbody tr:last-child td { border-bottom: 0; }
+.scroll { max-height: 260px; overflow: auto; margin-top: 8px; }
+.scroll thead th { position: sticky; top: 0; background: var(--surface); }
+.group th { text-align: center; border-bottom: 0; padding-bottom: 0; }
+
+.meter-wrap { margin-top: 8px; }
+.meter { height: 10px; border-radius: 5px; background: var(--track); overflow: hidden; }
+.meter i { display: block; height: 100%; background: var(--fill); border-radius: 5px; }
+.meter.warn i { background: var(--warn); } .meter.crit i { background: var(--crit); }
+.meterbox { position: relative; }
+.pacemark { position: absolute; top: -4px; width: 2px; height: 18px; margin-left: -1px; background: var(--ink); border-radius: 1px; }
+.planstat { font-weight: 600; font-size: 13px; padding: 4px 10px; border: 1px solid var(--border); border-left: 4px solid var(--fill); border-radius: 6px; }
+.planstat.warn { border-left-color: var(--warn); } .planstat.crit { border-left-color: var(--crit); }
+.plan-tiles { margin-top: 14px; }
+.meter-txt { display: flex; justify-content: space-between; gap: 12px; font-size: 13px; margin-top: 6px; flex-wrap: wrap; }
+.meter-txt .sev { font-weight: 600; }
+.note { color: var(--muted); font-size: 12px; margin-top: 8px; }
+.ip { color: var(--muted); font-size: 11px; font-weight: 400; }
+.tblhead { margin: 16px 0 4px; }
+/* devices card: ranked rows, bar split Down | Up (same colors as the charts), 2px surface gap, 4px rounded data end */
+.drows { margin-top: 10px; }
+.drow { display: grid; grid-template-columns: minmax(100px, 200px) minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 6px 0; border-bottom: 1px solid var(--grid); }
+.drow:last-child { border-bottom: 0; }
+.dname { min-width: 0; overflow-wrap: anywhere; font-weight: 600; }
+.dname .ip { display: block; }
+.dtrack { height: 14px; min-width: 0; }
+.dbar { display: flex; gap: 2px; height: 100%; }
+.dbar i { display: block; height: 100%; min-width: 2px; }
+.dbar i:last-child { border-radius: 0 4px 4px 0; }
+.dbar i.d { background: var(--down); } .dbar i.u { background: var(--up); }
+.dbar i:hover { filter: brightness(1.15); }
+.drow.muted .dname { font-weight: 400; color: var(--ink2); }
+.drow.muted .dbar i { background: var(--muted); opacity: .5; }
+.dval { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.dval small { color: var(--muted); display: inline-block; min-width: 3.2em; margin-left: 6px; }
+.dtip { position: fixed; z-index: 5; pointer-events: none; display: none; min-width: 150px; padding: 8px 10px; border-radius: 8px; font-size: 12px;
+        background: var(--surface); border: 1px solid var(--axis); box-shadow: 0 4px 16px rgba(0,0,0,.15); }
+.legend { display: flex; gap: 14px; font-size: 12px; color: var(--ink2); }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+@media (max-width: 560px) { .drow { grid-template-columns: minmax(0, 1fr) auto; } .drow .dtrack { grid-column: 1 / -1; order: 3; } }
+.cnote { color: var(--ink2); font-size: 12px; margin-top: 4px; max-width: 46ch; }
+.hidden { display: none; }
+@media (max-width: 560px) { .tile .val { font-size: 19px; } .tiles { gap: 16px; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1 id="title">Network traffic</h1>
+    <nav aria-label="Pages"><a href="/" aria-current="page">Traffic</a><a href="/router">Router</a></nav>
+    <div class="sub" id="status">connecting…</div>
+  </header>
+
+  <div class="filters">
+    <div class="seg" id="range" role="group" aria-label="Time range"></div>
+    <div class="seg" id="unit" role="group" aria-label="Units"></div>
+    <div class="seg" id="view" role="group" aria-label="View"></div>
+  </div>
+
+  <section id="capcard" class="card hidden" aria-live="polite"></section>
+  <div id="plan-hint" class="note hidden">No data plan is set up yet: run  sudo ./bin/setup-router.sh plan --gb &lt;allowance&gt; --day &lt;cycle start day&gt;  to get the meter, pacing and alerts.</div>
+  <div id="cards"></div>
+
+  <section class="card" id="usage">
+    <h2>Data usage</h2>
+    <div class="sub" id="usage-sub"></div>
+    <div id="usage-table"></div>
+    <div class="note">Only the WAN is metered, so only its figures count against the data plan. LAN and VR180 traffic is local; VR180 is the building network and has no direct internet access.</div>
+  </section>
+</div>
+
+<script>
+"use strict";
+const RANGES = [["live","Live"],["1h","1 hour"],["6h","6 hours"],["24h","24 hours"],["7d","7 days"],["30d","30 days"],["90d","90 days"],["1y","1 year"]];
+const SPAN_LABEL = {live:"the last 10 minutes","1h":"the last hour","6h":"the last 6 hours","24h":"the last 24 hours","7d":"the last 7 days","30d":"the last 30 days","90d":"the last 90 days","1y":"the last year"};
+const S = { range: "live", unit: "bit", view: "chart", cfg: null, series: {}, live: null, totals: null, busy: false };
+const cards = {};      // iface id -> {el, ...}
+
+const $ = (id) => document.getElementById(id);
+function el(tag, attrs, ...kids) {
+  const e = document.createElement(tag);
+  for (const k in (attrs || {})) { if (k === "class") e.className = attrs[k]; else e.setAttribute(k, attrs[k]); }
+  for (const c of kids) e.append(c);
+  return e;
+}
+const NS = "http://www.w3.org/2000/svg";
+function svg(tag, attrs, ...kids) {
+  const e = document.createElementNS(NS, tag);
+  for (const k in (attrs || {})) e.setAttribute(k, attrs[k]);
+  for (const c of kids) e.append(c);
+  return e;
+}
+const store = {
+  get(k, d) { try { return localStorage.getItem(k) || d; } catch (e) { return d; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch (e) {} },
+};
+
+/* ---------- formatting ---------- */
+function sig(v) { return v >= 100 ? v.toFixed(0) : v >= 10 ? v.toFixed(1) : v.toFixed(2); }
+const BIT = ["bit/s","kbit/s","Mbit/s","Gbit/s"], BYTE = ["B/s","kB/s","MB/s","GB/s"];
+function rateUnits() { return S.unit === "bit" ? BIT : BYTE; }
+function rateVal(bps) { return S.unit === "bit" ? bps * 8 : bps; }
+function unitIndex(v) { let i = 0; while (v >= 1000 && i < 3) { v /= 1000; i++; } return i; }
+function fmtRate(bps) {
+  const v = rateVal(bps), i = unitIndex(v);
+  return [sig(v / Math.pow(1000, i)), rateUnits()[i]];
+}
+function fmtBytes(b) {
+  if (b == null) return "–";
+  const u = ["B","kB","MB","GB","TB"]; let i = 0, v = b;
+  while (v >= 1000 && i < 4) { v /= 1000; i++; }
+  return (i === 0 ? v.toFixed(0) : sig(v)) + " " + u[i];
+}
+function fmtTime(t, range, full) {
+  const d = new Date(t * 1000);
+  const o = {};
+  if (range === "live") Object.assign(o, { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  else if (["1h","6h","24h"].includes(range)) Object.assign(o, { hour: "2-digit", minute: "2-digit" });
+  else if (["7d","30d"].includes(range)) Object.assign(o, full ? { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" } : { weekday: "short", hour: "2-digit", minute: "2-digit" });
+  else Object.assign(o, { month: "short", day: "numeric", year: full ? "numeric" : undefined });
+  if (full && ["live","1h","6h","24h"].includes(range)) { o.month = "short"; o.day = "numeric"; }
+  return d.toLocaleString([], o);
+}
+function fmtDay(t) { return new Date(t * 1000).toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" }); }
+
+/* ---------- axes ---------- */
+function niceStep(max, target) {
+  const raw = max / target, p = Math.pow(10, Math.floor(Math.log10(raw))), f = raw / p;
+  return (f <= 1 ? 1 : f <= 2 ? 2 : f <= 2.5 ? 2.5 : f <= 5 ? 5 : 10) * p;
+}
+const TSTEPS = [10,30,60,300,600,900,1800,3600,7200,10800,21600,43200,86400,172800,604800,1209600,2592000];
+function timeTicks(t0, t1, n) {
+  const off = -new Date().getTimezoneOffset() * 60;
+  const step = TSTEPS.find((s) => (t1 - t0) / s <= n) || TSTEPS[TSTEPS.length - 1];
+  const out = [];
+  for (let t = Math.ceil((t0 + off) / step) * step - off; t <= t1; t += step) out.push(t);
+  return out;
+}
+
+/* ---------- chart ---------- */
+const H = 230, M = { l: 52, r: 14, t: 22, b: 26 };
+function drawChart(card, data, range) {
+  const host = card.plot;
+  const W = Math.max(280, host.clientWidth);
+  const w = W - M.l - M.r, h = H - M.t - M.b;
+  const root = svg("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", tabindex: "0",
+    "aria-label": `${card.cfg.label} traffic, download and upload rate over ${SPAN_LABEL[range]}` });
+  card.svg = root;
+  host.replaceChildren(root);
+  host.append(card.tip);
+  card.tip.style.display = "none";
+
+  const t = data ? data.t : [];
+  const have = t.length > 1 && [...data.down, ...data.up].some((v) => v != null);
+  if (!have) {
+    root.append(svg("text", { x: W / 2, y: H / 2, "text-anchor": "middle", class: "empty" }, document.createTextNode(
+      card.present === false ? "Interface not connected" : "No data yet")));
+    return;
+  }
+  let max = 0;
+  for (const v of data.down) if (v != null && v > max) max = v;
+  for (const v of data.up) if (v != null && v > max) max = v;
+  const vmax = Math.max(rateVal(max), 1);
+  const ui = unitIndex(vmax), div = Math.pow(1000, ui);
+  const ystep = niceStep(vmax / div, 4), ytop = Math.max(ystep, Math.ceil(vmax / div / ystep) * ystep);
+  const yS = (bps) => M.t + h - (rateVal(bps) / div / ytop) * h;
+  const t0 = t[0], t1 = Math.max(t[t.length - 1], t0 + 1);
+  const xS = (ts) => M.l + ((ts - t0) / (t1 - t0)) * w;
+
+  const g = svg("g", { class: "axis" });
+  root.append(g);
+  for (let v = 0; v <= ytop + 1e-9; v += ystep) {
+    const y = M.t + h - (v / ytop) * h;
+    g.append(svg("line", { x1: M.l, x2: M.l + w, y1: y, y2: y, stroke: v === 0 ? "var(--axis)" : "var(--grid)", "stroke-width": 1 }));
+    g.append(svg("text", { x: M.l - 8, y: y + 4, "text-anchor": "end" }, document.createTextNode(String(+v.toFixed(2)))));
+  }
+  g.append(svg("text", { x: M.l - 8, y: 10, "text-anchor": "end" }, document.createTextNode(rateUnits()[ui])));
+  const tick = Math.max(2, Math.floor(w / 95));
+  for (const tk of timeTicks(t0, t1, tick)) {
+    g.append(svg("text", { x: xS(tk), y: H - 7, "text-anchor": "middle" }, document.createTextNode(fmtTime(tk, range))));
+  }
+
+  const runs = (arr) => {      // continuous non-null runs -> [[i0,i1],...]
+    const out = []; let s = -1;
+    arr.forEach((v, i) => { if (v != null) { if (s < 0) s = i; } else if (s >= 0) { out.push([s, i - 1]); s = -1; } });
+    if (s >= 0) out.push([s, arr.length - 1]);
+    return out;
+  };
+  const plot = (arr, color) => {
+    for (const [a, b] of runs(arr)) {
+      let d = "";
+      for (let i = a; i <= b; i++) d += (i === a ? "M" : "L") + xS(t[i]).toFixed(1) + " " + yS(arr[i]).toFixed(1);
+      if (b > a) {
+        root.append(svg("path", { d: d + `L${xS(t[b]).toFixed(1)} ${M.t + h}L${xS(t[a]).toFixed(1)} ${M.t + h}Z`, fill: color, "fill-opacity": 0.10 }));
+      }
+      root.append(svg("path", { d, fill: "none", stroke: color, "stroke-width": 2, "stroke-linejoin": "round", "stroke-linecap": "round" }));
+      if (a === b) root.append(svg("circle", { cx: xS(t[a]), cy: yS(arr[a]), r: 3, fill: color }));
+    }
+  };
+  plot(data.up, "var(--up)");
+  plot(data.down, "var(--down)");
+
+  /* hover layer: crosshair snaps to the nearest sample; one tooltip lists both series */
+  const cross = svg("g", { style: "display:none" },
+    svg("line", { y1: M.t, y2: M.t + h, stroke: "var(--ink2)", "stroke-width": 1 }),
+    svg("circle", { r: 4, fill: "var(--down)", stroke: "var(--surface)", "stroke-width": 2, class: "d1" }),
+    svg("circle", { r: 4, fill: "var(--up)", stroke: "var(--surface)", "stroke-width": 2, class: "d2" }));
+  root.append(cross);
+  let cur = -1;
+  const show = (i) => {
+    cur = i;
+    const x = xS(t[i]);
+    cross.style.display = "";
+    cross.firstChild.setAttribute("x1", x); cross.firstChild.setAttribute("x2", x);
+    for (const [cls, arr] of [["d1", data.down], ["d2", data.up]]) {
+      const c = cross.querySelector("." + cls);
+      if (arr[i] == null) c.style.display = "none"; else { c.style.display = ""; c.setAttribute("cx", x); c.setAttribute("cy", yS(arr[i])); }
+    }
+    const tip = card.tip;
+    tip.replaceChildren(el("div", { class: "when" }, document.createTextNode(fmtTime(t[i], range, true))));
+    for (const [name, key, color] of [["Down", "down", "--down"], ["Up", "up", "--up"]]) {
+      const v = data[key][i];
+      const [n, u] = v == null ? ["–", ""] : fmtRate(v);
+      const k = el("i", { class: "key" }); k.style.background = `var(${color})`;
+      tip.append(el("div", { class: "row" }, k, el("b", {}, document.createTextNode(n + (u ? " " + u : ""))), el("span", {}, document.createTextNode(name))));
+    }
+    if (data.down_b && data.down_b[i] != null) {
+      tip.append(el("div", { class: "tot" }, document.createTextNode(`${fmtBytes(data.down_b[i])} down · ${fmtBytes(data.up_b[i])} up`)));
+    }
+    tip.style.display = "";
+    const hw = host.clientWidth, tw = tip.offsetWidth;
+    let left = (x / W) * hw + 14;
+    if (left + tw > hw) left = (x / W) * hw - tw - 14;
+    tip.style.left = Math.max(0, left) + "px";
+    tip.style.top = "6px";
+  };
+  const nearest = (clientX) => {
+    const r = root.getBoundingClientRect();
+    const x = ((clientX - r.left) / r.width) * W;
+    const ts = t0 + ((x - M.l) / w) * (t1 - t0);
+    let lo = 0, hi = t.length - 1;
+    while (hi - lo > 1) { const m = (lo + hi) >> 1; if (t[m] < ts) lo = m; else hi = m; }
+    return Math.abs(t[lo] - ts) <= Math.abs(t[hi] - ts) ? lo : hi;
+  };
+  root.addEventListener("pointermove", (e) => { card.hover = true; show(nearest(e.clientX)); });
+  root.addEventListener("pointerdown", (e) => show(nearest(e.clientX)));
+  root.addEventListener("pointerleave", () => { card.hover = false; cross.style.display = "none"; card.tip.style.display = "none"; cur = -1; });
+  root.addEventListener("focus", () => { card.hover = true; if (cur < 0) show(t.length - 1); });
+  root.addEventListener("blur", () => { card.hover = false; cross.style.display = "none"; card.tip.style.display = "none"; cur = -1; });
+  root.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowLeft") { show(Math.max(0, (cur < 0 ? t.length - 1 : cur) - 1)); e.preventDefault(); }
+    else if (e.key === "ArrowRight") { show(Math.min(t.length - 1, (cur < 0 ? 0 : cur) + 1)); e.preventDefault(); }
+    else if (e.key === "Escape") { root.blur(); }
+  });
+}
+
+function drawTable(card, data, range) {
+  const host = card.plot;
+  host.replaceChildren();
+  const t = data ? data.t : [];
+  if (!t.length) { host.append(el("div", { class: "sub" }, document.createTextNode("No data yet"))); return; }
+  const bucketed = !!data.down_b;
+  const head = el("tr", {}, el("th", {}, document.createTextNode("Time")),
+    el("th", {}, document.createTextNode(bucketed ? "Down (avg)" : "Down")),
+    el("th", {}, document.createTextNode(bucketed ? "Up (avg)" : "Up")));
+  if (bucketed) head.append(el("th", {}, document.createTextNode("Down total")), el("th", {}, document.createTextNode("Up total")));
+  const body = el("tbody");
+  const cell = (s) => el("td", {}, document.createTextNode(s));
+  const rate = (v) => v == null ? "–" : fmtRate(v).join(" ");
+  for (let i = t.length - 1; i >= 0; i--) {
+    const row = el("tr", {}, cell(range === "90d" || range === "1y" ? fmtDay(t[i]) : fmtTime(t[i], range, true)), cell(rate(data.down[i])), cell(rate(data.up[i])));
+    if (bucketed) row.append(cell(fmtBytes(data.down_b[i])), cell(fmtBytes(data.up_b[i])));
+    body.append(row);
+  }
+  host.append(el("div", { class: "scroll" }, el("table", {}, el("thead", {}, head), body)));
+}
+
+/* ---------- cards ---------- */
+function buildCards() {
+  const root = $("cards");
+  root.replaceChildren();
+  for (const c of S.cfg.interfaces) {
+    const card = { cfg: c, present: null };
+    card.tip = el("div", { class: "tip", role: "status" });
+    card.plot = el("div", { class: "plot" });
+    card.state = el("div", { class: "state" });
+    const tile = (name, color) => {
+      const k = el("i", { class: "key" }); k.style.background = `var(${color})`;
+      const val = el("div", { class: "val" }), aux = el("div", { class: "aux" });
+      return { el: el("div", { class: "tile" }, el("div", { class: "lbl" }, k, document.createTextNode(name)), val, aux), val, aux };
+    };
+    card.down = tile("Down", "--down"); card.up = tile("Up", "--up");
+    card.el = el("section", { class: "card" },
+      el("div", { class: "card-head" },
+        el("div", {}, el("h2", {}, document.createTextNode(c.label)), el("div", { class: "sub" }, document.createTextNode(c.sub || c.id)),
+          el("div", { class: "cnote" }, document.createTextNode(c.note ? (c.metered ? "● " : "") + c.note : "")), card.state),
+        el("div", { class: "tiles" }, card.down.el, card.up.el)),
+      card.plot);
+    cards[c.id] = card;
+    root.append(card.el);
+  }
+}
+const stats = (arr) => {
+  const v = arr.filter((x) => x != null);
+  return v.length ? { avg: v.reduce((a, b) => a + b, 0) / v.length, peak: Math.max(...v) } : null;
+};
+function setTile(tile, now, st) {
+  const [n, u] = now == null ? ["–", ""] : fmtRate(now);
+  tile.val.replaceChildren(document.createTextNode(n + " "), el("small", {}, document.createTextNode(u)));
+  tile.aux.textContent = st ? `avg ${fmtRate(st.avg).join(" ")} · peak ${fmtRate(st.peak).join(" ")}` : "";
+}
+function liveData(id) {
+  const d = S.live && S.live.ifaces[id];
+  return d && d.t.length ? { t: d.t, down: d.down, up: d.up } : null;
+}
+function renderCard(id) {
+  const card = cards[id];
+  const data = S.range === "live" ? liveData(id) : (S.series[S.range] && S.series[S.range].ifaces[id]);
+  const live = S.live && S.live.ifaces[id];
+  card.present = live ? live.present : null;
+  card.state.textContent = card.present === false ? "not connected" : "";
+  card.state.className = "state" + (card.present === false ? " off" : "");
+  const last = (a) => (a && a.length ? a[a.length - 1] : null);
+  const nowDown = live && card.present ? last(live.down) : null, nowUp = live && card.present ? last(live.up) : null;
+  setTile(card.down, nowDown, data ? stats(data.down) : null);
+  setTile(card.up, nowUp, data ? stats(data.up) : null);
+  if (S.view === "table") drawTable(card, data, S.range);
+  else if (!(card.hover && S.range === "live" && card.svg && card.svg.isConnected)) drawChart(card, data, S.range);   // freeze the live chart while hovering
+}
+function renderAll() { for (const id in cards) renderCard(id); }
+
+/* ---------- devices card: who used the metered link ---------- */
+const dev = { el: null, body: null, sub: null };
+const hostRange = () => (S.range === "live" ? "1h" : S.range);
+function buildDevices() {
+  const key = (name, color) => { const k = el("i", { class: "key" }); k.style.background = `var(${color})`; return el("span", {}, k, document.createTextNode(name)); };
+  dev.sub = el("div", { class: "sub" });
+  dev.body = el("div", {});
+  dev.tip = el("div", { class: "dtip", role: "status" });
+  dev.el = el("section", { class: "card", id: "devices" },
+    el("div", { class: "card-head" },
+      el("div", {}, el("h2", {}, document.createTextNode("Devices on the WAN")), dev.sub),
+      el("div", { class: "legend" }, key("Down", "--down"), key("Up", "--up"))),
+    dev.body);
+  document.body.append(dev.tip);
+  const anchor = cards[S.cfg.cap_iface] || cards[Object.keys(cards)[0]];
+  anchor.el.after(dev.el);
+}
+function showDevTip(e, rec, wanTotal) {
+  const t = dev.tip, tot = rec.down + rec.up;
+  t.replaceChildren(el("div", { class: "when" }, document.createTextNode(rec.label)));
+  for (const [name, v, color] of [["Down", rec.down, "--down"], ["Up", rec.up, "--up"]]) {
+    const k = el("i", { class: "key" }); k.style.background = `var(${color})`;
+    t.append(el("div", { class: "row" }, k, el("b", {}, document.createTextNode(fmtBytes(v))), el("span", {}, document.createTextNode(name))));
+  }
+  if (wanTotal > 0) t.append(el("div", { class: "tot" }, document.createTextNode(`${(tot / wanTotal * 100).toFixed(1)}% of the WAN total`)));
+  t.style.display = "block";
+  const w = t.offsetWidth, h = t.offsetHeight;
+  t.style.left = Math.max(4, Math.min(innerWidth - w - 4, e.clientX + 14)) + "px";
+  t.style.top = Math.max(4, Math.min(innerHeight - h - 4, e.clientY + 14)) + "px";
+}
+function renderDevices() {
+  const H = S.hosts; if (!H || !dev.el) return;
+  const cap = (S.cfg.interfaces.find((i) => i.id === S.cfg.cap_iface) || {}).label || "WAN";
+  dev.sub.textContent = `Who used the metered link · ${SPAN_LABEL[H.range]}` + (S.range === "live" ? " (Live shows the last hour here)" : "");
+  const rows = H.hosts.map((h) => ({ ...h, label: h.router ? h.name : (h.name || h.key), ip: h.router ? "services and DNS on this box" : (h.name ? h.key : "") }));
+  const sumD = rows.reduce((a, r) => a + r.down, 0), sumU = rows.reduce((a, r) => a + r.up, 0);
+  const wanTotal = H.wan.down + H.wan.up;
+  const devices = rows.filter((r) => !r.router).sort((a, b) => b.down + b.up - (a.down + a.up));
+  const router = rows.find((r) => r.router);
+  const list = [...devices];
+  if (router) list.push(router);
+  const oD = Math.max(0, H.wan.down - sumD), oU = Math.max(0, H.wan.up - sumU);
+  if (oD + oU > 0 && rows.length) list.push({ label: "Link overhead and other", ip: "link framing (the USB driver adds about 50 B per sent packet) and other", down: oD, up: oU, muted: true });
+  dev.body.replaceChildren();
+  if (!rows.length) {
+    dev.body.append(el("div", { class: "note" }, document.createTextNode(
+      "No per-device data yet. Counting starts once the firewall accounting rules are loaded and the trafficgraph-acct service is running (sudo ./bin/setup-router.sh graphs).")));
+    return;
+  }
+  const share = (r) => (wanTotal > 0 ? ((r.down + r.up) / wanTotal * 100) : 0);
+  const pct = (r) => { const s = share(r); return s > 0 && s < 1 ? "<1%" : Math.round(s) + "%"; };
+  if (S.view === "table") {
+    const th = (s) => el("th", {}, document.createTextNode(s)), td = (s) => el("td", {}, document.createTextNode(s));
+    const body = el("tbody");
+    for (const r of list) {
+      const lab = td(r.label); if (r.ip) lab.append(document.createTextNode(" "), el("small", { class: "ip" }, document.createTextNode(r.ip)));
+      body.append(el("tr", {}, lab, td(fmtBytes(r.down)), td(fmtBytes(r.up)), td(fmtBytes(r.down + r.up)), td(wanTotal > 0 ? pct(r) : "–")));
+    }
+    body.append(el("tr", {}, td(`${cap} total`), td(fmtBytes(H.wan.down)), td(fmtBytes(H.wan.up)), td(fmtBytes(wanTotal)), td("")));
+    dev.body.append(el("div", { class: "scroll", style: "max-height:none" }, el("table", {}, el("thead", {}, el("tr", {}, th("Device"), th("Down"), th("Up"), th("Total"), th("Share"))), body)));
+  } else {
+    const max = Math.max(...list.map((r) => r.down + r.up), 1);
+    const wrap = el("div", { class: "drows" });
+    for (const r of list) {
+      const tot = r.down + r.up;
+      const bar = el("div", { class: "dbar", style: `width:${(tot / max * 100).toFixed(2)}%` });
+      if (r.down > 0) { const s = el("i", { class: "d", style: `flex:${r.down} 1 0` }); bar.append(s); }
+      if (r.up > 0) { const s = el("i", { class: "u", style: `flex:${r.up} 1 0` }); bar.append(s); }
+      const name = el("div", { class: "dname" }, document.createTextNode(r.label));
+      if (r.ip) name.append(el("small", { class: "ip" }, document.createTextNode(r.ip)));
+      const val = el("div", { class: "dval" }, document.createTextNode(fmtBytes(tot)), el("small", {}, document.createTextNode(wanTotal > 0 ? pct(r) : "")));
+      const row = el("div", { class: "drow" + (r.muted ? " muted" : ""), tabindex: "0",
+        "aria-label": `${r.label}: ${fmtBytes(r.down)} down, ${fmtBytes(r.up)} up` }, name, el("div", { class: "dtrack" }, bar), val);
+      const show = (e) => showDevTip(e, r, wanTotal);
+      row.addEventListener("pointermove", show);
+      row.addEventListener("focus", () => { const b = row.getBoundingClientRect(); show({ clientX: b.left + 40, clientY: b.top }); });
+      for (const ev of ["pointerleave", "blur"]) row.addEventListener(ev, () => { dev.tip.style.display = "none"; });
+      wrap.append(row);
+    }
+    dev.body.append(wrap);
+    dev.body.append(el("div", { class: "note" }, document.createTextNode(
+      `${cap} total ${fmtBytes(wanTotal)} (down ${fmtBytes(H.wan.down)}, up ${fmtBytes(H.wan.up)})` +
+      (H.since ? ` · counting since ${new Date(H.since * 1000).toLocaleDateString([], { month: "short", day: "numeric" })}` : ""))));
+  }
+}
+
+/* ---------- usage table + cap ---------- */
+function renderUsage() {
+  const T = S.totals; if (!T || !S.cfg) return;
+  const when = (t) => new Date(t * 1000).toLocaleDateString([], { month: "short", day: "numeric" });
+  $("usage-sub").textContent = `Billing cycle resets on day ${S.cfg.billing_day} of the month · this cycle began ${when(T.cycle_start)}` +
+    (T.since ? ` · recording since ${when(T.since)}` : "");
+  const th = (s, extra) => el("th", extra, document.createTextNode(s));
+  // one period table: rows = [{label, sub, data:{today,yesterday,cycle,prev_cycle}}]
+  const periodTable = (first, rows) => {
+    const g = el("tr", { class: "group" }, th(""));
+    for (const n of ["Today", "Yesterday", "This cycle", "Last cycle"]) { const x = th(n); x.setAttribute("colspan", "2"); g.append(x); }
+    const sub = el("tr", {}, th(first));
+    for (let i = 0; i < 4; i++) sub.append(th("Down"), th("Up"));
+    const body = el("tbody");
+    for (const row of rows) {
+      const lab = el("td", {}, document.createTextNode(row.label));
+      if (row.sub) lab.append(document.createTextNode(" "), el("small", { class: "ip" }, document.createTextNode(row.sub)));
+      const r = el("tr", {}, lab);
+      for (const k of ["today", "yesterday", "cycle", "prev_cycle"]) {
+        r.append(el("td", {}, document.createTextNode(fmtBytes(row.data[k].down))), el("td", {}, document.createTextNode(fmtBytes(row.data[k].up))));
+      }
+      body.append(r);
+    }
+    return el("div", { class: "scroll", style: "max-height:none" }, el("table", {}, el("thead", {}, g, sub), body));
+  };
+  const parts = [periodTable("Interface", S.cfg.interfaces.map((c) => ({ label: c.label, data: T.ifaces[c.id] })))];
+  if (T.hosts && T.hosts.length) {
+    parts.push(el("div", { class: "sub tblhead" }, document.createTextNode("By device · WAN only (metered)")));
+    parts.push(periodTable("Device", T.hosts.map((h) => ({ label: h.name || h.key === "router" ? (h.name || h.key) : h.key, sub: h.name && h.key !== "router" ? h.key : "", data: h }))));
+  }
+  $("usage-table").replaceChildren(...parts);
+}
+
+/* ---------- data plan: meter with an even-pace marker, budget, projection, alerts ---------- */
+const PLAN_STATUS = {
+  ok:    ["✓", "Within an even pace", ""],
+  ahead: ["ℹ", "Above an even pace, but projected to finish within the cap", ""],
+  pace:  ["⚠", "On pace to exceed the cap", "warn"],
+  warn:  ["⚠", "Over 75% of the cap", "warn"],
+  crit:  ["⚠", "Over 90% of the cap", "crit"],
+  over:  ["✖", "Cap reached", "crit"],
+};
+function renderPlan() {
+  const P = S.plan, box = $("capcard");
+  if (!P || !P.enabled) { box.classList.add("hidden"); $("plan-hint").classList.toggle("hidden", !P); return; }
+  $("plan-hint").classList.add("hidden");
+  const md = (t) => new Date(t * 1000).toLocaleDateString([], { month: "short", day: "numeric" });
+  const [icon, label, sev] = PLAN_STATUS[P.status] || PLAN_STATUS.ok;
+  const pct = Math.min(100, P.pct), pacePct = Math.min(100, P.pace_expected / P.cap_bytes * 100);
+  const ahead = P.used - P.pace_expected;
+
+  const meter = el("div", { class: "meter " + sev, role: "meter", "aria-valuemin": "0", "aria-valuemax": String(P.cap_gb),
+    "aria-valuenow": (P.used / 1e9).toFixed(2), "aria-label": "Data used this cycle" });
+  meter.append(el("i", { style: `width:${pct.toFixed(1)}%` }));
+  const mark = el("b", { class: "pacemark", style: `left:${pacePct.toFixed(1)}%`, title: `Even pace by today: ${fmtBytes(P.pace_expected)}` });
+  const tile = (name, value, aux) => el("div", { class: "tile" }, el("div", { class: "lbl" }, document.createTextNode(name)),
+    el("div", { class: "val" }, document.createTextNode(value)), el("div", { class: "aux" }, document.createTextNode(aux || "")));
+  const proj = P.projected == null ? ["–", "needs a day of data"] : [fmtBytes(P.projected), `${(P.projected / P.cap_bytes * 100).toFixed(0)}% of the cap`];
+  const tiles = el("div", { class: "tiles plan-tiles" },
+    tile("Used today", fmtBytes(P.today), "on the metered link"),
+    tile("Budget per day", fmtBytes(P.per_day_left), `for the ${P.days_left.toFixed(0)} days left`),
+    tile("Projected at cycle end", proj[0], proj[1]),
+    tile("Remaining", fmtBytes(P.remaining), `of ${P.cap_gb} GB`));
+
+  const notes = [];
+  notes.push(`Counted from ${P.source === "devices" ? "per-device (IP-level) counts" : "interface counters, which read a few percent high because of link framing"}.`);
+  if (P.offset > 0) notes.push(`Includes ${fmtBytes(P.offset)} used outside this router (other lines on the plan, earlier usage) as of ${P.offset_set_at ? md(P.offset_set_at) : "setup"}; re-sync with: sudo ./bin/setup-router.sh plan --used <carrier GB>.`);
+  if (P.recording_since) notes.push(`Recording began on ${md(P.recording_since)}; usage before that is not included.`);
+  const sent = P.alerts.filter((a) => a.delivered).map((a) => (a.key === "pace" ? "pace warning" : a.key.slice(1) + "%") + " (" + md(a.ts) + ")");
+  const via = [P.email ? "email" : null, P.webhook ? "webhook" : null].filter(Boolean);
+  notes.push(`Alerts at ${P.thresholds.join(", ")}% and when the pace projects over the cap, via ${via.length ? via.join(" + ") + " and the system log" : "this page and the system log only"}. ` +
+    (sent.length ? "Sent this cycle: " + sent.join(", ") + "." : "None sent this cycle."));
+
+  box.classList.remove("hidden");
+  box.replaceChildren(
+    el("div", { class: "card-head" },
+      el("div", {}, el("h2", {}, document.createTextNode("Data plan")),
+        el("div", { class: "sub" }, document.createTextNode(`${P.iface} · cycle ${md(P.cycle_start)} – ${md(P.cycle_end - 1)} · day ${Math.min(P.days_total, Math.floor(P.days_elapsed) + 1)} of ${Math.round(P.days_total)}`))),
+      el("div", { class: "planstat " + sev }, document.createTextNode(icon + " " + label))),
+    el("div", { class: "meter-wrap" }, el("div", { class: "meterbox" }, meter, mark)),
+    el("div", { class: "meter-txt" },
+      el("span", {}, document.createTextNode(`${fmtBytes(P.used)} of ${P.cap_gb} GB (${P.pct.toFixed(P.pct < 10 ? 1 : 0)}%)`)),
+      el("span", { class: "sub" }, document.createTextNode(`even pace by today: ${fmtBytes(P.pace_expected)} (${ahead >= 0 ? fmtBytes(ahead) + " ahead" : fmtBytes(-ahead) + " under"})`))),
+    tiles,
+    ...notes.map((n) => el("div", { class: "note" }, document.createTextNode(n))));
+}
+
+/* ---------- data loading ---------- */
+async function j(url) { const r = await fetch(url, { cache: "no-store" }); if (!r.ok) throw new Error(url + " " + r.status); return r.json(); }
+let lastOk = 0;
+async function pollLive() {
+  try {
+    S.live = await j("api/live");
+    lastOk = Date.now();
+    $("status").textContent = "Updated " + new Date().toLocaleTimeString();
+    for (const id in cards) {
+      if (S.range === "live") renderCard(id);
+      else {                                   // keep the range chart, refresh only the live tiles
+        const live = S.live.ifaces[id], c = cards[id], last = (a) => (a.length ? a[a.length - 1] : null);
+        c.present = live.present;
+        c.state.textContent = live.present ? "" : "not connected"; c.state.className = "state" + (live.present ? "" : " off");
+        const d = S.series[S.range] && S.series[S.range].ifaces[id];
+        setTile(c.down, live.present ? last(live.down) : null, d ? stats(d.down) : null);
+        setTile(c.up, live.present ? last(live.up) : null, d ? stats(d.up) : null);
+      }
+    }
+  } catch (e) {
+    $("status").textContent = "Disconnected – retrying…";
+  }
+}
+async function loadSeries(range) {
+  if (range === "live") return;
+  for (const id in cards) cards[id].plot.classList.add("loading");
+  try { S.series[range] = await j("api/series?range=" + range); } catch (e) { /* keep previous frame */ }
+  for (const id in cards) cards[id].plot.classList.remove("loading");
+  if (S.range === range) renderAll();
+}
+async function loadTotals() { try { S.totals = await j("api/totals"); renderUsage(); } catch (e) {} }
+async function loadPlan() { try { S.plan = await j("api/plan"); renderPlan(); } catch (e) {} }
+async function loadHosts() { try { S.hosts = await j("api/hosts?range=" + hostRange()); renderDevices(); } catch (e) {} }
+
+/* ---------- controls ---------- */
+function seg(id, items, key, onchange) {
+  const box = $(id);
+  const paint = () => box.querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.v === S[key])));
+  for (const [v, label] of items) {
+    const b = el("button", { type: "button", "data-v": v }, document.createTextNode(label));
+    b.addEventListener("click", () => { S[key] = v; store.set("traffic." + key, v); paint(); onchange(); });
+    box.append(b);
+  }
+  paint();
+}
+
+async function init() {
+  S.range = store.get("traffic.range", "live"); if (!RANGES.some((r) => r[0] === S.range)) S.range = "live";
+  S.unit = store.get("traffic.unit", "bit"); if (!["bit", "byte"].includes(S.unit)) S.unit = "bit";
+  S.view = store.get("traffic.view", "chart"); if (!["chart", "table"].includes(S.view)) S.view = "chart";
+  seg("range", RANGES, "range", () => { if (S.range !== "live" && !S.series[S.range]) loadSeries(S.range); renderAll(); if (S.range !== "live") loadSeries(S.range); loadHosts(); });
+  seg("unit", [["bit", "bits/s"], ["byte", "bytes/s"]], "unit", renderAll);
+  seg("view", [["chart", "Chart"], ["table", "Table"]], "view", () => { renderAll(); renderDevices(); });
+  S.cfg = await j("api/config");
+  document.title = S.cfg.host + " traffic";
+  $("title").textContent = S.cfg.host + " traffic";
+  buildCards();
+  buildDevices();
+  await pollLive();
+  renderAll();
+  loadTotals();
+  loadHosts();
+  loadPlan();
+  if (S.range !== "live") loadSeries(S.range);
+  setInterval(pollLive, 2000);
+  setInterval(() => { if (S.range !== "live") loadSeries(S.range); }, 30000);
+  setInterval(loadTotals, 30000);
+  setInterval(loadHosts, 30000);
+  setInterval(loadPlan, 30000);
+  let rt; window.addEventListener("resize", () => { clearTimeout(rt); rt = setTimeout(renderAll, 120); });
+}
+init().catch((e) => { $("status").textContent = "Cannot reach the traffic service: " + e.message; });
+</script>
+</body>
+</html>

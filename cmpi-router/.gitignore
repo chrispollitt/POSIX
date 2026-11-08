@@ -1,0 +1,8 @@
+# local only: backups, scratch, the install ISO, and the running notes (they name accounts and hosts; this repo is public)
+BAK/
+**/BAK/
+__pycache__/
+*.iso
+HANDOFF*
+PATCH-README
+*.patch

@@ -1,0 +1,25 @@
+# LAN names served by cpbee's dnsmasq as <name> and <name>.cmnet (setup-router.sh dns).
+# Source: cmlaptop's /etc/hosts (2026-10-31).  Format: name[,alias...]=ipv4   (# starts a comment)
+# Not listed: cpbee itself (the dns mode adds it) and the retired cmpi/cmpi6 (the Pi is now cppi).
+cmdesktop=192.168.10.77
+cmlaptop=192.168.10.73
+cmprinter=192.168.10.66
+cppi=192.168.1.75
+cpmobile=192.168.1.70
+cpalarm=192.168.1.71
+cmtablet=192.168.1.64
+cmspeakers=192.168.1.72
+cmnotebook=192.168.1.65
+cmlaptopW=192.168.1.73
+mhalarm=192.168.1.67
+mhmobile=192.168.1.81
+cmrouter,cmrouter-lan,gateway-lan=192.168.1.254
+cpmac=192.168.50.129
+cpsol=192.168.50.130
+cpdos=192.168.1.20
+cpvax=192.168.20.30
+cs16=192.168.50.133
+vr180=192.168.123.1
+cpbee123=192.168.123.252
+cmpi123=192.168.123.253
+mesh,meshvs8875-1=192.168.123.101

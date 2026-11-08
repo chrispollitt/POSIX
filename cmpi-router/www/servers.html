@@ -1,0 +1,254 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cpbee servers</title>
+<style>
+  :root {
+    --bg: #f4f5f7; --card: #ffffff; --ink: #1b1f24; --muted: #5b6573; --line: #d9dde3; --link: #0a58ca;
+    --up: #1a7f37; --down: #c62828; --unk: #8b95a1; --plan: #9a6700;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14171b; --card: #1d2228; --ink: #e8ebef; --muted: #9aa5b1; --line: #2d343c; --link: #6ea8fe;
+      --up: #3fb950; --down: #f47067; --unk: #768390; --plan: #d4a72c;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 16px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 980px; margin: 0 auto; padding: 24px 16px 48px; }
+  h1 { font-size: 1.5rem; margin: 0 0 4px; }
+  h2 { font-size: 1.05rem; margin: 28px 0 10px; color: var(--muted); font-weight: 600; letter-spacing: .02em; text-transform: uppercase; }
+  .sub { color: var(--muted); margin: 0 0 8px; }
+  .grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
+  .card h3 { margin: 0 0 2px; font-size: 1.05rem; display: flex; align-items: center; gap: 8px; }
+  .card p { margin: 4px 0; color: var(--muted); font-size: .93rem; }
+  .card a.url { display: inline-block; margin-top: 4px; color: var(--link); word-break: break-all; }
+  .card a.url:hover { text-decoration: underline; }
+  .dot { width: 11px; height: 11px; border-radius: 50%; background: var(--unk); flex: none; }
+  .dot.up { background: var(--up); } .dot.down { background: var(--down); } .dot.plan { background: var(--plan); }
+  .state { margin-left: auto; font-size: .78rem; font-weight: 500; color: var(--muted); }
+  code { font: .86rem ui-monospace, SFMono-Regular, Consolas, monospace; background: color-mix(in srgb, var(--line) 55%, transparent); padding: 1px 5px; border-radius: 4px; }
+  .bar { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin: 6px 0 0; }
+  button { font: inherit; padding: 4px 12px; border-radius: 6px; border: 1px solid var(--line); background: var(--card); color: var(--ink); cursor: pointer; }
+  button:hover { border-color: var(--link); }
+  footer { margin-top: 32px; color: var(--muted); font-size: .85rem; }
+  /* the logged-in view (/servers/admin/): a banner, and start/stop/restart buttons on the cards that can be controlled */
+  .admin { display: none; margin: 10px 0 0; padding: 8px 12px; border: 1px solid var(--plan); border-radius: 8px; color: var(--ink); background: color-mix(in srgb, var(--plan) 14%, transparent); }
+  body.is-admin .admin { display: block; }
+  .ctl { display: none; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+  body.is-admin .ctl { display: flex; }
+  .ctl button { padding: 2px 10px; font-size: .88rem; }
+  .ctl button:disabled { opacity: .4; cursor: not-allowed; }
+  .ctl button.danger:hover:not(:disabled) { border-color: var(--down); color: var(--down); }
+  #msg { margin: 8px 0 0; min-height: 1.3em; color: var(--muted); }
+  #msg.bad { color: var(--down); }
+</style>
+</head>
+<body>
+<main>
+  <h1>cpbee servers</h1>
+  <p class="sub">What runs on this box and where to find it. All web pages use https with the Simple CA certificate; the links follow the name or address you used to open this page.</p>
+  <div class="bar"><button id="recheck" type="button">Check again</button><span class="sub" id="stamp"></span><a id="modelink" class="sub" href="admin/">Admin controls (log in)</a></div>
+  <p class="admin" id="adminbar">Admin view: logged in as <b id="who">?</b>. The buttons start, stop or restart a service on cpbee, and each press is logged (<code>journalctl -t cpbee-service</code>). <a href="../">Back to the public page</a>.</p>
+  <p id="msg" class="sub" aria-live="polite"></p>
+  <p class="sub" id="host" style="margin-top:6px"></p>
+
+  <h2>Web</h2>
+  <div class="grid" id="web"></div>
+
+  <h2>Terminal apps</h2>
+  <div class="grid" id="terminals"></div>
+
+  <h2>Other services</h2>
+  <div class="grid" id="other"></div>
+
+  <h2>Network and upstream</h2>
+  <div class="grid" id="upstream"></div>
+
+  <footer>Source: <code>www/servers.html</code> in the cmpi-router folder, installed by <code>sudo ./bin/setup-services.sh servers</code>. Dots: green = answers, red = should be up but is not, grey = off or not tested, amber = running but worth a look (booting, or a plain-text service is open). The web servers are tested from your browser (so a certificate problem shows as red); SSH, mail, FTP, telnet, the VAX, the terminal apps and mesh are tested from cpbee by <code>status.php</code>. The terminal apps ask for a user name and password. <code>/servers/admin/</code> is this page behind a login, with buttons to start, stop and restart some of the services (<code>sudo ./bin/setup-services.sh servers-admin</code> installs it).</footer>
+</main>
+
+<script>
+(function () {
+  var H = location.hostname;
+  function u(port, path) { return "https://" + H + (port ? ":" + port : "") + (path || "/"); }
+  // /servers/admin/ is this same page behind a login: it shows the start/stop/restart buttons and talks to control.php there
+  var ADMIN = /\/servers\/admin\//.test(location.pathname), BASE = ADMIN ? "../" : "";
+  if (ADMIN) { document.body.classList.add("is-admin"); document.getElementById("modelink").style.display = "none"; }
+  function span(s) { var d = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600), m = Math.floor(s % 3600 / 60); return d ? d + " d " + h + " h" : h ? h + " h " + m + " min" : m + " min"; }
+
+  // check: true = test with the browser; false = just describe it
+  var web = [
+    { name: "Apache site", url: u(0, "/"), note: "Apache with PHP-FPM, the site copied from the Pi (docroot /var/www/html). This page lives here.", check: true },
+    { name: "phpMyAdmin", url: u(0, "/phpmyadmin/"), note: "MariaDB admin. Log in with the user made by <code>setup-services.sh pma-user</code> (root cannot log in from the web).", check: true },
+    { name: "Traffic graphs", ctl: "traffic", url: u(8443, "/"), note: "WAN, LAN and VR180 usage, per-device accounting, data-plan meter and alerts. http://" + H + "/ redirects here.", check: true },
+    { name: "LibreNMS", url: u(8080, "/"), note: "Network monitoring: cpbee, the printer, later the VAX and the mesh devices.", check: true },
+    // plain http on the VAX itself (a browser cannot probe http from this https page, so status.php tests it from cpbee)
+    { name: "cpvax web server", url: "http://cpvax.cmnet/", note: "The DEC C web server on the VAX (VAX/httpd): static pages, directory listings and Perl or DCL CGI, port 80, plain http. Only up while the VAX is; open the cpvax terminal app below to power it on.",
+      status: function (r) { return r.vax_http ? ["up", "answers"] : !r.vax_console ? ["", "VAX off (starts on demand)"] : r.vax_telnet ? ["down", "no answer"] : ["plan", "VAX booting"]; } },
+    { name: "Webmin", ctl: "webmin", url: u(10000, "/"), note: "System administration. Log in as your Unix user.", check: true },
+    { name: "mesh", url: u(0, "/mesh/"), note: "The building's mesh / enterphone server (192.168.123.101 on the VR180 network), proxied by Apache. Tested from cpbee: counts as up only if it really answers.",
+      status: function (r) { return r.mesh ? ["up", "answers"] : ["down", "no answer"]; } }
+  ];
+  // The console apps in a browser window: ttyd behind nginx on port 8444 (source: POSIX/web-ttyd). They ask for the
+  // user name and password; LAN only. Whether nginx is listening comes from status.php (r.terminals); the VAX ones
+  // also show the state of the VAX.
+  function vaxState(r) { return !r.vax_console ? ["", "VAX off (starts on demand)"] : r.vax_telnet ? ["up", "VAX running"] : ["plan", "VAX booting"]; }
+  var terminals = [
+    { name: "Terminal apps", ctl: "terminals", url: u(8444, "/"), note: "The front door: pick a console app and it opens in a terminal window in this browser tab.",
+      status: function (r) { return r.terminals ? ["up", "listening"] : ["down", "not listening"]; } },
+    { name: "maze4", url: u(8444, "/maze4/"), note: "Fruitbots race through a procedurally generated maze, fully autonomous. Watch only.",
+      status: function (r) { return r.terminals ? ["up", "available"] : ["down", "not listening"]; } },
+    { name: "BIDeT 4D", url: u(8444, "/bidet/"), note: "Turn text into pictures: presets, fonts, SIXEL graphics in the terminal.",
+      status: function (r) { return r.terminals ? ["up", "available"] : ["down", "not listening"]; } },
+    { name: "cpvax", url: u(8444, "/cpvax/"), note: "The OpenVMS VAX: a normal VT100 login over telnet. Powers the VAX on when it is off.", status: vaxState },
+    { name: "cpvax console", url: u(8444, "/cpvax-console/"), note: "The simh console (OPA0:): power the VAX on here and watch it boot. One at a time; Ctrl-E reaches the simulator itself.", status: vaxState },
+    { name: "WAX & TAPE (waxweb)", url: u(8444, "/waxweb/"), note: "A web page over the vinyl and cassette collection on the VAX: it types at the COBOL program for you. Powers the VAX on from the page.", status: vaxState }
+  ];
+  // status(r): r = the JSON from status.php (tested on cpbee itself); returns [dot class, label]. "" = grey, "plan" = amber
+  var other = [
+    { name: "VAX (cpvax)", ctl: "vax", note: "OpenVMS 7.3 under simh, address 192.168.20.30 on its own routed network behind cpbee. Off until wanted: the cpvax terminal apps above power it on (or <code>sudo systemctl start vax</code>), and it shuts itself down in an orderly way after 30 idle minutes (typing counts as activity). Console: <code>telnet 127.0.0.1 2323</code> on cpbee only. Never <code>systemctl stop vax</code> by hand (a power cut for VMS): <code>vax-ctl shutdown</code> does it properly.",
+      status: function (r) { return !r.vax_console ? ["", "off (starts on demand)"] : r.vax_telnet ? ["up", "running"] : ["plan", "booting"]; } },
+    { name: "Floyd (chat bot)", ctl: "floyd", note: "Floyd the robot, tvchat's central bot (<code>tvchat-floyd.service</code>, runs as the user floyd). On the LAN IRC server below he is <code>Floyd</code> in #test (<code>/invite Floyd #channel</code> brings him, <code>/msg Floyd !help</code> asks); on Libera.Chat he is <code>floyd-bot</code>, and comes only when his admins invite him; and he answers mail to cwp+floyd@u-l.ca. <code>!status</code> tells how he is; <code>!claude</code> is for his admins on the LAN and by mail, never on Libera.",
+      status: function (r) { return r.floyd ? ["up", "running" + (r.floyd_up_s != null ? " " + span(r.floyd_up_s) : "")] : ["down", "not running"]; } },
+    { name: "Floyd gate (master Floyd)", note: "The door to the central Floyd for tvcal, tvmail and tvchat (inside <code>tvchat-floyd.service</code>, plain TCP on port 7077, LAN only, shared token in <code>/etc/tvchat/floyd-gate.token</code>). Set <code>server = " + H + "</code> and the token under <code>[floyd]</code> and the apps ask this Floyd first (one memory, Claude from here) and use their own local Floyd when it is out of reach. Restart it with the Floyd button above. Tested here by the TCP side only.",
+      status: function (r) { return r.floydgate ? ["up", "listening"] : ["down", "not listening"]; } },
+    { name: "IRC server (Ergo)", ctl: "ergo", note: "The LAN's IRC server (<code>ergo.service</code>, TLS on port 6697): tvchat, Floyd and any IRC client connect to <code>" + H + ":6697</code>. Tested here by the TCP side only.",
+      status: function (r) { return r.ergo ? ["up", "listening"] : ["down", "not listening"]; } },
+    { name: "talkd (chat)", ctl: "talkd", note: "Talk and tvchat server (<code>talkd.service</code>, port 518, tvchat relay 5181-5188), also answers the VAX subnet: <code>talk user@cpbee</code> and <code>PHONE</code> from cpvax, <code>talk system@cpvax</code> from here. The VAX side is TCPware_TALKD, shown on <a href=\"http://cpvax.cmnet/status.html\">the VAX status page</a>. Tested here by the TCP side only.",
+      status: function (r) { return r.talkd ? ["up", "listening"] : ["down", "not listening"]; } },
+    { name: "Calendar server (Radicale)", ctl: "radicale", note: "The calendar and to-do server for tvcal (<code>radicale.service</code>, CalDAV over TLS on port 5232, self-signed certificate): the calendar is <code>https://" + H + ":5232/chris/calendar/</code>. tvcal on every machine reads and writes it, and Floyd reads it for his admins (<code>!todo</code>, <code>!cal</code>, <code>!event</code>) with his own limited login. Phones and other CalDAV clients can use the same address. Tested here by the TCP side only.",
+      status: function (r) { return r.radicale ? ["up", "listening"] : ["down", "not listening"]; } },
+    { name: "FTP and telnet", note: "Off until needed: <code>sudo ./bin/setup-services.sh on ftp</code> or <code>on telnet</code>; <code>off</code> closes them again. Plain text, LAN only. Amber means one is open right now.",
+      status: function (r) { var on = []; if (r.ftp) on.push("FTP"); if (r.telnet) on.push("telnet"); return on.length ? ["plan", on.join(" + ") + " open"] : ["", "both off"]; } },
+    { name: "SSH", note: "Port 22 from the LAN: <code>ssh chris@" + H + "</code>.",
+      status: function (r) { return r.ssh ? ["up", "listening"] : ["down", "not listening"]; } },
+    { name: "Mailbox server (Dovecot)", ctl: "dovecot", note: "The IMAP server (<code>dovecot.service</code>): the mail itself lives here, and tvmail, phones and mail clients read it at <code>" + H + "</code>, IMAP over TLS on port 993 (plain IMAP with STARTTLS on 143; Sieve filter rules on 4190). Tested here by the TCP side only.",
+      status: function (r) { return r.imaps ? ["up", "listening"] : ["down", "not listening"]; } },
+    { name: "Mail relay (Postfix)", ctl: "postfix", note: "Port 25 from the LAN only, sends through u-l.ca. Alert mail from the traffic graphs also uses it.",
+      status: function (r) { return r.smtp ? ["up", "listening"] : ["down", "not listening"]; } }
+  ];
+
+  // what cpbee talks to; tested from cpbee by status.php (the old Pi status page had the same idea)
+  var upstream = [
+    { name: "Old home router (cmrouter)", url: "http://192.168.1.254/", note: "The existing Telus router: fibre, Wi-Fi for the phones. In TEST and MIDDLE cpbee is plugged into it; it goes away at FINAL.",
+      status: function (r) { return r.router_old ? ["up", "answers"] : ["down", "no answer"]; } },
+    { name: "VR180 router", url: "http://192.168.123.1/", note: "The building's Wi-Fi router that cpbee joins as a client (the vr180 network). Reached through cpbee's Wi-Fi.",
+      status: function (r) { return r.router_vr180 ? ["up", "answers"] : ["down", "no answer"]; } },
+    { name: "Internet", note: "Can cpbee open a connection to www.telus.com and www.hostupon.com (port 443)? In TEST mode 2 it goes out through the old router; at FINAL it will be the mobile-data link.",
+      status: function (r) {
+        var n = (r.net_telus ? 1 : 0) + (r.net_host ? 1 : 0);
+        return n === 2 ? ["up", "both answer"] : n === 1 ? ["plan", r.net_telus ? "telus only" : "HostUpon only"] : ["down", "no internet"];
+      } }
+  ];
+
+  function card(s) {
+    var d = document.createElement("div"); d.className = "card";
+    var h = document.createElement("h3");
+    var dot = document.createElement("span"); dot.className = "dot" + (s.plan ? " plan" : ""); h.appendChild(dot);
+    var t = document.createElement("span"); t.textContent = s.name; h.appendChild(t);
+    var st = document.createElement("span"); st.className = "state"; h.appendChild(st);
+    d.appendChild(h);
+    var p = document.createElement("p"); p.innerHTML = s.note; d.appendChild(p);
+    if (s.url) { var a = document.createElement("a"); a.className = "url"; a.href = s.url; a.textContent = s.url.replace(/^https:\/\//, ""); if (s.plan) a.removeAttribute("href"); d.appendChild(a); }
+    s.dot = dot; s.st = st;
+    if (s.plan) st.textContent = "planned";
+    if (s.ctl) { var cb = document.createElement("div"); cb.className = "ctl"; d.appendChild(cb); s.ctlbox = cb; }   // filled in the admin view
+    return d;
+  }
+
+  var wrapWeb = document.getElementById("web"), wrapOther = document.getElementById("other");
+  web.forEach(function (s) { wrapWeb.appendChild(card(s)); });
+  var wrapTerm = document.getElementById("terminals");
+  terminals.forEach(function (s) { wrapTerm.appendChild(card(s)); });
+  other.forEach(function (s) { wrapOther.appendChild(card(s)); });
+  var wrapUp = document.getElementById("upstream");
+  upstream.forEach(function (s) { wrapUp.appendChild(card(s)); });
+
+  // ---- the logged-in view: start / stop / restart, through control.php (which asks the root helper cpbee-service) ----
+  var svc = {};                                   // name -> {state, actions, label}, as control.php lists them
+  function say(t, bad) { var m = document.getElementById("msg"); m.textContent = t; m.className = "sub" + (bad ? " bad" : ""); }
+  function renderControls() {
+    web.concat(terminals, other).forEach(function (s) {
+      if (!s.ctl || !s.ctlbox) return;
+      var v = svc[s.ctl];
+      s.ctlbox.textContent = "";
+      if (!v) return;
+      v.actions.forEach(function (a) {
+        var b = document.createElement("button"); b.type = "button";
+        b.textContent = a.charAt(0).toUpperCase() + a.slice(1);
+        if (a !== "start") b.className = "danger";
+        b.disabled = a === "start" ? v.state === "active" : v.state !== "active";
+        b.title = v.label + " is " + (v.state || "unknown");
+        b.addEventListener("click", function () { act(s.ctl, a); });
+        s.ctlbox.appendChild(b);
+      });
+    });
+  }
+  function adopt(j) {
+    svc = {};
+    (j.services || []).forEach(function (x) { svc[x.name] = x; });
+    if (j.user) document.getElementById("who").textContent = j.user;
+    renderControls();
+  }
+  function loadControls() {
+    fetch("control.php", { cache: "no-store" })
+      .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+      .then(adopt)
+      .catch(function (e) { say("Could not load the controls: " + e.message + ". Is control.php installed (setup-services.sh servers-admin)?", true); });
+  }
+  function act(name, action) {
+    var v = svc[name], what = v ? v.label : name;
+    var q = name === "vax" && action === "stop" ? "Shut the VAX down in an orderly way? It takes a few minutes." : action[0].toUpperCase() + action.slice(1) + " " + what + "?";
+    if (action !== "start" && !window.confirm(q)) return;
+    say(action + " " + what + " ...", false);
+    Array.prototype.forEach.call(document.querySelectorAll(".ctl button"), function (b) { b.disabled = true; });
+    fetch("control.php", { method: "POST", cache: "no-store",
+        headers: { "X-CPBEE": "1", "Content-Type": "application/x-www-form-urlencoded" },
+        body: "action=" + encodeURIComponent(action) + "&name=" + encodeURIComponent(name) })
+      .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
+      .then(function (x) { say(x.j.message || (x.ok ? "done" : "refused"), !x.ok); adopt(x.j); setTimeout(checkAll, 2500); })
+      .catch(function (e) { say("The request failed: " + e.message, true); loadControls(); });
+  }
+
+  function probe(s) {
+    s.dot.className = "dot"; s.st.textContent = "checking";
+    var ctl = new AbortController(), timer = setTimeout(function () { ctl.abort(); }, 4000);
+    // no-cors: we cannot read the answer, only learn whether something answered (certificate trusted, port open)
+    fetch(s.url, { mode: "no-cors", cache: "no-store", signal: ctl.signal })
+      .then(function () { s.dot.className = "dot up"; s.st.textContent = "answers"; })
+      .catch(function () { s.dot.className = "dot down"; s.st.textContent = "no answer"; })
+      .then(function () { clearTimeout(timer); });
+  }
+  // services a browser cannot probe (ssh, smtp, ftp, telnet, the VAX) and anything behind a proxy: status.php tests them from cpbee
+  function serverChecks() {
+    var all = web.concat(terminals, other, upstream).filter(function (s) { return s.status; });
+    function set(s, v) { s.dot.className = "dot" + (v[0] ? " " + v[0] : ""); s.st.textContent = v[1]; }
+    all.forEach(function (s) { set(s, ["", "checking"]); });
+    fetch(BASE + "status.php", { cache: "no-store" })
+      .then(function (r) { if (!r.ok) throw new Error(r.status); return r.json(); })
+      .then(function (r) {
+        all.forEach(function (s) { set(s, s.status(r)); });
+        var h = document.getElementById("host");
+        if (r.uptime_s != null) {
+          var d = Math.floor(r.uptime_s / 86400), hh = Math.floor(r.uptime_s % 86400 / 3600), m = Math.floor(r.uptime_s % 3600 / 60);
+          h.textContent = "cpbee has been up " + (d ? d + " d " : "") + hh + " h " + m + " min" + (r.load ? ", load average " + r.load.join(", ") : "") + ".";
+        }
+      })
+      .catch(function () { all.forEach(function (s) { set(s, ["", "unknown"]); }); document.getElementById("host").textContent = ""; });
+  }
+  function checkAll() {
+    web.forEach(function (s) { if (s.check) probe(s); });
+    serverChecks();
+    if (ADMIN) loadControls();
+    document.getElementById("stamp").textContent = "checked " + new Date().toLocaleTimeString();
+  }
+  document.getElementById("recheck").addEventListener("click", checkAll);
+  checkAll();
+})();
+</script>
+</body>
+</html>

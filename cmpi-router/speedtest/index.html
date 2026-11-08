@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="app-version" content="1.1 (2026-10-11)">
+<title>Speedtest</title>
+<style>
+:root {
+  --bg: #ffffff; --fg: #1b1f23; --muted: #5b6570; --card: #f4f6f8; --line: #d5dae0;
+  --dl: #2a6fdb; --ul: #e0780b; --ping: #1c9a6b; --btn: #1b1f23; --btnfg: #ffffff;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14171a; --fg: #e8eaed; --muted: #9aa3ad; --card: #1e2328; --line: #343b43;
+    --dl: #6aa6ff; --ul: #ffa94d; --ping: #4cd0a0; --btn: #e8eaed; --btnfg: #14171a;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 42rem; margin: 0 auto; padding: 1rem 16px 3rem; }
+h1 { margin: 0.4em 0 0.1em; font-size: 1.8rem; text-align: center; }
+h2 { margin: 1.4em 0 0.4em; font-size: 1.05rem; display: flex; gap: 1em; align-items: baseline; flex-wrap: wrap; }
+.sub { text-align: center; color: var(--muted); margin: 0 0 1rem; }
+.controls { display: flex; gap: 0.6rem; justify-content: center; align-items: center; flex-wrap: wrap; margin: 0.8rem 0; }
+button { font: inherit; cursor: pointer; border: 0; border-radius: 6px; padding: 0.55em 1.4em; background: var(--btn); color: var(--btnfg); }
+button.quiet { background: transparent; color: var(--muted); border: 1px solid var(--line); padding: 0.3em 0.8em; font-size: 0.85rem; }
+input[type=text] { font: inherit; padding: 0.5em 0.7em; border: 1px solid var(--line); border-radius: 6px; background: var(--card); color: var(--fg); min-width: 0; width: 15rem; max-width: 100%; }
+#state { text-align: center; color: var(--muted); min-height: 1.5em; }
+.tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0.6rem; margin-top: 0.8rem; }
+.tile { background: var(--card); border-radius: 8px; padding: 0.6rem 0.7rem; border-top: 3px solid var(--line); }
+.tile .k { font-size: 0.8rem; color: var(--muted); }
+.tile .v { font-size: 1.6rem; font-weight: 600; font-variant-numeric: tabular-nums; }
+.tile .u { font-size: 0.8rem; color: var(--muted); margin-left: 0.2em; font-weight: 400; }
+.tile .s { font-size: 0.75rem; color: var(--muted); min-height: 1.1em; }
+@media (max-width: 30rem) { .tiles { grid-template-columns: repeat(2, 1fr); } }
+.legend { font-size: 0.85rem; color: var(--muted); font-weight: 400; }
+.legend i { display: inline-block; width: 0.9em; height: 0.25em; margin-right: 0.3em; vertical-align: middle; border-radius: 2px; }
+svg { width: 100%; height: auto; display: block; background: var(--card); border-radius: 8px; }
+svg text { fill: var(--muted); font-size: 11px; font-family: inherit; }
+svg .grid { stroke: var(--line); stroke-width: 1; }
+svg .ser { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+table { width: 100%; border-collapse: collapse; font-size: 0.85rem; font-variant-numeric: tabular-nums; }
+th, td { padding: 0.3em 0.4em; text-align: right; border-bottom: 1px solid var(--line); }
+th:first-child, td:first-child, th:nth-child(2), td:nth-child(2) { text-align: left; }
+th { color: var(--muted); font-weight: 500; }
+.note { color: var(--muted); font-size: 0.8rem; margin-top: 1.5rem; }
+.err { color: #d33; }
+.ver { text-align: center; color: var(--muted); font-size: 0.75rem; margin: 1.2rem 0 0; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Speedtest</h1>
+  <p class="sub" id="who">&nbsp;</p>
+
+  <div class="controls">
+    <input type="text" id="label" maxlength="30" placeholder="Label, e.g. wired or wifi (saved with the result)" aria-label="Label for this run">
+    <button id="go">Run speedtest</button>
+  </div>
+  <div id="state" role="status" aria-live="polite"></div>
+
+  <div class="tiles">
+    <div class="tile" style="border-color:var(--dl)"><div class="k">Download</div><div class="v"><span id="vDl">&ndash;</span><span class="u">Mbit/s</span></div><div class="s" id="sDl"></div></div>
+    <div class="tile" style="border-color:var(--ul)"><div class="k">Upload</div><div class="v"><span id="vUl">&ndash;</span><span class="u">Mbit/s</span></div><div class="s" id="sUl"></div></div>
+    <div class="tile" style="border-color:var(--ping)"><div class="k">Latency</div><div class="v"><span id="vPing">&ndash;</span><span class="u">ms</span></div><div class="s" id="sPing"></div></div>
+    <div class="tile" style="border-color:var(--ping)"><div class="k">Jitter</div><div class="v"><span id="vJit">&ndash;</span><span class="u">ms</span></div><div class="s">avg change between requests</div></div>
+  </div>
+
+  <h2>Speed <span class="legend"><i style="background:var(--dl)"></i>Download <i style="background:var(--ul)"></i>Upload</span></h2>
+  <svg id="chSpeed" viewBox="0 0 600 230" role="img" aria-label="Download and upload speed over time"></svg>
+
+  <h2>Latency <span class="legend"><i style="background:var(--ping)"></i>each request, dashed = average</span></h2>
+  <svg id="chLat" viewBox="0 0 600 190" role="img" aria-label="Latency of each request"></svg>
+
+  <h2>Previous runs <button class="quiet" id="clear" type="button">Clear</button></h2>
+  <table id="hist"><thead><tr><th>When</th><th>Label</th><th>Down</th><th>Up</th><th>Ping</th><th>Jitter</th></tr></thead><tbody></tbody></table>
+
+  <p class="note">Speeds are line rate in Mbit/s (payload plus TCP/IP/Ethernet headers, so a gigabit link can read close to 1000), measured over several parallel streams, with the first seconds of each phase left out while the link ramps up. Latency is the time from sending a small HTTPS request to the first byte of the reply (browser request timing, so it includes the server's own response time), on an idle link, after two warm-up requests. Run history is stored in this browser only. Options in the URL: <code>?dl=10&amp;ul=10&amp;ping=30</code> (seconds, seconds, requests) and <code>?auto</code> to start at once.</p>
+  <p class="ver">Speedtest version <span id="ver">?</span></p>
+</main>
+
+<script>
+'use strict'
+var $ = function (id) { return document.getElementById(id) }
+// version lives only in <meta name="app-version"> (bump it there on every change)
+$('ver').textContent = document.querySelector('meta[name=app-version]').content
+var q = new URLSearchParams(location.search)
+function num (name, def, min, max) {
+  var v = parseFloat(q.get(name))
+  return isFinite(v) ? Math.min(max, Math.max(min, v)) : def
+}
+var CFG = {
+  dl: num('dl', 10, 3, 60),      // seconds of download
+  ul: num('ul', 10, 3, 60),      // seconds of upload
+  ping: Math.round(num('ping', 30, 5, 200)), // latency samples
+  warm: 2,                       // warm-up requests (TCP + TLS setup) not counted
+  // The worker's default factor (1048576/925000) assumes internet MTUs and reports mebibits.
+  // 1.114 turns payload bytes into line-rate Mbit/s for a 1500-byte MTU LAN
+  // (1538 bytes on the wire per 1448 bytes of TCP payload).
+  oh: num('oh', 1.114, 1, 1.5)
+}
+
+/* ---------- charts: small hand-drawn SVG, no external libraries ---------- */
+function niceStep (raw) {
+  var e = Math.pow(10, Math.floor(Math.log10(raw))), f = raw / e
+  return (f <= 1 ? 1 : f <= 2 ? 2 : f <= 5 ? 5 : 10) * e
+}
+function fmt (v) { return String(+v.toFixed(v >= 10 ? 0 : 2)) }
+
+function LineChart (svg, opt) {
+  this.svg = svg
+  this.o = opt           // {series:[{color}], xTitle, yTitle, xMin (minimum x span)}
+  this.data = opt.series.map(function () { return [] })
+  this.hline = null      // optional dashed horizontal line (value)
+  this.render()
+}
+LineChart.prototype.reset = function () {
+  this.data = this.o.series.map(function () { return [] })
+  this.hline = null
+  this.render()
+}
+LineChart.prototype.add = function (i, x, y) { this.data[i].push([x, y]) }
+LineChart.prototype.render = function () {
+  var W = 600, H = +this.svg.getAttribute('viewBox').split(' ')[3]
+  var L = 44, R = 12, T = 18, B = 30, pw = W - L - R, ph = H - T - B
+  var xmax = this.o.xMin, ymax = 0
+  this.data.forEach(function (s) { s.forEach(function (p) { if (p[0] > xmax) xmax = p[0]; if (p[1] > ymax) ymax = p[1] }) })
+  if (this.hline > ymax) ymax = this.hline
+  var ystep = niceStep((ymax > 0 ? ymax * 1.05 : 1) / 4)
+  var ytop = ystep * Math.ceil((ymax > 0 ? ymax * 1.02 : 1) / ystep)
+  var xstep = niceStep(xmax / 6), xtop = xstep * Math.ceil(xmax / xstep)
+  var sx = function (x) { return (L + pw * x / xtop).toFixed(1) }
+  var sy = function (y) { return (T + ph * (1 - y / ytop)).toFixed(1) }
+  var s = ''
+  for (var y = 0; y <= ytop + 1e-9; y += ystep) {
+    s += '<line class="grid" x1="' + L + '" x2="' + (W - R) + '" y1="' + sy(y) + '" y2="' + sy(y) + '"/>' +
+         '<text x="' + (L - 6) + '" y="' + (+sy(y) + 4) + '" text-anchor="end">' + fmt(y) + '</text>'
+  }
+  for (var x = 0; x <= xtop + 1e-9; x += xstep) {
+    s += '<text x="' + sx(x) + '" y="' + (H - B + 15) + '" text-anchor="middle">' + fmt(x) + '</text>'
+  }
+  s += '<text x="' + L + '" y="11">' + this.o.yTitle + '</text>' +
+       '<text x="' + (W - R) + '" y="' + (H - 4) + '" text-anchor="end">' + this.o.xTitle + '</text>'
+  if (this.hline !== null) {
+    s += '<line x1="' + L + '" x2="' + (W - R) + '" y1="' + sy(this.hline) + '" y2="' + sy(this.hline) +
+         '" style="stroke:' + this.o.series[0].color + ';stroke-dasharray:5 4;opacity:.8"/>'
+  }
+  this.data.forEach(function (pts, i) {
+    if (!pts.length) return
+    var d = pts.map(function (p) { return sx(p[0]) + ',' + sy(p[1]) }).join(' ')
+    if (pts.length === 1) d += ' ' + (+sx(pts[0][0]) + 0.1) + ',' + sy(pts[0][1])
+    s += '<polyline class="ser" style="stroke:' + this.o.series[i].color + '" points="' + d + '"/>'
+  }, this)
+  this.svg.innerHTML = s
+}
+
+var chSpeed = new LineChart($('chSpeed'), { series: [{ color: 'var(--dl)' }, { color: 'var(--ul)' }], xTitle: 'seconds', yTitle: 'Mbit/s', xMin: Math.max(CFG.dl, CFG.ul) })
+var chLat = new LineChart($('chLat'), { series: [{ color: 'var(--ping)' }], xTitle: 'request #', yTitle: 'ms', xMin: CFG.ping })
+
+/* ---------- run history (this browser only; page works without it) ---------- */
+var HKEY = 'speedtest.history.v1'
+function loadHist () { try { return JSON.parse(localStorage.getItem(HKEY)) || [] } catch (e) { return [] } }
+function saveHist (h) { try { localStorage.setItem(HKEY, JSON.stringify(h.slice(0, 30))) } catch (e) {} }
+function showHist () {
+  var tb = document.querySelector('#hist tbody')
+  tb.textContent = ''
+  loadHist().forEach(function (r) {
+    var tr = document.createElement('tr')
+    var when = new Date(r.t).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+    var cells = [when, r.label || r.ip || '', r.dl, r.ul, r.ping, r.jit]
+    cells.forEach(function (c) { var td = document.createElement('td'); td.textContent = c === undefined || c === null ? '' : c; tr.appendChild(td) })
+    tb.appendChild(tr)
+  })
+}
+$('clear').onclick = function () { try { localStorage.removeItem(HKEY) } catch (e) {} showHist() }
+try { $('label').value = localStorage.getItem('speedtest.label') || '' } catch (e) {}
+
+/* ---------- test ---------- */
+var S = { running: false, aborted: false, ctl: null, worker: null, stopSpeed: null }
+var res = {}
+function speed (v) { v = +v; return v >= 100 ? v.toFixed(0) : v.toFixed(1) }
+function setState (t, isErr) { var e = $('state'); e.textContent = t; e.className = isErr ? 'err' : '' }
+function clearTiles () {
+  ['vDl', 'vUl', 'vPing', 'vJit'].forEach(function (id) { $(id).innerHTML = '&ndash;' })
+  ;['sDl', 'sUl', 'sPing'].forEach(function (id) { $(id).textContent = '' })
+  res = {}
+}
+function sleep (ms) { return new Promise(function (r) { setTimeout(r, ms) }) }
+
+// Latency = time from sending the request to the first byte of the reply (browser resource
+// timing). That leaves out connection setup and the browser's own queueing, which added
+// 5-10 ms of noise to the plain fetch time. Falls back to the fetch time if no timing is reported.
+function requestTime (url, fallback) {
+  var e = performance.getEntriesByName(url).pop()
+  performance.clearResourceTimings()
+  var t = e ? e.responseStart - e.requestStart : 0
+  return t > 0 ? t : fallback
+}
+
+function pingPhase () {
+  S.ctl = new AbortController()
+  var samples = []
+  var run = async function () {
+    for (var i = 0; i < CFG.ping + CFG.warm; i++) {
+      var t0 = performance.now()
+      var r = await fetch('empty.php?r=' + Math.random(), { cache: 'no-store', signal: S.ctl.signal })
+      await r.arrayBuffer()
+      var dt = requestTime(r.url, performance.now() - t0)
+      if (i >= CFG.warm) {
+        samples.push(dt)
+        chLat.add(0, samples.length, dt)
+        var avg = samples.reduce(function (a, b) { return a + b }, 0) / samples.length
+        chLat.hline = avg
+        chLat.render()
+        $('vPing').textContent = avg.toFixed(1)
+      }
+      await sleep(30)
+    }
+    var n = samples.length, sum = 0, jit = 0
+    samples.forEach(function (v, k) { sum += v; if (k) jit += Math.abs(v - samples[k - 1]) })
+    return { avg: sum / n, min: Math.min.apply(null, samples), max: Math.max.apply(null, samples), jit: n > 1 ? jit / (n - 1) : 0 }
+  }
+  return run()
+}
+
+function speedPhase () {
+  return new Promise(function (resolve) {
+    var w = new Worker('speedtest_worker.min.js')
+    S.worker = w
+    var phase = -1, t0 = 0, last = { 1: '', 3: '' }
+    var timer = setInterval(function () { w.postMessage('status') }, 100)
+    var finish = function (r) { clearInterval(timer); w.terminate(); S.worker = null; S.stopSpeed = null; resolve(r) }
+    S.stopSpeed = function () { finish({ status: 5 }) }
+    w.onerror = function () { finish({ status: 6 }) }
+    w.onmessage = function (ev) {
+      var d = ev.data.split(';'), st = +d[0]
+      if (d[4]) $('who').textContent = 'You are ' + d[4] + ' · server ' + location.hostname
+      if (st !== phase) {
+        phase = st; t0 = performance.now()
+        if (st === 1) setState('Testing download…')
+        if (st === 3) setState('Testing upload…')
+      }
+      var t = (performance.now() - t0) / 1000
+      if (st === 1 && +d[1] > 0 && d[1] !== last[1]) { last[1] = d[1]; chSpeed.add(0, t, +d[1]); chSpeed.render(); $('vDl').textContent = speed(d[1]) }
+      if (st === 3 && +d[2] > 0 && d[2] !== last[3]) { last[3] = d[2]; chSpeed.add(1, t, +d[2]); chSpeed.render(); $('vUl').textContent = speed(d[2]) }
+      if (st >= 4) finish({ status: st, dl: d[1], ul: d[2] })
+    }
+    w.postMessage('start ' + JSON.stringify({
+      url_ping: '-1',               // latency is measured by the page (individual samples, idle link)
+      time_dl: CFG.dl, time_ul: CFG.ul,
+      overheadCompensationFactor: CFG.oh
+    }))
+  })
+}
+
+function endRun (msg, isErr) {
+  S.running = false
+  $('go').textContent = 'Run speedtest'
+  setState(msg, isErr)
+}
+
+async function runTest () {
+  if (S.running) return
+  S.running = true; S.aborted = false
+  clearTiles(); chSpeed.reset(); chLat.reset()
+  $('go').textContent = 'Abort'
+  try { localStorage.setItem('speedtest.label', $('label').value) } catch (e) {}
+  setState('Measuring latency…')
+  var p
+  try {
+    p = await pingPhase()
+  } catch (e) {
+    return endRun(S.aborted ? 'Aborted.' : 'Could not reach empty.php on this server (' + e.message + ').', !S.aborted)
+  }
+  res.ping = p.avg.toFixed(1); res.jit = p.jit.toFixed(1)
+  $('vPing').textContent = res.ping; $('vJit').textContent = res.jit
+  $('sPing').textContent = 'min ' + p.min.toFixed(1) + ' · max ' + p.max.toFixed(1)
+  if (S.aborted) return endRun('Aborted.')
+
+  var r = await speedPhase()
+  if (S.aborted || r.status === 5) return endRun('Aborted.')
+  if (r.status === 6) return endRun('The test worker failed to load (speedtest_worker.min.js).', true)
+  res.dl = speed(r.dl); res.ul = speed(r.ul)
+  $('vDl').textContent = res.dl; $('vUl').textContent = res.ul
+  var h = loadHist()
+  h.unshift({ t: Date.now(), label: $('label').value.trim(), ip: ($('who').textContent.match(/You are (\S+)/) || [])[1], dl: res.dl, ul: res.ul, ping: res.ping, jit: res.jit })
+  saveHist(h); showHist()
+  endRun('Done.')
+}
+
+function abortTest () {
+  S.aborted = true
+  if (S.ctl) S.ctl.abort()
+  if (S.stopSpeed) S.stopSpeed()
+}
+
+$('go').onclick = function () { if (S.running) abortTest(); else runTest() }
+showHist()
+if (q.has('auto')) runTest()
+</script>
+</body>
+</html>
