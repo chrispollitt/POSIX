@@ -94,9 +94,11 @@ fi
 # --- Windows firewall helpers ---------------------------------------------------------------------------------
 ps() { powershell.exe -NoProfile -NonInteractive -Command "$1" 2>&1 | tr -d '\r'; }
 
-ncpath=$(command -v nc)
+ncpath=$(readlink -f "$(command -v nc)")          # Cygwin resolves /usr/bin/nc to /usr/bin/nc.exe
+[ -f "$ncpath" ] || ncpath=$ncpath.exe
 ncwin=$(cygpath -w "$ncpath")
-[ -f "$ncpath.exe" ] && ncwin="$ncwin.exe"
+case $ncwin in *.[eE][xX][eE]) ;; *) ncwin=$ncwin.exe ;; esac   # the rule needs the real .exe path; a wrong path matches nothing and Windows shows its pop-up
+[ -f "$ncpath" ] || [ "$firewall" = 0 ] || { echo "cannot find nc.exe (looked for $ncwin)" >&2; exit 2; }
 rule="nc.exe (test-upnp)"
 
 fw_open() {
