@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  Open BiglyBT's listen port with UPnP, then start BiglyBT.
+  Open BiglyBT's listen port range (n to n+9) with UPnP, then start BiglyBT.
 
 .DESCRIPTION
   1. Reads the port from %APPDATA%\BiglyBT\java.vmoptions (first line that looks like "...port...=NNNN",
@@ -8,7 +8,9 @@
   2. Asks the router (cpbee's miniupnpd, which passes it on to cmrouter) to forward that port, TCP and UDP,
      to this PC.  Uses upnpc.exe (miniupnpc) if it is on PATH, otherwise Windows' built-in UPnP COM object
      (HNetCfg.NATUPnP), so nothing needs installing.
-  2b. Opens that port (TCP + UDP, inbound) in Windows Firewall, once; a UAC prompt appears if the rule must be created.
+  2b. Windows Firewall: allows ports n..n+9 (TCP + UDP, inbound) and BiglyBT.exe itself (all ports, Private + Public),
+      and deletes any Block rules for BiglyBT (left by a cancelled "allow?" pop-up).  A UAC prompt appears when a rule
+      is missing; -FixFirewall forces the step.
   3. Starts BiglyBT.exe.  With -CleanupOnExit it waits for BiglyBT to quit and removes the mappings.
 
   Run:   powershell -ExecutionPolicy Bypass -File .\biglybt-launch.ps1
@@ -26,7 +28,8 @@ param(
     [string] $Exe       = 'C:\Program Files\BiglyBT\BiglyBT.exe',
     [string] $DescUrl,      # router's UPnP description URL, e.g. http://192.168.10.1:5000/rootDesc.xml (skips discovery)
     [switch] $CleanupOnExit,
-    [switch] $NoFirewall    # don't touch the Windows firewall
+    [switch] $NoFirewall,   # don't touch the Windows firewall
+    [switch] $FixFirewall   # re-do the firewall step even if the rules exist: clears Block rules for BiglyBT
 )
 
 $ErrorActionPreference = 'Stop'
@@ -45,6 +48,9 @@ if (-not $Port) {
     if (-not $Port) { throw "no 'port=NNNN' line in $VmOptions (give -Port NNNN)" }
 }
 if ($Port -lt 1 -or $Port -gt 65535) { throw "bad port $Port" }
+$Last = $Port + 9                       # BiglyBT gets the range n .. n+9
+if ($Last -gt 65535) { throw "port range $Port-$Last runs past 65535" }
+Say "port range $Port-$Last"
 
 # --- 2. this PC's LAN address: the interface that holds the default route (many virtual adapters here) ----
 $route = Get-NetRoute -DestinationPrefix '0.0.0.0/0' | Sort-Object RouteMetric | Select-Object -First 1
@@ -54,23 +60,47 @@ $ip = (Get-NetIPAddress -InterfaceIndex $route.ifIndex -AddressFamily IPv4 |
 if (-not $ip) { throw "no IPv4 address on interface $($route.ifIndex)" }
 Say "this PC is $ip, gateway $($route.NextHop)"
 
-# --- 2b. Windows Firewall: allow the port in (TCP + UDP).  Creating a rule needs administrator: if this window
-#         isn't elevated, only that small step is run elevated (one UAC prompt, and only when the rule is missing).
+# --- 2b. Windows Firewall.  Two things are needed (found with test-upnp.sh):
+#         - an Allow rule for the port range (TCP + UDP), and
+#         - an Allow rule for BiglyBT.exe itself (all ports, Private + Public networks), with any *Block* rules for
+#           BiglyBT removed: Windows leaves a Block rule behind when its "allow BiglyBT?" pop-up is cancelled, and a
+#           Block rule beats every Allow rule.
+#         Changing rules needs administrator: if this window isn't elevated only that step is run elevated (one UAC
+#         prompt), and only when a rule is missing or -FixFirewall is given (Block rules can't be seen unelevated).
 if (-not $NoFirewall) {
-    $rule = "BiglyBT listen port $Port"
-    $have = Get-NetFirewallRule -DisplayName $rule -ErrorAction SilentlyContinue
+    $rule  = "BiglyBT listen port $Port-$Last"
+    $prule = 'BiglyBT program (biglybt-launch)'
+    $have  = Get-NetFirewallRule -DisplayName $rule  -ErrorAction SilentlyContinue
+    $haveP = Get-NetFirewallRule -DisplayName $prule -ErrorAction SilentlyContinue
     $stale = Get-NetFirewallRule -DisplayName 'BiglyBT listen port *' -ErrorAction SilentlyContinue |
              Where-Object { $_.DisplayName -ne $rule }          # left over from an earlier port number
-    if ($have -and -not $stale) {
-        Say "firewall: '$rule' already present"
+    if ($have -and $haveP -and -not $stale -and -not $FixFirewall) {
+        Say "firewall: '$rule' and '$prule' already present (use -FixFirewall to clear Block rules and recreate them)"
     } else {
-        $cmd = @"
-`$ErrorActionPreference = 'Stop'
-Get-NetFirewallRule -DisplayName 'BiglyBT listen port *' -ErrorAction SilentlyContinue | Where-Object { `$_.DisplayName -ne '$rule' } | Remove-NetFirewallRule
-if (-not (Get-NetFirewallRule -DisplayName '$rule' -ErrorAction SilentlyContinue)) {
-  foreach (`$p in 'TCP','UDP') { New-NetFirewallRule -DisplayName '$rule' -Direction Inbound -Action Allow -Protocol `$p -LocalPort $Port -Profile Any | Out-Null }
+        $log = Join-Path $env:TEMP 'biglybt-launch-firewall.log'
+        Remove-Item -LiteralPath $log -ErrorAction SilentlyContinue
+        $cmd = @'
+$ErrorActionPreference = 'Stop'
+$log = '@LOG@'
+function L($m) { Add-Content -LiteralPath $log -Value $m }
+$dir = Split-Path -Parent '@EXE@'
+# 1. old port-range rules and our own program rule (recreated below)
+Get-NetFirewallRule -DisplayName 'BiglyBT listen port *' -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -ne '@RULE@' } | Remove-NetFirewallRule
+Get-NetFirewallRule -DisplayName '@PRULE@' -ErrorAction SilentlyContinue | Remove-NetFirewallRule
+# 2. Block rules for BiglyBT (its folder, or a BiglyBT*.exe anywhere)
+Get-NetFirewallApplicationFilter | Where-Object { $_.Program -like "$dir\*" -or $_.Program -like '*\BiglyBT.exe' -or $_.Program -like '*\BiglyBTTor.exe' } |
+  Get-NetFirewallRule | Where-Object { $_.Action -eq 'Block' } |
+  ForEach-Object { L ("removed Block rule: {0} ({1})" -f $_.DisplayName, $_.Direction); $_ | Remove-NetFirewallRule }
+# 3. the port range
+if (-not (Get-NetFirewallRule -DisplayName '@RULE@' -ErrorAction SilentlyContinue)) {
+  foreach ($p in 'TCP','UDP') { New-NetFirewallRule -DisplayName '@RULE@' -Direction Inbound -Action Allow -Protocol $p -LocalPort '@PORTS@' -Profile Any | Out-Null }
+  L 'port-range rule created'
 }
-"@
+# 4. the program, all ports, Private + Public
+New-NetFirewallRule -DisplayName '@PRULE@' -Direction Inbound -Action Allow -Program '@EXE@' -Protocol Any -Profile Private,Public | Out-Null
+L 'program rule created'
+'@
+        $cmd = $cmd.Replace('@LOG@', $log).Replace('@EXE@', $Exe).Replace('@RULE@', $rule).Replace('@PRULE@', $prule).Replace('@PORTS@', "$Port-$Last")
         $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
                  ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
         try {
@@ -81,8 +111,11 @@ if (-not (Get-NetFirewallRule -DisplayName '$rule' -ErrorAction SilentlyContinue
                       -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $enc
                 if ($pr.ExitCode -ne 0) { throw "elevated step exited $($pr.ExitCode)" }
             }
-            if (Get-NetFirewallRule -DisplayName $rule -ErrorAction SilentlyContinue) { Say "firewall: opened $Port TCP+UDP inbound ('$rule')" }
-            else { Say 'WARNING: firewall rule was not created' }
+            if (Test-Path -LiteralPath $log) { Get-Content -LiteralPath $log | ForEach-Object { Say "firewall: $_" } }
+            if ((Get-NetFirewallRule -DisplayName $rule -ErrorAction SilentlyContinue) -and
+                (Get-NetFirewallRule -DisplayName $prule -ErrorAction SilentlyContinue)) {
+                Say "firewall: $Port-$Last TCP+UDP and $Exe (all ports, Private+Public) allowed inbound"
+            } else { Say 'WARNING: firewall rules were not created' }
         } catch { Say "WARNING: could not open the Windows firewall: $($_.Exception.Message)" }
     }
 }
@@ -109,12 +142,12 @@ if ($upnpc) {
     if ((Upnpc ($base + '-l')) -notmatch 'Found valid IGD') {
         Say 'WARNING: no UPnP router answered.  Starting BiglyBT anyway.'
     } else {
-        foreach ($p in $Protos) {
-            [void](Upnpc ($base + @('-e', $Desc, '-a', $ip, "$Port", "$Port", $p)))
+        foreach ($n in $Port..$Last) { foreach ($p in $Protos) {
+            [void](Upnpc ($base + @('-e', $Desc, '-a', $ip, "$n", "$n", $p)))
             # some routers answer the post-add check with an error although the mapping exists; judge by the list
-            $listed = (Upnpc ($base + '-l')) -split "`n" | Where-Object { $_ -match "\b$p\s+$Port->$([regex]::Escape($ip)):" }
-            if ($listed) { Say "$Port/$p forwarded to $ip (upnpc)"; $added += $p } else { Say "WARNING: $Port/$p not in the router's list" }
-        }
+            $listed = (Upnpc ($base + '-l')) -split "`n" | Where-Object { $_ -match "\b$p\s+$n->$([regex]::Escape($ip)):" }
+            if ($listed) { Say "$n/$p forwarded to $ip (upnpc)"; $added += ,@($n, $p) } else { Say "WARNING: $n/$p not in the router's list" }
+        } }
     }
 } else {
     try {
@@ -124,15 +157,15 @@ if ($upnpc) {
     if (-not $map) {
         Say 'WARNING: no UPnP router answered (UPnP discovery blocked, or off on the router).  Starting BiglyBT anyway.'
     } else {
-        foreach ($p in $Protos) {
+        foreach ($n in $Port..$Last) { foreach ($p in $Protos) {
             try {
                 foreach ($m in @($map)) {                       # drop a stale mapping for the same port (e.g. another PC)
-                    if ($m.ExternalPort -eq $Port -and $m.Protocol -eq $p) { $map.Remove($Port, $p); break }
+                    if ($m.ExternalPort -eq $n -and $m.Protocol -eq $p) { $map.Remove($n, $p); break }
                 }
-                [void]$map.Add($Port, $p, $Port, $ip, $true, $Desc)
-                Say "$Port/$p forwarded to $ip (Windows UPnP)"; $added += $p
-            } catch { Say "WARNING: router refused $Port/${p}: $($_.Exception.Message)" }
-        }
+                [void]$map.Add($n, $p, $n, $ip, $true, $Desc)
+                Say "$n/$p forwarded to $ip (Windows UPnP)"; $added += ,@($n, $p)
+            } catch { Say "WARNING: router refused $n/${p}: $($_.Exception.Message)" }
+        } }
     }
 }
 
@@ -141,11 +174,12 @@ if (-not (Test-Path -LiteralPath $Exe)) { throw "$Exe not found" }
 if ($CleanupOnExit) {
     Say 'starting BiglyBT, will remove the mappings when it exits'
     Start-Process -FilePath $Exe -Wait
-    foreach ($p in $added) {
+    foreach ($a in $added) {
+        $n = $a[0]; $p = $a[1]
         try {
-            if ($upnpc) { [void](Upnpc ($base + @('-d', "$Port", $p))) } else { $map.Remove($Port, $p) }
-            Say "removed $Port/$p"
-        } catch { Say "could not remove $Port/${p}: $($_.Exception.Message)" }
+            if ($upnpc) { [void](Upnpc ($base + @('-d', "$n", $p))) } else { $map.Remove($n, $p) }
+            Say "removed $n/$p"
+        } catch { Say "could not remove $n/${p}: $($_.Exception.Message)" }
     }
 } else {
     Start-Process -FilePath $Exe
