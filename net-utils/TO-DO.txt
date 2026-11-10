@@ -28,7 +28,11 @@ Phase 0: foundations (DONE)
   proven    mail, calendar, VAX ftp, ssh-wwl, SMTP login on 587 all work from vault-rendered files.
 
 Phase 1: tidy and verify (do first, small)
-  [ ] (needs the vault unlocked: ssh -t cpbee auth unlock; it had timed out on 2026-11-10) auth check reports 33 findings (was 7 before the multi-scheme change): find out why, fix the check or the lists.
+  [x] auth check explained 2026-11-10: 33 = 26 outside-host logins that identity never covers + 7 identity lines with no vault secret.
+      Fixed: a `*` identity line is satisfied by any record for that login, and outside hosts are only checked with --all.
+      Now 16 findings: 10 LAN logins in the vault with no identity line (router admin@192.168.1.254, Chris@cmlaptop/cmpi/
+      mesh, root@cmpi, system@cpvax, mysql/tinyshell@localhost, mesh logins) and 6 with no vault secret (Phase 2: deltachat
+      chris and floyd, irc Floyd and floyd-bot, talk floyd, cpvax cpollitt).  No test yet for the two check changes.
   [x] identity check re-run 2026-11-10: 0 findings, 3 notes; stale DRAFT header and notes removed (backup ~/.config/BAK/identities.20261110).
   [ ] Old plaintext backups: three ~/.mu-tickets.bak-20261103-* were still there on 2026-11-10 (made by later renders); run TO_BE_RUN/remove-render-backups.sh (rm -i).
   [ ] Delta Chat (tvchat [account:delta_chris], port 587, user chris) uses the smtp:// ticket: look at it once.

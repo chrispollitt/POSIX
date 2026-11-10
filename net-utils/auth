@@ -42,8 +42,10 @@ COMMANDS (answers on stdout, exit 1 when there is none)
                                      touched except older lines for the same scheme+host+login, which the block
                                      replaces; backed up first; mode 600; -n shows the plan without secrets.
                                      netrc takes only records that came from a netrc, or are ftp or telnet.
-  check                              the vault against `identity`: records with no identity line, and the reverse
-                                     (never prints a secret); exit 3 when something is off
+  check [--all]                      the vault against `identity`: LAN records (hosts in the domain, private
+                                     addresses, localhost) with no identity line, and identity lines with no
+                                     secret; --all also asks about outside hosts (gmail, github ...).  Never
+                                     prints a secret; exit 3 when something is off
 
 Options: --domain D (default cmnet or $AUTH_DOMAIN)  --no-domain  -n/--dry-run  -h
 Exit: 0 ok, 1 none/refused, 2 usage, 3 findings, 4 vault locked or missing.
@@ -472,6 +474,7 @@ def main(argv=None):
     ap.add_argument("--digits", type=int, default=6)
     ap.add_argument("--lan", action="append")
     ap.add_argument("--skip", action="append")
+    ap.add_argument("--all", action="store_true")
     ap.add_argument("-n", "--dry-run", action="store_true")
     ap.add_argument("-h", "--help", action="store_true")
     try:
@@ -713,12 +716,14 @@ def main(argv=None):
             idset = {(scheme_of(s), host_of(h, dom), l) for s, h, l in rows}
             findings = []
             flat = [dict(r, scheme=x) for r in recs for x in schemes(r)]
+            def on_lan(h):
+                return a.all or h.endswith("." + dom) or h == "localhost" or h.startswith(("192.168.", "10.", "127."))
             for r in sorted(flat, key=lambda r: (r["host"], r["scheme"], r["login"])):
-                if (scheme_of(r["scheme"]), r["host"], r["login"]) not in idset and ("*", r["host"], r["login"]) not in idset:
+                if on_lan(r["host"]) and (scheme_of(r["scheme"]), r["host"], r["login"]) not in idset and ("*", r["host"], r["login"]) not in idset:
                     findings.append("NOIDENTITY  vault has %s@%s %s; identity does not list that login" % (r["scheme"], r["host"], r["login"]))
             have = {(scheme_of(r["scheme"]), r["host"], r["login"]) for r in flat}
             for s, h, l in sorted(idset):
-                if not any(x[1] == h and x[2] == l and x[0] in (s, "*") for x in have):
+                if not any(x[1] == h and x[2] == l and (s == "*" or x[0] in (s, "*")) for x in have):
                     findings.append("NOSECRET    identity lists %s@%s %s; the vault holds no secret for it" % (s, h, l))
             print("vault: %d record%s; identity: %d line%s" % (len(recs), "" if len(recs) == 1 else "s", len(rows), "" if len(rows) == 1 else "s"))
             for f in findings:
