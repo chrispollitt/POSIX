@@ -28,10 +28,9 @@ Phase 0: foundations (DONE)
   proven    mail, calendar, VAX ftp, ssh-wwl, SMTP login on 587 all work from vault-rendered files.
 
 Phase 1: tidy and verify (do first, small)
-  [ ] auth check reports 33 findings (was 7 before the multi-scheme change): find out why, fix the check or the lists.
-  [ ] identity check: re-run (last run 2026-11-04); drop the stale "DRAFT for review" header and the "Not listed on
-      purpose" notes in ~/.config/identities.
-  [ ] Confirm the old plaintext backups are gone (~/.mu-tickets.bak-*, ~/.netrc.bak-*; TO_BE_RUN remove-old-backups.sh).
+  [ ] (needs the vault unlocked: ssh -t cpbee auth unlock; it had timed out on 2026-11-10) auth check reports 33 findings (was 7 before the multi-scheme change): find out why, fix the check or the lists.
+  [x] identity check re-run 2026-11-10: 0 findings, 3 notes; stale DRAFT header and notes removed (backup ~/.config/BAK/identities.20261110).
+  [ ] Old plaintext backups: three ~/.mu-tickets.bak-20261103-* were still there on 2026-11-10 (made by later renders); run TO_BE_RUN/remove-render-backups.sh (rm -i).
   [ ] Delta Chat (tvchat [account:delta_chris], port 587, user chris) uses the smtp:// ticket: look at it once.
   [ ] Outgoing mail from cmlaptop to an OUTSIDE address: the lan-canonical rule should make the sender chris@cpbee.cmnet
       (then the generic map gives cwp+chris@u-l.ca).
