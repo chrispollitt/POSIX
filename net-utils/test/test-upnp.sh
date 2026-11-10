@@ -24,22 +24,21 @@
 # Exit status: 0 = every check passed, 1 = something failed, 2 = bad usage / missing tool.
 # Note: stop BiglyBT (or pick another port with -p) if it is already listening on PORT.
 
-laddr=192.168.10.73   # cmlaptop
-r1addr=192.168.10.1   # cpbee
-r1desc=http://$r1addr:5000/rootDesc.xml   # cpbee's miniupnpd; skips SSDP discovery (many virtual adapters here)
-r2addr=192.168.1.68   # cpbee's address on cmrouter's LAN (cmrouter is 192.168.1.254)
-r2host=cmrouter       # its web page (http://cmrouter/) shows the WAN address
-r3addr=209.121.12.33  # public address, fallback if the routers won't tell us
-port=16880
-phone=1
-firewall=1
-lease=600            # seconds; the mapping expires by itself if we crash
+addr1=192.168.10.73   # cmlaptop
+addr2=192.168.10.1    # cpbee
+addr3=192.168.1.68    # cpbee's address on cmrouter's LAN
+addr4=192.168.1.254   # cmrouter (web page shows the WAN address)
+addr5=209.121.12.33   # public address, fallback if the routers won't tell us
+port=16870            # port to test
+phone=1               # test from phone
+firewall=1            # open local firewall
+lease=600             # seconds; the mapping expires by itself if we crash
 
 orig_args=("$@")
 while getopts p:P:nFh o; do
     case $o in
         p) port=$OPTARG ;;
-        P) r3addr=$OPTARG; given_pub=1 ;;
+        P) addr5=$OPTARG; given_pub=1 ;;
         n) phone=0 ;;
         F) firewall=0 ;;
         h) sed -n '2,/^$/s/^# \{0,1\}//p' "$0"; exit 0 ;;
@@ -120,6 +119,8 @@ fw_open() {
 tmp=$(mktemp -d) || exit 2
 server_pid=
 mapped=0
+r1desc=http://$addr2:5000/rootDesc.xml   # cpbee's miniupnpd; skips SSDP discovery (many virtual adapters here)
+
 cleanup() {
     [ -n "$server_pid" ] && kill "$server_pid" 2>/dev/null
     if [ $mapped = 1 ]; then
@@ -146,14 +147,14 @@ fi
 list1=$(upnpc -u "$r1desc" -l 2>&1)
 if ! echo "$list1" | grep -q 'Found valid IGD'; then
     echo "$list1" | tail -5 | indent
-    diag "ping to cpbee:"; ping -n 2 "$r1addr" 2>&1 | tail -3 | indent
+    diag "ping to cpbee:"; ping -n 2 "$addr2" 2>&1 | tail -3 | indent
     echo "cpbee's UPnP ($r1desc) did not answer" >&2
     exit 1
 fi
 pass "cpbee UPnP answers"
 
 # --- 3. add the mapping ---------------------------------------------------------------------------------------
-if out=$(upnpc -u "$r1desc" -e test-upnp -a "$laddr" "$port" "$port" TCP "$lease" 2>&1); then
+if out=$(upnpc -u "$r1desc" -e test-upnp -a "$addr1" "$port" "$port" TCP "$lease" 2>&1); then
     :
 else
     # some routers report an error although the mapping exists: judge by the list below
@@ -163,42 +164,42 @@ mapped=1
 
 # is it on cpbee?
 list1=$(upnpc -u "$r1desc" -l 2>&1)
-if echo "$list1" | grep -E "TCP +$port->$laddr:$port" >/dev/null; then
-    pass "cpbee lists $port/TCP -> $laddr"
+if echo "$list1" | grep -E "TCP +$port->$addr1:$port" >/dev/null; then
+    pass "cpbee lists $port/TCP -> $addr1"  # allowlist secret
 else
-    bad "cpbee does not list $port/TCP -> $laddr"
-    diag "mappings on cpbee mentioning $port or $laddr:"
-    echo "$list1" | grep -E "$port|$laddr|ExternalIP" | indent
-    diag "is $laddr really this PC's address?"; ipconfig 2>/dev/null | tr -d '\r' | grep -E "IPv4" | indent
+    bad "cpbee does not list $port/TCP -> $addr1"
+    diag "mappings on cpbee mentioning $port or $addr1:"
+    echo "$list1" | grep -E "$port|$addr1|ExternalIP" | indent
+    diag "is $addr1 really this PC's address?"; ipconfig 2>/dev/null | tr -d '\r' | grep -E "IPv4" | indent
 fi
 
 # did cpbee pass it on to cmrouter? (ask from cpbee, bound to its cmrouter-side address)
-list2=$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$r1addr" "upnpc -m $r2addr -l" 2>&1)
+list2=$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$addr2" "upnpc -m $addr3 -l" 2>&1)
 if echo "$list2" | grep -E "TCP +$port->" >/dev/null; then
     pass "cmrouter lists $port/TCP: $(echo "$list2" | grep -E "TCP +$port->" | head -1 | sed 's/^ *[0-9]* *//')"
 else
     bad "cmrouter does not list $port/TCP (cpbee's miniupnpd did not forward it, or ssh/upnpc on cpbee failed)"
-    diag "output of 'upnpc -m $r2addr -l' on cpbee:"; echo "$list2" | tail -6 | indent
+    diag "output of 'upnpc -m $addr3 -l' on cpbee:"; echo "$list2" | tail -6 | indent
     diag "does cpbee's miniupnpd forward to cmrouter?  look at its log on cpbee"
 fi
 
 # --- 4. the public address ------------------------------------------------------------------------------------
 if [ -z "$given_pub" ]; then
     # cmrouter's status page carries its WAN address:  var wanEthStatus_IPAddress = htmlDecodeStr('1.2.3.4');
-    ext=$(curl -s -m 5 "http://$r2host/" 2>/dev/null | sed -n "/wanEthStatus_IPAddress.*htmlDecodeStr/s/.*htmlDecodeStr('\([0-9.]*\)').*/\1/p" | head -1)
+    ext=$(curl -s -m 5 "http://$addr4/" 2>/dev/null | sed -n "/wanEthStatus_IPAddress.*htmlDecodeStr/s/.*htmlDecodeStr('\([0-9.]*\)').*/\1/p" | head -1)
     [ -n "$ext" ] && info "cmrouter's web page gives the WAN address $ext"
     # otherwise ask UPnP
     [ -z "$ext" ] && ext=$(printf '%s\n%s\n' "$list1" "$list2" | sed -n 's/^ExternalIPAddress *= *//p' | tr -d '\r' | head -1)
     case $ext in
-        '')   info "no router reported an external address, using $r3addr" ;;
+        '')   info "no router reported an external address, using $addr5" ;;
         10.*|192.168.*|172.1[6-9].*|172.2?.*|172.3[01].*)
-              info "external address $ext is private (double NAT): the forward will not work from outside; using $r3addr" ;;
+              info "external address $ext is private (double NAT): the forward will not work from outside; using $addr5" ;;
         100.6[4-9].*|100.[7-9]?.*|100.1[01]?.*|100.12[0-7].*)
-              info "external address $ext is carrier-grade NAT: inbound will not work from outside; using $r3addr" ;;
-        *)    r3addr=$ext; info "router says the public address is $ext" ;;
+              info "external address $ext is carrier-grade NAT: inbound will not work from outside; using $addr5" ;;
+        *)    addr5=$ext; info "router says the public address is $ext" ;;
     esac
 fi
-info "public address used: $r3addr"
+info "public address used: $addr5"
 
 # --- 5. a listener here, and is it reachable from the LAN? ----------------------------------------------------
 if nc -h 2>&1 | grep -q -- '-46'; then listen="nc -k -l $port"; else listen="nc -l -p $port"; fi
@@ -214,11 +215,11 @@ elif ! listening >/dev/null; then
 else
     pass "listening on $port here ($listen)"
     # cpbee connecting to this PC's LAN address goes through the Windows firewall
-    lan=$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$r1addr" "nc -zv -w 3 $laddr $port" 2>&1)
+    lan=$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$addr2" "nc -zv -w 3 $addr1 $port" 2>&1)
     if echo "$lan" | grep -Eiq 'succeeded|open|connected'; then
-        pass "cpbee can connect to $laddr:$port (LAN path and Windows firewall are fine)"
+        pass "cpbee can connect to $addr1:$port (LAN path and Windows firewall are fine)"  # allowlist secret
     else
-        bad "cpbee cannot connect to $laddr:$port: the Windows firewall (or a security product) is blocking it"
+        bad "cpbee cannot connect to $addr1:$port: the Windows firewall (or a security product) is blocking it"
         echo "$lan" | indent
         diag "firewall state:"; ps "Get-NetFirewallProfile | Select Name,Enabled | Format-Table -HideTableHeaders" | indent
         diag "rules for this port:"
@@ -234,21 +235,21 @@ if [ $phone = 1 ]; then
     if [ -z "$(adb devices | sed 1d | grep -w device)" ]; then
         bad "no phone attached to adb (or not authorised)"; adb devices 2>&1 | indent
     else
-        adb_out=$(adb shell "echo hello-from-phone | nc -w 5 $r3addr $port; echo nc-exit=\$?" 2>&1 | tr -d '\r')
+        adb_out=$(adb shell "echo hello-from-phone | nc -w 5 $addr5 $port; echo nc-exit=\$?" 2>&1 | tr -d '\r')
         for _ in 1 2 3 4 5; do grep -q hello-from-phone "$tmp/server.log" && break; sleep 1; done
         if grep -q hello-from-phone "$tmp/server.log"; then
-            pass "phone reached $laddr:$port through $r3addr"
+            pass "phone reached $addr1:$port through $addr5"  # allowlist secret
         else
             bad "nothing arrived from the phone"
             diag "what the phone's nc said:"; echo "$adb_out" | indent
             diag "which network is the phone using? (wlan = wifi: bad, rmnet/ccmni = mobile data: good)"
             adb shell "ip route get 8.8.8.8 2>&1 | head -1" 2>&1 | tr -d '\r' | indent
-            diag "the phone's public address (should differ from your home address $r3addr):"
+            diag "the phone's public address (should differ from your home address $addr5):"
             adb shell "(curl -s -m 5 https://api.ipify.org || wget -qO- -T 5 http://api.ipify.org) 2>&1" 2>&1 | tr -d '\r' | head -2 | indent
             diag "listener still up here? $(kill -0 "$server_pid" 2>/dev/null && echo yes || echo NO)"
             listening | indent
             diag "is cmrouter's mapping there, and does the public address match? (hairpin test from cpbee, may not work on all routers):"
-            ssh -o BatchMode=yes -o ConnectTimeout=10 "$r1addr" "nc -zv -w 3 $r3addr $port" 2>&1 | indent
+            ssh -o BatchMode=yes -o ConnectTimeout=10 "$addr2" "nc -zv -w 3 $addr5 $port" 2>&1 | indent
             diag "hints: wrong public address / double NAT / ISP blocks inbound => a port scanner (e.g. canyouseeme.org) shows the same;"
             diag "        cmrouter's own firewall or a 'cpbee (LAN UPnP)' lease that has expired are the next things to look at."
         fi
