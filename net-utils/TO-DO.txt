@@ -60,6 +60,21 @@ Phase 3 (the tools use auth and identity instead of their own copies)
   [ ] A root-owned master list /etc/identities on cpbee (it drives privilege), read by the clients over ssh.
   [ ] netrc-to-tickets: superseded by `auth import` + `auth render`; retire it once nothing calls it.
 
+From the TUI session (2026-11-09)
+  [ ] tv-passwords-setup (TUIs/tvchat/deploy, in /usr/local/bin) is a stopgap: a person runs it as herself, it asks
+      for her cpbee password once, tests IMAPS and Radicale, writes ~/.mu-tickets (mode 600).  Replace it with
+      `auth render` when that can do the job.
+  [ ] Ticket shapes the apps rely on: mail needs imaps://USER:PW@HOST and smtp://... for both cpbee.cmnet and short  # allowlist secret
+      cpbee (exact host match); Radicale needs https://USER:PW@cpbee:5232 (cert is for the short name; tvcal and  # allowlist secret
+      tvcontacts read host and CA from ~/.config/tvcal/tvcal.conf).
+  [ ] Radicale is a separate login (/etc/radicale/users, bcrypt; added with configure-radicale.sh server --user NAME).
+      The vault should hold a Radicale record per person and `identity` should say who has one.  Michelle: mail login
+      yes; Radicale via radicale-user-on-cpbee.sh.
+  [ ] tvcontacts.py finds passwords via $TVCONTACTS_PASS, ~/.mu-tickets, ~/.netrc: no change needed if `auth render`
+      writes tickets.
+  [ ] Floyd's `!setup passwords` could later call `auth` on the machine that has the vault (!setup never handles
+      passwords itself, by design).
+
 Decisions still yours
   [ ] Unify the logins (chris on mail/calendar, chris-pollitt on IRC, cpollitt on the VAX) or only record them.
   [ ] `*@cpbee.cmnet chris admin` in ~/.config/identities: keep as the admin line, or move the flag onto
