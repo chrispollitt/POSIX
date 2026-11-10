@@ -1,94 +1,102 @@
-net-utils TO-DO  (written 2026-11-04)
-=====================================
+net-utils TO-DO: identity, auth, tv suite  (rewritten 2026-11-10)
+=================================================================
 
-Where things stand
-  identity  who-is-who list of logins (no secrets); phase 1 done, list active (~/.config/identities).
-  auth      password vault on cpbee (gpg), live: tickets/netrc/foo imported, `auth totp`, multi-scheme records
-            (imap,imaps,smtp,smtps@cpbee), `render tickets|netrc`.  ssh-wwl logs in with it.
-  Both are committed on main (latest 1d5ddc2).  NOTHING IS PUSHED.
+One plan, shared phase numbers across three parts:
+  identity   who-is-who list of logins, no secrets (~/.config/identities; command: identity)
+  auth       gpg vault on cpbee for the secrets (command: auth)
+  tv suite   tvmail, tvchat, tvcal, tvcontacts, Floyd (TUIs repo; it keeps its own TO-DO)
+Everything is committed on main.  NOTHING IS PUSHED.
 
-Soon
-  [ ] auth check: it reports 33 findings (was 7 before the multi-scheme change).  Find out why (maybe
-      `identity list` output now has more lines, or the comma schemes); fix the check or the lists.
-  [ ] ssh-wwl (~/bin/ssh-wwl line 7): `getcode` points at DUMMY_CMD.py, a test setting.  Put back
-      /home/chris/bin/get2fa_code.py as the fallback, or leave it to rely on the vault alone (your call).
-  [ ] Push the commits in POSIX when you are happy (git push).
-  [ ] Delta Chat (tvchat [account:delta_chris], port 587, user chris) is the real user of the smtp:// ticket:
-      look at it once in tvchat and see that it still connects.  (tvmail sends on port 25 with no login.)
-  [ ] Test an outgoing mail from cmlaptop to an OUTSIDE address: the new lan-canonical rule should make the
-      sender chris@cpbee.cmnet (then the generic map makes it cwp+chris@u-l.ca) and clear u-l.ca's sender check.
-  [ ] If wanted: `auth smtp-test` (login only on port 587, pinned cert, no mail sent) in the repo; the throw-away
-      version proved the ticket works on 2026-11-04 (235 Authentication successful).
+Decisions made (2026-11-10)
+  - Unify logins: chris on mail, calendar, IRC on the LAN, and the VAX (today chris / chris-pollitt / cpollitt).
+    Outside accounts that cannot be renamed (the Libera account chris-pollitt, the VAX's own system/cpollitt
+    accounts) stay as they are and are recorded in identity as aliases of chris.
+  - tvmail sends on port 587 WITH a login (the smtp:// ticket is used).  Port 25 stays for LAN relay only.
+  - ssh-wwl: get2fa_code.py fallback restored (line 7).
 
-Phase 2 leftovers (auth)
-  [ ] `auth ca`: hand out cpbee's CA file (~/.config/tvchat/cpbee-ca.pem, ~/.config/tvcal/cpbee-ca.pem) to every
-      machine that needs it, so nobody copies it by hand.  Note port 587 presents its own self-signed cert
-      (CN=cpbee.cmnet), not that CA.
-  [ ] ssh keys: `auth ssh-check` to list which key opens which host (id_rsa, id_ed25519_github, id_rsa.pub.ppk,
-      the old ~/.ssh/OLD).  Keys stay on the machines; the vault does not store private keys.
-  [ ] git credential helper that asks `auth get`.
-  [ ] Retire the old stores once you trust the vault: ~/.foo/bar and the Foo_Bar.* code (bash, C, js, perl, php,
-      python), ~/.ssh-OLD/id_rsa (it is the key that decrypts ~/.foo), bin/get2fa_code.py and bin/.2fa/tokens.json.
+Decisions still yours (need context, see notes at the end)
+  [ ] The `*@cpbee.cmnet chris admin` line in ~/.config/identities: keep as the one admin line, or spell out per scheme.
+  [ ] Where the vault's gpg agent runs when other Unix users or services need secrets (Floyd, Michelle).
+
+Phase 0: foundations (DONE)
+  identity  list, commands, `check` (0 findings, 3 notes on 2026-11-04).
+  auth      vault live; tickets, netrc and all 25 ~/.foo entries imported; `auth totp`; multi-scheme records
+            (imap,imaps,smtp,smtps@cpbee); `render tickets|netrc`; tests, README (net-utils/test/).
+  tv suite  tvmail, tvchat, tvcal, tvcontacts (CardDAV on Radicale) work from rendered ~/.mu-tickets, ~/.netrc,
+            ~/.config/tvcal/tvcal.conf.  tv-passwords-setup exists as a stopgap.
+  proven    mail, calendar, VAX ftp, ssh-wwl, SMTP login on 587 all work from vault-rendered files.
+
+Phase 1: tidy and verify (do first, small)
+  [ ] auth check reports 33 findings (was 7 before the multi-scheme change): find out why, fix the check or the lists.
+  [ ] identity check: re-run (last run 2026-11-04); drop the stale "DRAFT for review" header and the "Not listed on
+      purpose" notes in ~/.config/identities.
+  [ ] Confirm the old plaintext backups are gone (~/.mu-tickets.bak-*, ~/.netrc.bak-*; TO_BE_RUN remove-old-backups.sh).
+  [ ] Delta Chat (tvchat [account:delta_chris], port 587, user chris) uses the smtp:// ticket: look at it once.
+  [ ] Outgoing mail from cmlaptop to an OUTSIDE address: the lan-canonical rule should make the sender chris@cpbee.cmnet
+      (then the generic map gives cwp+chris@u-l.ca).
+  [ ] Push the POSIX commits.
+  [ ] tvmail on 587 with a login: point tvmail at smtp://cpbee:587 with auth on (tvmail config, TUIs repo).
+
+Phase 2: the vault covers every login the suite uses (next real step)
+  auth      [ ] a Radicale record per person (Radicale keeps its own /etc/radicale/users, bcrypt; added with
+                configure-radicale.sh server --user NAME).  Michelle is the test case (radicale-user-on-cpbee.sh).
+            [ ] records for the dcgw (Delta Chat gateway) token and mail login.
+            [ ] Floyd's passwords from floyd.conf on cpbee.
+  identity  [ ] add the missing lines: Live Helper Chat user "floyd", joy's login in floyd.conf, the `floyd`
+                calendar login (identity add floyd http@cpbee.cmnet floyd --why ...).
+            [ ] record who has a Radicale login.
+            [ ] unify: put chris, chris-pollitt, cpollitt in as aliases of one person/login policy (see Decisions).
+            [ ] `*@cpvax.cmnet cpollitt` has no vault secret: add one (auth set) or drop the line.
+  tv suite  no code change; tvcontacts, tvcal, dcgw scripts already read the rendered files.
+  done when auth check and identity check agree and are clean.
+
+Phase 3: generate, don't hand-write
+  auth      [ ] `auth render` produces the full ticket set: both host spellings (cpbee and cpbee.cmnet), mail
+                imaps:// and smtp://, Radicale https://USER:PW@cpbee:5232 (cert is for the short name; tvcal and  # allowlist secret
+                tvcontacts read host and CA from ~/.config/tvcal/tvcal.conf).
+            [ ] `auth ca`: hand cpbee's CA file (~/.config/tvchat/cpbee-ca.pem, ~/.config/tvcal/cpbee-ca.pem) to every
+                machine that needs it.  Port 587 presents its own self-signed cert (CN=cpbee.cmnet).
+  tv suite  [ ] replace tv-passwords-setup (TUIs/tvchat/deploy) with `auth render`.
+            [ ] mail-setup, chat-setup, dcgw-client-setup call `auth` instead of writing tickets their own way.
+            [ ] Floyd's `!setup passwords` (never handles passwords itself) calls `auth` on the machine with the vault.
+  identity  [ ] derive Floyd's admins / invite_from / contact and tvchat's [people] table from the list.
+  done when a new person's setup (Michelle) runs end to end with no hand-written password file.
+
+Phase 4: apps ask directly
+  identity  [ ] root-owned master /etc/identities on cpbee (it drives privilege: who may command Floyd), read by
+                clients over ssh.
+            [ ] `identity check` also reads the vault (auth list) so one command audits both.
+  auth      [ ] git credential helper that asks `auth get`.
+            [ ] `auth ssh-check`: which key opens which host (keys stay on the machines; the vault holds no private keys).
+            [ ] optional `auth smtp-test` (login only on 587, pinned cert, no mail sent).
+  tv suite  [ ] tvmail, tvchat, tvcal, tvcontacts, Floyd ask `auth get` / `identity login` first; keep the present
+                lookup order ($TVCONTACTS_PASS, ~/.mu-tickets, ~/.netrc) as the fallback.
+            Rule: every app must still run alone (cross-app links optional, local fallback).
+
+Phase 5: retire and harden
+  [ ] retire ~/.foo/bar and Foo_Bar.* code, ~/.ssh-OLD/id_rsa (the key that decrypts ~/.foo), bin/get2fa_code.py and
+      bin/.2fa/tokens.json (ssh-wwl's fallback goes with them), netrc-to-tickets, tv-passwords-setup.
       Until then `auth import foo` re-adds the placeholder entry `host` (use --skip host).
-  [ ] Confirm the old plaintext backups are gone: ~/.mu-tickets.bak-*, ~/.netrc.bak-* (TO_BE_RUN script
-      remove-old-backups.sh, rm -i).
-
-identity (the who-is-who list; `identity check` gives 0 findings, 3 notes on 2026-11-04)
-  Original plan was 4 phases; phase 1 (list, commands, check) is done.
-  [x] phase 2, netrc-to-tickets taking logins from the list: not needed, `auth import/render` replaced it.
-  [ ] phase 3: Floyd's admins / invite_from / contact and tvchat's [people] table derived from the list.
-  [ ] phase 4: the setup scripts use it (see Phase 3 below for the same scripts calling `auth render`).
-  [ ] master copy: root-owned /etc/identities on cpbee (it drives privilege: who may command Floyd).
-  [ ] audit gaps: Live Helper Chat user "floyd", joy's login in floyd.conf, the `floyd` calendar login are not in
-      the list yet (so `identity check` cannot see them).  Use --floyd-conf with a copy of cpbee's floyd.conf.
-  [ ] ~/.config/identities still has a "DRAFT for review ... rename when it is right" header; the file is live,
-      so drop that line (and the "Not listed on purpose" notes at the bottom, now settled: the netrc
-      chris@cpbee.cmnet login is gone).
-  [ ] the 3 notes (chris = chris/chris-pollitt/chris@cpbee.cmnet on cpbee, cpollitt/system on the VAX, Floyd's
-      four names): see "Decisions" about unifying or only recording them.
-  [ ] `auth check` says `*@cpvax.cmnet cpollitt` has no vault secret: add one (auth set) or drop the line.
-  [ ] idea: `identity check` could also read the vault's record list (auth list) so one command audits both.
-
-Phase 3 (the tools use auth and identity instead of their own copies)
-  [ ] tvmail, tvchat, tvcal, Floyd: ask `auth get` / `identity login` (today they read ~/.mu-tickets, ~/.netrc and
-      their own confs).
-  [ ] Floyd's passwords (floyd.conf on cpbee) into the vault; Floyd's admins / invite_from / contact and tvchat's
-      [people] table derived from `identity`.
-  [ ] identity list: add the lhc user "floyd", joy's login, and the `floyd` calendar login (identity add floyd
-      http@cpbee.cmnet floyd --why ...); `auth check` then has something real to compare.
-  [ ] Setup scripts (mail-setup, chat-setup ...) call `auth render` instead of writing tickets their own way.
-  [ ] A root-owned master list /etc/identities on cpbee (it drives privilege), read by the clients over ssh.
-  [ ] netrc-to-tickets: superseded by `auth import` + `auth render`; retire it once nothing calls it.
-
-From the TUI session (2026-11-09)
-  [ ] tv-passwords-setup (TUIs/tvchat/deploy, in /usr/local/bin) is a stopgap: a person runs it as herself, it asks
-      for her cpbee password once, tests IMAPS and Radicale, writes ~/.mu-tickets (mode 600).  Replace it with
-      `auth render` when that can do the job.
-  [ ] Ticket shapes the apps rely on: mail needs imaps://USER:PW@HOST and smtp://... for both cpbee.cmnet and short  # allowlist secret
-      cpbee (exact host match); Radicale needs https://USER:PW@cpbee:5232 (cert is for the short name; tvcal and  # allowlist secret
-      tvcontacts read host and CA from ~/.config/tvcal/tvcal.conf).
-  [ ] Radicale is a separate login (/etc/radicale/users, bcrypt; added with configure-radicale.sh server --user NAME).
-      The vault should hold a Radicale record per person and `identity` should say who has one.  Michelle: mail login
-      yes; Radicale via radicale-user-on-cpbee.sh.
-  [ ] tvcontacts.py finds passwords via $TVCONTACTS_PASS, ~/.mu-tickets, ~/.netrc: no change needed if `auth render`
-      writes tickets.
-  [ ] Floyd's `!setup passwords` could later call `auth` on the machine that has the vault (!setup never handles
-      passwords itself, by design).
-
-Decisions still yours
-  [ ] Unify the logins (chris on mail/calendar, chris-pollitt on IRC, cpollitt on the VAX) or only record them.
-  [ ] `*@cpbee.cmnet chris admin` in ~/.config/identities: keep as the admin line, or move the flag onto
-      explicit scheme lines (the vault no longer has a catch-all; this only affects identity).
-  [ ] Whether tvmail should send on 587 WITH a login (then the ticket is used) or keep port 25 on the LAN.
-
-Later / ideas
-  [ ] Phase 4 (optional): a small SSH CA so keys expire instead of living forever.
+  [ ] optional: a small SSH CA so keys expire.
+  [ ] vault passphrase is cached 8 h (max 24) in gpg-agent on cpbee: shorter if cpbee is ever shared.
   [ ] Postfix on cpbee warns "smtp_use_tls will be removed; specify smtp_tls_security_level" (/etc/postfix/main.cf).
-  [ ] Vault passphrase is cached 8 h (max 24) in gpg-agent on cpbee: shorter if cpbee is ever shared.
 
 Facts worth remembering
-  - Mailutils reads `#` in a netrc as a word, so the rendered ~/.netrc has no marker comment lines; the tickets
-    file may keep them.
+  - Vault: ~/.local/share/auth/vault.gpg on cpbee, gpg key auth-vault; `ssh -t cpbee auth unlock` once per 8 h.
+    The secret key is backed up off-site (Chris, 2026-11-04).
+  - Mailutils reads `#` in a netrc as a word, so the rendered ~/.netrc has no marker lines; the tickets file may.
   - tvmail asks for imap://, so the vault record carries imap, imaps, smtp and smtps; each is rendered under
-    cpbee.cmnet and bare cpbee.
-  - The vault's secret key is backed up off-site (done by Chris, 2026-11-04).
+    cpbee.cmnet and bare cpbee.  The apps match the host exactly as their own config spells it.
+  - Radicale is a separate login from the cpbee account.
+  - The pre-commit scan flags URL-shaped examples: tag them `# allowlist secret`.
+
+Notes for the two open decisions
+  admin line: `chris *@cpbee.cmnet chris admin` says "the login chris, on ANY service on cpbee, is an admin".  It is
+    there because Floyd's admins= lists "chris" (email !claude, talk).  `identity check` compares Floyd's lists to
+    the admin flags.  With logins unified on chris, one wildcard admin line is the simplest; the alternative is to
+    put `admin` on explicit lines (irc, imap, http ...).  Recommendation: keep the wildcard.
+  gpg agent: the vault and its agent belong to the chris user on cpbee; clients reach it via `ssh cpbee auth ...`.
+    The webterm change (web services moved to a no-login system user) does not touch it.  The question only arises
+    for things that run as OTHER users (Floyd's service, Michelle) and want a secret: they cannot unlock chris's vault.
+    Options: (a) they get nothing from the vault, setup scripts render their files once while chris is unlocked;
+    (b) a root-owned broker on cpbee that answers `auth get` for named records.  Recommendation: (a) until phase 4.
