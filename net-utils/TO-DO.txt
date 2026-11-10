@@ -14,9 +14,10 @@ Decisions made (2026-11-10)
   - tvmail sends on port 587 WITH a login (the smtp:// ticket is used).  Port 25 stays for LAN relay only.
   - ssh-wwl: get2fa_code.py fallback restored (line 7).
 
-Decisions still yours (need context, see notes at the end)
-  [ ] The `*@cpbee.cmnet chris admin` line in ~/.config/identities: keep as the one admin line, or spell out per scheme.
-  [ ] Where the vault's gpg agent runs when other Unix users or services need secrets (Floyd, Michelle).
+Decisions still open
+  (none)  Settled 2026-11-10: keep the wildcard admin line "*@cpbee.cmnet chris admin"; other Unix users and
+          services (Floyd, Michelle) do not read the vault, setup scripts render their files once while chris is
+          unlocked (option a) until phase 4, then revisit a root-owned broker.
 
 Phase 0: foundations (DONE)
   identity  list, commands, `check` (0 findings, 3 notes on 2026-11-04).
