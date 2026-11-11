@@ -118,10 +118,12 @@ Phase 2: the service tier and client access (the core of G3)
       first on include_path, in ~/tmp-auth-shim) logged in to cPanel on cp1.uhcloud.com with the imported token and got
       the 25 subdomains (read-only call).  So the import is right at least for that entry.
       New: auth foo LABEL (the old Foo_Bar call: login, tab, secret) and auth get --with-login; the PHP shim uses them.
-      Nothing on the webhost was replaced: ~/tmp-auth-shim (shim + t.php) is the only new folder, auth was updated in
-      place (backup ~/local/usr/bin/auth.bak-20261110).  TO SWITCH PHP for real: keep ~/user_php/Foo_Bar.php as
-      Foo_Bar.php.orig and put the shim in its place (Foo_Bar_w.php, so the bash foo, requires it too).  The bash, perl,
-      python and js libraries each still need their own shim.
+      SWAPPED 2026-11-10: ~/user_php/Foo_Bar.php is now the shim; the original is ~/user_php/Foo_Bar.php.orig (to undo:
+      cp -p Foo_Bar.php.orig Foo_Bar.php).  Checked: php -l ok, cpanel.php lists the 25 subdomains with no include_path
+      override, Foo_Bar_w.php (so the bash foo) answers.  auth was updated in place (backup
+      ~/local/usr/bin/auth.bak-20261110); ~/tmp-auth-shim (shim + t.php) can be deleted.  bar() no longer writes
+      ~/.foo/bar: new entries go in with auth set --service.  auth is on demand (no daemon); gpg starts its own
+      gpg-agent as needed.  The bash, perl, python and js libraries still read ~/.foo/bar and each need their own shim.
       Still to do: back up the webhost's auth-service key (no passphrase); decide how new/changed secrets reach it
       (a second store to keep in step: goals G1/G4), e.g. `auth set --service` there by hand, or push from cpbee.
   done when a scheduled job can fetch its own secret and nothing else, with the vault locked.
