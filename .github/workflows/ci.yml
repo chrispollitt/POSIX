@@ -9,9 +9,11 @@ on:
 permissions:
   contents: read
 
+# Pull requests cancel their own older runs. Pushes to main each get their own group (the commit), so a run
+# stuck waiting on a shared group cannot hold up every later push (seen 2026-11-11: five main runs sat queued).
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   shellcheck:
