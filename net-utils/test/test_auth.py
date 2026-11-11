@@ -375,6 +375,27 @@ class T(unittest.TestCase):
         self.assertIn("[service]", out)
         self.assertNotIn("S3rv1ce", out)
 
+    def test_auth_canary_job(self):
+        self.fresh()
+        self.fresh_service()
+        rc, _, err = self.run_auth("set", "--service", "https@cpbee", "michelle", "--stdin", stdin="S3rv1ce\n")
+        self.assertEqual(rc, 0, err)
+        log = os.path.join(self.env["HOME"], "canary.log")
+        env = dict(self.env, AUTH_CANARY_LOG=log, AUTH_CANARY_OWN="https cpbee michelle", AUTH_CANARY_OTHER="imaps gmail.com")
+        canary = os.path.join(TOOLS, "auth-canary")
+        r = subprocess.run(["bash", canary], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("own=OK(len=7)", r.stdout)             # "S3rv1ce" and nothing else
+        self.assertIn("other=DENIED", r.stdout)               # the master tier has no such record
+        with open(log) as fh:
+            text = fh.read()
+        self.assertEqual(text.strip(), r.stdout.strip())
+        self.assertNotIn("S3rv1ce", text + r.stdout)          # no secret in the log or the output
+        env["AUTH_CANARY_OWN"] = "https cpbee nobody"          # its own record is missing: the job fails
+        r = subprocess.run(["bash", canary], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("own=FAIL", r.stdout)
+
     def test_bar_stores_by_old_label_and_foo_reads_it(self):
         self.fresh()                                 # an empty master tier, so a missing label is exit 1, not "locked"
         self.fresh_service()

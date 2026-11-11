@@ -1,0 +1,63 @@
+#!/bin/bash
+# auth-canary: a harmless scheduled job that proves the job pattern works (a cron line, a Windows Scheduled Task):
+# it fetches its own secret from the service tier with no unlock and no prompt, and shows that a job key cannot read more.
+#
+#   auth-canary                 run once; appends one line to the log and prints it; exit 0 only if all is as it should be
+#
+# The line says (no secret is ever written):  DATE HOST via=jobkey|local own=OK(len=N)|FAIL(rc=R) other=DENIED|READABLE|LEAK|n/a
+#   own    `auth get $AUTH_CANARY_OWN` (default: postgres mesh mesh, the record check_garbage.sh uses) must work.
+#   other  `auth get $AUTH_CANARY_OTHER` (default: imaps gmail.com, a master-tier record) must NOT work with the job key.
+#          On a client the job key is used on its own (ssh -i KEY -o IdentitiesOnly=yes), so a fallback to your normal key
+#          cannot hide a broken job key.  LEAK (the job key read it) fails the job.  On the server itself there is no
+#          job key: the service tier is read directly, and other=READABLE only means the master vault happens to be unlocked.
+#
+# Environment (all optional): AUTH_CANARY_LOG (~/.local/state/auth-canary.log, the last 400 lines are kept)
+#   AUTH_CANARY_OWN, AUTH_CANARY_OTHER   "SCHEME HOST [LOGIN]"      AUTH_SERVICE_KEY (~/.ssh/auth_service)   AUTH_HOST (cpbee)
+# cron and Task Scheduler give a thin PATH; /usr/local/bin, /usr/bin and /bin are added at the end.
+export PATH="$PATH:/usr/local/bin:/usr/bin:/bin"
+LOG=${AUTH_CANARY_LOG:-$HOME/.local/state/auth-canary.log}
+OWN=${AUTH_CANARY_OWN:-postgres mesh mesh}
+OTHER=${AUTH_CANARY_OTHER:-imaps gmail.com}
+KEY=${AUTH_SERVICE_KEY:-$HOME/.ssh/auth_service}
+SERVER=${AUTH_HOST:-cpbee}
+host=$(hostname -s 2>/dev/null || hostname)
+
+server=0
+if [ "${AUTH_LOCAL:-}" = 1 ] || [ -e "$HOME/.config/auth/local" ] || [ "$host" = "${SERVER%%.*}" ]; then
+  server=1
+fi
+
+fetch() {   # $1 = "SCHEME HOST [LOGIN]": prints the secret on stdout, nothing on stderr; the exit status says if it worked
+  if [ "$server" = 1 ]; then
+    auth get $1 </dev/null 2>/dev/null
+  else
+    [ -r "$KEY" ] || return 99
+    # the same call auth makes with the job key (ssh -i KEY), but without its fallback to the normal key
+    local q=""; for w in $1; do q="$q '$w'"; done
+    ssh -o BatchMode=yes -o ConnectTimeout=15 -i "$KEY" -o IdentitiesOnly=yes "$SERVER" auth get$q </dev/null 2>/dev/null
+  fi
+}
+
+got=$(fetch "$OWN"); rc=$?
+if [ "$rc" = 0 ] && [ -n "$got" ]; then own="OK(len=${#got})"; else own="FAIL(rc=$rc)"; fi
+got=""
+
+fetch "$OTHER" >/dev/null; orc=$?
+if [ "$server" = 1 ]; then
+  [ "$orc" = 0 ] && other=READABLE || other=DENIED
+  via=local
+elif [ "$orc" = 99 ]; then
+  other="n/a"; via=nokey
+else
+  [ "$orc" = 0 ] && other=LEAK || other=DENIED
+  via=jobkey
+fi
+
+line="$(date +%Y-%m-%dT%H:%M:%S%z) $host via=$via own=$own other=$other"
+mkdir -p "$(dirname "$LOG")" 2>/dev/null
+echo "$line" >> "$LOG" 2>/dev/null
+if [ "$(wc -l < "$LOG" 2>/dev/null || echo 0)" -gt 400 ]; then
+  tail -n 400 "$LOG" > "$LOG.tmp" && mv "$LOG.tmp" "$LOG"
+fi
+echo "$line"
+case "$own:$other" in OK*:DENIED|OK*:READABLE) exit 0 ;; *) exit 1 ;; esac
