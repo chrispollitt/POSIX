@@ -98,8 +98,9 @@ Things to know:
   `auth get https HOST [LOGIN]`; store a token with `auth set https@github.com YOURLOGIN`.
 - **`auth render netrc|tickets --tmp`** writes a fresh file into a private directory (`$XDG_RUNTIME_DIR`, else `/dev/shm`, else the
   temp dir; mode 700) and prints its path as the last line, for tools that take a file name and should not leave one in `~`.
+- **`auth ca [--smtp] [--out FILE]`** prints cpbee's CA file (public, no unlock); `--smtp` adds the self-signed certificate port 587 presents, fetched on cpbee, so a client can pin it.
 - Planned, not built: an ftp/telnet wrapper, `auth` called directly by the tv apps with the files as a
-  fallback, `auth ca` to hand out the CA file (all tracked in the GitHub issues, chrispollitt/POSIX#14).
+  fallback (tracked in the GitHub issues, chrispollitt/POSIX#14).
 
 ## Jobs: cron and Scheduled Tasks (the service tier)
 
