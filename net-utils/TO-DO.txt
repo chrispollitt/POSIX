@@ -1,50 +1,11 @@
-net-utils TO-DO: identity, auth, tv suite  (rewritten around the goals 2026-11-10)
-==================================================================================
+net-utils TO-DO: identity, auth, tv suite - progress log (2026-11-11)
+=====================================================================
 
-One plan, shared phase numbers across three parts:
-  identity   who-is-who list of logins, no secrets (~/.config/identities; command: identity)
-  auth       the secrets: gpg vault on cpbee (command: auth)
-  tv suite   tvmail, tvchat, tvcal, tvcontacts, Floyd (TUIs repo; it keeps its own TO-DO)
-Everything is committed on main.  Two commits (USAGE.md, auth set fix) are NOT PUSHED.
-
-GOALS (Chris, 2026-11-10)
-  G1  Fewer places passwords are stored, rendered copies included.
-  G2  Shims or API calls wherever a tool uses a password (ssh/scp, telnet/ftp, tv suite, sudo/su ...), not files.  # allowlist secret
-  G3  Cron / Scheduled Tasks can use it with no user input.
-  G4  Minimal syncing headaches.
-  Overall: easier and simpler than the status quo.
-
-DESIGN (what follows from the goals)
-  1. ONE copy: the vault on cpbee.  Machines FETCH on demand (`ssh cpbee auth ...`); they do not keep copies.
-     Rendering files stays only as a fallback for tools that can read nothing else, and then into tmpfs
-     ($XDG_RUNTIME_DIR, mode 600, gone at logout/reboot), never as a persistent file.  Nothing persistent means
-     nothing to sync (G1, G4).
-  2. TWO TIERS (G3):  master tier = passphrase, `auth unlock` about once a day, for people and interactive use.
-     service tier = records tagged `service`, in a second file encrypted to a key WITHOUT a passphrase.  Each
-     machine or job gets its own ssh key, restricted (forced command in authorized_keys) to `auth get` of the
-     records it is allowed.  Trade-off accepted by Chris 2026-11-10: service secrets are protected by file
-     permissions and ssh restrictions on cpbee, not by a passphrase; this is how ~/user_bash/Foo_Bar.bash and
-     friends work today.  Put in it only what a job truly needs; personal passwords stay in the master tier.
-  3. A SHIM PER CLASS OF TOOL (G2):
-       ssh, scp, git      SSH_ASKPASS / git credential helper -> auth get (real ssh keys stay keys)
-       ftp, telnet        wrapper that fetches the password and passes it in (short-lived netrc as fallback)
-       tv suite           `password_cmd = auth get ...` in each app's config (the msmtp / mbsync pattern); the old
-                          file lookup stays as the fallback; every app still runs alone
-       sudo, su           SUDO_ASKPASS.  UAC is not scriptable safely: out of scope.
-       TOTP               auth totp (works)
-       Windows Scheduled Tasks and cron   a service ssh key + `auth get`
-  4. cpbee down = nothing can fetch.  Accepted; no local cache (it would work against G1).  The vault key is
-     backed up off-site.
-
-Decisions made (2026-11-10)
-  - Unify logins: chris on mail, calendar, IRC on the LAN, and the VAX (today chris / chris-pollitt / cpollitt).
-    Outside accounts that cannot be renamed (the Libera account chris-pollitt, the VAX's own system/cpollitt
-    accounts) stay as they are and are recorded in identity as aliases of chris.
-  - tvmail sends on port 587 WITH a login (the smtp:// ticket is used).  Port 25 stays for LAN relay only.
-  - ssh-wwl: get2fa_code.py fallback restored (line 7).
-  - Keep the wildcard admin line "*@cpbee.cmnet chris admin" in ~/.config/identities.
-  - Service tier without passphrase: accepted.  This replaces the earlier "other users do not read the vault,
-    render their files once" idea; Floyd, Michelle and cron get service records instead.
+The open items, the goals (G1-G4), the design, the decisions and the "facts worth remembering" moved
+to GitHub Issues on 2026-11-11.  Start at the tracking issue:
+  https://github.com/chrispollitt/POSIX/issues/14     (all open work: #2 .. #13)
+This file keeps what is DONE (Phase 0 and the Phase 2 build/deploy log).  Open markers below read
+[->#N]: the issue that carries that item.
 
 Phase 0: foundations (DONE)
   identity  list, commands, `check` (0 findings, 3 notes on 2026-11-10).
@@ -56,12 +17,6 @@ Phase 0: foundations (DONE)
   proven    mail, calendar, VAX ftp, ssh-wwl, SMTP login on 587 all work from vault-rendered files.
   cleaned   old plaintext .bak files gone; identity has the 10 LAN logins the vault holds (2026-11-10).
 
-Phase 1: tidy and verify (small)
-  [ ] Push the POSIX commits (2f4b746 USAGE.md, c7eeaf3 auth set fix).
-  [ ] Delta Chat (tvchat [account:delta_chris], port 587, user chris) uses the smtp:// ticket: look at it once.
-  [ ] Outgoing mail from cmlaptop to an OUTSIDE address: the lan-canonical rule should make the sender chris@cpbee.cmnet
-      (then the generic map gives cwp+chris@u-l.ca).
-  [ ] tvmail on 587 with a login: point tvmail at smtp://cpbee:587 with auth on (tvmail config, TUIs repo).
 
 Phase 2: the service tier and client access (the core of G3)
   BUILT and INSTALLED 2026-11-10 (commit 0b64af6 plus a list --service forwarding fix; 21 tests pass):
@@ -75,11 +30,11 @@ Phase 2: the service tier and client access (the core of G3)
   [x] proved 2026-11-10 with the master vault LOCKED: a restricted job key got its own record (over ssh and through
       auth get on the laptop, no tty); a master record, list, _export, set, --service and ls / were all refused;
       a cron-like call on cpbee (empty environment, no tty, no agent) got the secret.  Test key, record and client removed.
-  [ ] back up the new secret key: on cpbee, gpg --export-secret-keys --armor auth-service (it has no passphrase: keep
+  [->#3] back up the new secret key: on cpbee, gpg --export-secret-keys --armor auth-service (it has no passphrase: keep
       that copy as safe as the master backup).
-  [ ] a REAL Windows Scheduled Task on cmlaptop and a real crontab line on cpbee (the proof above ran the same call by
+  [->#3] a REAL Windows Scheduled Task on cmlaptop and a real crontab line on cpbee (the proof above ran the same call by
       hand): create them when the first real job is moved (see the next item).
-  [ ] note: sshd on cpbee throttled connections after failed key attempts (bad key file permissions: ssh ignores a
+  [->#3] note: sshd on cpbee throttled connections after failed key attempts (bad key file permissions: ssh ignores a
       key file that others can read; chmod 600).  A job key must be mode 600 or the job fails.
   [x] first one moved 2026-11-10: Strata/bin/check_garbage.sh (commit b66ae2f in Strata, not pushed) asks
       auth get postgres mesh mesh, foo -p mesh as the fallback (remove it in Phase 5).  The mesh Postgres secret is now a
@@ -93,12 +48,12 @@ Phase 2: the service tier and client access (the core of G3)
       login), foo as the fallback; run end to end by Chris.  Needed auth with --with-login on cpbee too (installed).
       Strata/bin/node/check_email.js is NOT a Node program: it is an unported copy of the Perl script under a Node
       comment header (use Foo_Bar; ...), so it cannot run and cannot be tested.  Left alone until it is really ported.
-  [ ] move the rest of what Foo_Bar.* serves today into service records.  Users found in the repos (git grep Foo_Bar): Strata/bin
+  [->#4] move the rest of what Foo_Bar.* serves today into service records.  Users found in the repos (git grep Foo_Bar): Strata/bin
       (fob-log-query.pl/.js, program_enterphone.sh, unit-query.pl),
       WebApps (Bookshelf/updateB.sh, TinyShell/config.php, UpdateSSL/update_dropbox.py, cmnet_test/call.sh,
       user_perl GetHosts.pm and Router/Actiontec.pm, Zyxel.pm, user_js/myexpress.js).  Each calls foo HOST (user and
       password); the replacement is auth get SCHEME HOST LOGIN with a service record per host the script reads.
-  [ ] THE WEBHOST (whatwelove.org = cp1.uhcloud.com, user whatwelo) also uses Foo_Bar (looked 2026-11-10 via ssh-wwl,
+  [->#5] THE WEBHOST (whatwelove.org = cp1.uhcloud.com, user whatwelo) also uses Foo_Bar (looked 2026-11-10 via ssh-wwl,
       read-only):
         libraries   ~/user_bash/Foo_Bar.bash, ~/user_js/Foo_Bar.js, ~/user_perl/Foo_Bar.pm, ~/user_php/Foo_Bar_w.php,
                     ~/user_python/Foo_Bar.py
@@ -156,51 +111,3 @@ Phase 2: the service tier and client access (the core of G3)
       Still to do: back up the webhost's auth-service key (no passphrase); decide how new/changed secrets reach it
       (a second store to keep in step: goals G1/G4), e.g. `auth set --service` there by hand, or push from cpbee.
   done when a scheduled job can fetch its own secret and nothing else, with the vault locked.
-
-Phase 3: shims, so tools stop reading password files (G1, G2)
-  auth  [ ] `auth render --tmp` (tmpfs, removed at logout) for tools that need a file; a persistent render is the exception.
-        [ ] SSH_ASKPASS helper, SUDO_ASKPASS helper, git credential helper, all backed by `auth get`.
-        [ ] ftp / telnet wrapper (VAX): fetches the system login, no ~/.netrc needed.
-        [ ] `auth ca`: hand cpbee's CA file (~/.config/tvchat/cpbee-ca.pem, ~/.config/tvcal/cpbee-ca.pem) to every machine
-            that needs it.  Port 587 presents its own self-signed cert (CN=cpbee.cmnet).
-  tv suite  [ ] tvmail, tvchat, tvcal, tvcontacts, Floyd: `password_cmd` (e.g. auth get imaps cpbee), file lookup
-            ($TVCONTACTS_PASS, ~/.mu-tickets, ~/.netrc) as the fallback.  Each app must still run alone.
-        [ ] Mail needs imaps/smtp for both cpbee.cmnet and short cpbee (exact host match); Radicale needs the short
-            name cpbee:5232 (cert is for the short name; host and CA come from ~/.config/tvcal/tvcal.conf).
-        [ ] replace tv-passwords-setup with the above; mail-setup, chat-setup, dcgw-client-setup call auth.
-        [ ] Floyd's `!setup passwords` (never handles passwords itself) calls `auth` on the machine with the vault.
-  done when mail, calendar, contacts, ftp, ssh and sudo all work with no persistent password file on the laptop.
-
-Phase 4: fill the vault for everyone, and tie identity to it
-  auth      [ ] a Radicale record per person (Radicale keeps its own /etc/radicale/users, bcrypt; added with
-                configure-radicale.sh server --user NAME).  Michelle is the test case (radicale-user-on-cpbee.sh).
-            [ ] records for the dcgw (Delta Chat gateway) token and mail login, Floyd's passwords (floyd.conf on cpbee)
-                as service records for Floyd.
-            [ ] `*@cpvax.cmnet cpollitt` has no vault secret: add one (auth set) or drop the line.
-  identity  [ ] add the missing lines: Live Helper Chat user "floyd", joy's login in floyd.conf, the `floyd` calendar
-                login (identity add floyd http@cpbee.cmnet floyd --why ...); record who has a Radicale login.
-            [ ] root-owned master /etc/identities on cpbee (it drives privilege: who may command Floyd).
-            [ ] derive Floyd's admins / invite_from / contact and tvchat's [people] table from the list.
-            [ ] `identity check` also reads the vault (auth list) so one command audits both.
-  auth      [ ] `auth ssh-check`: which key opens which host (keys stay on the machines; the vault holds no private keys).
-  done when auth check and identity check agree and are clean and a new person's setup runs with no hand-written
-  password file.
-
-Phase 5: retire and harden (G1)
-  [ ] retire ~/.foo/bar and Foo_Bar.* code, ~/.ssh-OLD/id_rsa (the key that decrypts ~/.foo), bin/get2fa_code.py and
-      bin/.2fa/tokens.json (ssh-wwl's fallback goes with them), netrc-to-tickets, tv-passwords-setup.
-      Until then `auth import foo` re-adds the placeholder entry `host` (use --skip host).
-  [ ] retire the persistent ~/.mu-tickets and ~/.netrc on each machine once the shims cover everything they served.
-  [ ] optional: a small SSH CA so keys expire.
-  [ ] master passphrase is cached 8 h (max 24) in gpg-agent on cpbee: shorter if cpbee is ever shared.
-  [ ] Postfix on cpbee warns "smtp_use_tls will be removed; specify smtp_tls_security_level" (/etc/postfix/main.cf).
-
-Facts worth remembering
-  - Vault: ~/.local/share/auth/vault.gpg on cpbee, gpg key auth-vault; `ssh -t cpbee auth unlock` once per 8 h.
-    The secret key is backed up off-site (Chris, 2026-11-04).
-  - Mailutils reads `#` in a netrc as a word, so the rendered ~/.netrc has no marker lines; the tickets file may.
-  - tvmail asks for imap://, so the vault record carries imap, imaps, smtp and smtps; each is rendered under
-    cpbee.cmnet and bare cpbee.  The apps match the host exactly as their own config spells it.
-  - Radicale is a separate login from the cpbee account.
-  - The pre-commit scan flags URL-shaped examples and netrc-like lines: tag them `# allowlist secret`.
-  - The webterm change (web services moved to a no-login system user) does not touch the vault or its gpg agent.
