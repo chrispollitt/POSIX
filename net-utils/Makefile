@@ -17,7 +17,7 @@ PREFIX      ?= /usr/local
 DESTDIR     ?=
 TRAFFIC_DIR ?= /opt/trafficgraph
 
-TOOLS     := auth identity lan-port netrc-to-tickets traceroute-plus.sh
+TOOLS     := auth auth-canary identity lan-port netrc-to-tickets traceroute-plus.sh
 CPR       := ../cmpi-router
 INSTALL   := install
 
@@ -50,7 +50,7 @@ uninstall-cpbee:
 	rm -f $(DESTDIR)$(PREFIX)/sbin/upnp-sync-cmrouter
 
 check:
-	@for f in lan-port traceroute-plus.sh test/test_lan_port.sh $(CPR)/bin/setup-router.sh $(CPR)/bin/upnp-sync-cmrouter; do bash -n $$f || exit 1; done
+	@for f in auth-canary lan-port traceroute-plus.sh test/test_lan_port.sh $(CPR)/bin/setup-router.sh $(CPR)/bin/upnp-sync-cmrouter; do bash -n $$f || exit 1; done
 	@python3 -c "import ast,sys; [ast.parse(open(f).read(), f) for f in sys.argv[1:]]" $(CPR)/traffic/router.py auth identity netrc-to-tickets
 	@bash test/test_lan_port.sh | tail -1
 
