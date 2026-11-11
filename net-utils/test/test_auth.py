@@ -375,6 +375,33 @@ class T(unittest.TestCase):
         self.assertIn("[service]", out)
         self.assertNotIn("S3rv1ce", out)
 
+    def test_auth_askpass_picks_the_record_from_the_prompt(self):
+        self.fresh()
+        for spec, login, secret in (("sudo@boxa", "chris", "sudopw-1"), ("ssh@hostb", "alice", "sshpw-2"),
+                                    ("sshkey@boxa", "id_test", "keypw-3"), ("https@github.com", "ghuser", "ghtok-4")):
+            rc, _, err = self.run_auth("set", spec, login, "--stdin", stdin=secret + "\n")
+            self.assertEqual(rc, 0, err)
+        env = dict(self.env, AUTH_ASKPASS_HOST="boxa.cmnet")
+        ask = os.path.join(TOOLS, "auth-askpass")
+
+        def answer(prompt):
+            r = subprocess.run(["bash", ask, prompt], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+            return r.returncode, r.stdout, r.stderr
+
+        self.assertEqual(answer("[sudo] password for chris: ")[:2], (0, "sudopw-1\n"))
+        self.assertEqual(answer("alice@hostb's password: ")[:2], (0, "sshpw-2\n"))
+        self.assertEqual(answer("Enter passphrase for key '/home/x/.ssh/id_test': ")[:2], (0, "keypw-3\n"))
+        self.assertEqual(answer("Enter passphrase for /home/x/.ssh/id_test: ")[:2], (0, "keypw-3\n"))      # the older wording
+        self.assertEqual(answer("Username for 'https://github.com': ")[:2], (0, "ghuser\n"))
+        self.assertEqual(answer("Password for 'https://ghuser@github.com': ")[:2], (0, "ghtok-4\n"))
+        self.assertEqual(answer("Password for 'https://github.com': ")[:2], (0, "ghtok-4\n"))             # one login for the host
+        rc, out, err = answer("[sudo] password for nobody: ")                                              # no such record
+        self.assertEqual((rc, out), (1, ""))
+        rc, out, err = answer("What is your favourite colour? ")                                          # no rule
+        self.assertEqual((rc, out), (1, ""))
+        self.assertIn("no rule", err)
+        self.assertNotIn("pw", err + out)
+
     def test_auth_canary_job(self):
         self.fresh()
         self.fresh_service()

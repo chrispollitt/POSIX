@@ -82,6 +82,7 @@ are used:
 |---|---|---|
 | **1. Rendered files** (the default) | `auth render` writes `~/.mu-tickets` / `~/.netrc` (mode 600) from the vault. The tool reads its usual file. | tvmail, tvchat, tvcal, tvcontacts, Mailutils, ftp/telnet to the VAX, Delta Chat's smtp login |
 | **2. Ask the vault** | A script runs `auth get SCHEME HOST [LOGIN]` (prints the secret on stdout, exit 1 if none, 4 if locked) or `auth totp HOST` (prints the 6-digit code). Works from any machine over ssh. | `ssh-wwl` (TOTP for whatwelove.org; the old `get2fa_code.py` is its fallback) |
+| **2b. Askpass** | `auth-askpass` is one `SSH_ASKPASS` / `SUDO_ASKPASS` / `GIT_ASKPASS` program: it reads the prompt, then calls `auth get` (see the header of the file for the prompt-to-record table). `export SUDO_ASKPASS=$(command -v auth-askpass)`, then `sudo -A cmd`. | ssh, sudo, git |
 | **3. Type it** | `auth get` in your own terminal when you need a password once. | you |
 
 Things to know:
@@ -91,6 +92,8 @@ Things to know:
 - Way 2 needs the vault unlocked at that moment. Scripts should handle exit 4 (`ssh -t cpbee auth unlock`).
 - Other Unix users and services (Floyd, Michelle) and jobs do not read your master vault. They get **service
   records** (next section), which need no unlock.
+- A sudo password is root: keep it, if at all, only in the **master** tier (never the service tier), and prefer sudoers
+  entries for named commands.
 - Planned, not built: a git credential helper, `auth` called directly by the tv apps with the files as a
   fallback, `auth ca` to hand out the CA file (all tracked in the GitHub issues, chrispollitt/POSIX#14).
 

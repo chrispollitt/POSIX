@@ -1,0 +1,52 @@
+#!/bin/bash
+# auth-askpass PROMPT: one askpass program for ssh, sudo and git, backed by `auth get` (POSIX issue #6).
+#
+#   export SSH_ASKPASS=$(command -v auth-askpass) SSH_ASKPASS_REQUIRE=force     # ssh (OpenSSH 8.4+; or DISPLAY=:0 and setsid)
+#   export SUDO_ASKPASS=$(command -v auth-askpass)    # then:  sudo -A command
+#   export GIT_ASKPASS=$(command -v auth-askpass)
+#
+# The program is called with the prompt text as its only argument and prints the answer on stdout.  It picks the record
+# from the prompt and asks `auth get`, which looks in the service tier first, then the master tier (so a locked master
+# vault means "no answer", exit 1, and the caller falls back to asking a person):
+#
+#   prompt                                              auth get
+#   "[sudo] password for USER: "                        sudo HOST USER          HOST = this machine (short name)
+#   "USER@HOST's password: "                            ssh HOST USER
+#   "Enter passphrase for key '/path/NAME': "           sshkey THISHOST NAME    NAME = the key file's base name
+#   "Username for 'https://HOST': "                     https HOST --with-login (the login, if there is exactly one)
+#   "Password for 'https://USER@HOST': "                https HOST USER
+#
+# Any other prompt: a line on stderr and exit 1.  Nothing is written anywhere and the secret is never put on a command
+# line.  SECURITY: put a sudo password (it is root) only in the MASTER tier.  A record in the service tier is readable by
+# anything holding a job key for it, so a sudo record there would hand that key root.  Prefer sudoers entries for named
+# commands over a stored sudo password at all.
+#
+# Environment (optional): AUTH_BIN (auth), AUTH_ASKPASS_HOST (the name used for this machine; default `uname -n`)
+export PATH="$PATH:/usr/local/bin:/usr/bin:/bin:$HOME/local/usr/bin"
+AUTH=${AUTH_BIN:-auth}
+prompt=${1:-}
+me=${AUTH_ASKPASS_HOST:-$(uname -n | tr -d '\r')}; me=${me%%.*}
+
+fail() { echo "auth-askpass: $*" >&2; exit 1; }
+get() { exec "$AUTH" get "$@" </dev/null 2>/dev/null; }
+
+if [[ $prompt =~ ^\[sudo\]\ password\ for\ ([^:]+):\ *$ ]]; then
+  get sudo "$me" "${BASH_REMATCH[1]}"
+elif [[ $prompt =~ ^([^@\ ]+)@([^\ ]+)\'s\ password:\ *$ ]]; then
+  get ssh "${BASH_REMATCH[2]}" "${BASH_REMATCH[1]}"
+elif [[ $prompt =~ ^Enter\ passphrase\ for\ (key\ )?\'?([^\']+)\'?:\ *$ ]]; then
+  key=${BASH_REMATCH[2]}
+  get sshkey "$me" "${key##*/}"
+elif [[ $prompt =~ ^Username\ for\ \'([a-z]+)://([^/\']+)[^\']*\':\ *$ ]]; then
+  login=$("$AUTH" get "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" --with-login </dev/null 2>/dev/null) || exit 1
+  printf '%s\n' "${login%%$'\t'*}"
+elif [[ $prompt =~ ^Password\ for\ \'([a-z]+)://(([^@/\']+)@)?([^/\']+)[^\']*\':\ *$ ]]; then
+  if [[ -n ${BASH_REMATCH[3]} ]]; then
+    get "${BASH_REMATCH[1]}" "${BASH_REMATCH[4]}" "${BASH_REMATCH[3]}"
+  else
+    out=$("$AUTH" get "${BASH_REMATCH[1]}" "${BASH_REMATCH[4]}" </dev/null 2>/dev/null) || exit 1
+    printf '%s\n' "$out"
+  fi
+else
+  fail "no rule for the prompt: $prompt"
+fi
