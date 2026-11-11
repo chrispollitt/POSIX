@@ -402,6 +402,20 @@ class T(unittest.TestCase):
         self.assertIn("no rule", err)
         self.assertNotIn("pw", err + out)
 
+    def test_ca_hands_out_the_ca_file_without_the_vault(self):
+        pem = self.put("ca.pem", "-----BEGIN CERTIFICATE-----\nMIIBtest\n-----END CERTIFICATE-----\n")
+        nomaster = dict(self.env, AUTH_VAULT=os.path.join(self.d, "no-such-master.gpg"), AUTH_CA_PATH=pem)   # locked is fine
+        rc, out, err = self.run_auth("ca", env=nomaster)
+        self.assertEqual((rc, out), (0, open(pem).read()), err)
+        dest = os.path.join(self.env["HOME"], "out.pem")
+        rc, out, err = self.run_auth("ca", "--out", dest, env=nomaster)
+        self.assertEqual(rc, 0, err)
+        self.assertIn("1 certificate", out)
+        self.assertEqual(open(dest).read(), open(pem).read())
+        rc, out, err = self.run_auth("ca", env=dict(nomaster, AUTH_CA_PATH=os.path.join(self.d, "missing.pem")))   # no such file
+        self.assertEqual(rc, 1)
+        self.assertIn("no CA certificate", err)
+
     def test_git_credential_helper(self):
         self.fresh()
         rc, _, err = self.run_auth("set", "https@github.com", "ghuser", "--stdin", stdin="ghtok-9\n")
