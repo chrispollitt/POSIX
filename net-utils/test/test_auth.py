@@ -413,6 +413,11 @@ class T(unittest.TestCase):
         thin = {k: v for k, v in self.env.items() if k not in ("HOME", "PATH")}
         thin["PATH"] = os.path.dirname(php) + os.pathsep + "/usr/bin"
         self.assertEqual(run_php('echo json_encode(foo("ahost:aserv"));', env=thin), '["auser","ap ass\\"\'$x"]')
+        # ~/bin is on the PATH the shim gives auth (on the webhost python3 is a wrapper in ~/bin)
+        home = run_php('echo fb_home();')
+        prefix = run_php('echo fb_env_prefix();', env=thin)
+        self.assertIn(home + "/bin:", prefix)
+        self.assertIn(home + "/local/usr/bin", prefix)
         self.assertEqual(run_php('echo json_encode(bar("-delete", "x", "ahost:aserv"));'), "true")
         self.assertEqual(run_php('echo json_encode(foo("ahost:aserv"));'), failed)
 

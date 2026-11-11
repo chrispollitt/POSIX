@@ -14,8 +14,8 @@
  * `auth` is $AUTH_BIN, else ~/local/usr/bin/auth, else `auth` on the PATH.  The secret never touches a command line.
  *
  * It also works under the web server, where the environment is thin: auth is run with HOME set (to the account's home if
- * the environment has none) and with /usr/local/bin:/usr/bin:/bin and ~/local/usr/bin added to the PATH, because auth
- * needs python3 and gpg on the PATH and its settings in ~/.config/auth.
+ * the environment has none) and with /usr/local/bin:/usr/bin:/bin, ~/bin and ~/local/usr/bin added to the PATH, because
+ * auth needs python3 and gpg on the PATH and its settings in ~/.config/auth.
  */
 
 function fb_home() {
@@ -39,7 +39,8 @@ function fb_env_prefix() {
     $home = fb_home();
   }
   $path  = getenv('PATH');
-  $extra = '/usr/local/bin:/usr/bin:/bin:' . fb_home() . '/local/usr/bin';
+  // ~/bin matters: on the webhost python3 is a wrapper in ~/bin, and auth starts with "#!/usr/bin/env python3"
+  $extra = '/usr/local/bin:/usr/bin:/bin:' . fb_home() . '/bin:' . fb_home() . '/local/usr/bin';
   $path  = $path ? $path . ':' . $extra : $extra;
   return 'env HOME=' . escapeshellarg($home) . ' PATH=' . escapeshellarg($path) . ' ';
 }
