@@ -12,6 +12,7 @@ docstring at the top of the file. Python 3 and bash only; they run on Linux, mac
 | [lan-port](lan-port) | open, close and audit the LAN ports of cpbee |
 | [traceroute-plus.sh](traceroute-plus.sh) | traceroute that also asks each hop about itself |
 | [auth-on-cpbee.sh](auth-on-cpbee.sh) | install or update `auth` and `identity` on cpbee |
+| [USAGE.md](USAGE.md) | day-to-day use of `identity` and `auth`: unlocking, adding and changing passwords, how the tools get them |
 
 ## identity and auth together
 
