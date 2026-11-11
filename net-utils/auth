@@ -31,6 +31,9 @@ COMMANDS (answers on stdout, exit 1 when there is none)
   init                               create the key and an empty vault (asks for the passphrase) - on the server
   unlock                             ask for the passphrase now; the agent keeps it (use ssh -t from a client)
   list [SCHEME@HOST]                 records, no secrets
+  get ... --with-login               print LOGIN, a tab, then the secret (what the old foo() returned: user and password)
+  foo LABEL                          the old Foo_Bar call: LOGIN, a tab, the secret, for an entry imported from ~/.foo
+                                     by its old label (cp1.uhcloud.com:cpanel).  Exit 1 when there is none.
   get SCHEME HOST [LOGIN]            the secret; LOGIN may be left out when `identity login $AUTH_PERSON ...`
                                      (person default: $USER) or the vault itself knows only one
   set SCHEME@HOST LOGIN [--kind K] [--note TEXT] [--stdin]
@@ -602,6 +605,7 @@ def main(argv=None, restricted=None):
     ap.add_argument("--service", action="store_true")
     ap.add_argument("--allow", action="append")
     ap.add_argument("--pubkey")
+    ap.add_argument("--with-login", action="store_true")
     ap.add_argument("-n", "--dry-run", action="store_true")
     ap.add_argument("-h", "--help", action="store_true")
     try:
@@ -743,8 +747,8 @@ def main(argv=None, restricted=None):
             return 0 if r.returncode == 0 else 4
 
         # ---- forwarded as they are
-        if cmd in ("get", "list", "totp") and not is_server():
-            rc, out = ssh([cmd] + args + (["--service"] if a.service and cmd == "list" else []) + (["--no-domain"] if a.no_domain else ["--domain", a.domain]))
+        if cmd in ("get", "list", "totp", "foo") and not is_server():
+            rc, out = ssh([cmd] + args + (["--service"] if a.service and cmd == "list" else []) + (["--with-login"] if a.with_login and cmd == "get" else []) +(["--no-domain"] if a.no_domain else ["--domain", a.domain]))
             sys.stdout.write(out.decode("utf-8", errors="replace"))
             return rc
 
@@ -771,6 +775,15 @@ def main(argv=None, restricted=None):
                 print("auth: the master tier is not listed: %s" % master_err, file=sys.stderr)
                 return master_err.code
             return 0
+        if cmd == "foo":
+            if len(args) != 1:
+                raise Err("foo LABEL", 2)
+            want = "from ~/.foo: %s" % args[0]                  # import foo records the old label in the note
+            hits = lookup(lambda recs: [r for r in recs if r.get("label") == args[0] or r.get("note") == want])
+            if not hits:
+                return 1
+            print("%s\t%s" % (hits[0]["login"], hits[0]["secret"]))
+            return 0
         if cmd == "get":
             if len(args) not in (2, 3):
                 raise Err("get SCHEME HOST [LOGIN]", 2)
@@ -790,7 +803,7 @@ def main(argv=None, restricted=None):
             if not hits:
                 return 1
             hits.sort(key=lambda r: sch not in sset(r["scheme"]))           # the exact scheme before *
-            print(hits[0]["secret"])
+            print(("%s\t%s" % (hits[0]["login"], hits[0]["secret"])) if a.with_login else hits[0]["secret"])
             return 0
 
         if cmd == "totp":

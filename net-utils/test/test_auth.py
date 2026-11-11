@@ -187,6 +187,9 @@ class T(unittest.TestCase):
         self.assertEqual(self.run_auth("get", "https", "cmpi", "Chris")[1], "pw with space & 16chars!\n")
         self.assertEqual(self.run_auth("get", "2fa", "whatwelove.org", "whatwelo")[1], "t0tp-seed\n")
         self.assertEqual(self.run_auth("get", "sudo", "cmpi", "root")[0], 1)    # skipped
+        self.assertEqual(self.run_auth("foo", "cmpi:web")[1], "Chris\tpw with space & 16chars!\n")   # the old foo() call
+        self.assertEqual(self.run_auth("foo", "no:such")[0], 1)
+        self.assertEqual(self.run_auth("get", "https", "cmpi", "Chris", "--with-login")[1], "Chris\tpw with space & 16chars!\n")
         self.assertIn("0 to add, 3 already", self.run_auth("import", "foo", foo, "--key", keyf, "--skip", "cmpi:sudo")[1])
         # imported entries are for the vault only: render never writes them to a file
         out_t = self.put("tickets.foo", "")
