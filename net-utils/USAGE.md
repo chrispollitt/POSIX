@@ -130,6 +130,16 @@ On a client, `auth get` and `auth totp` use `~/.ssh/auth_service` when stdin is 
 `AUTH_SERVICE_KEY` names a key file), and fall back to your normal ssh key if that fails. On cpbee itself a job
 reads the service tier directly. `auth list` marks service records `[service]`.
 
+**A job key must be mode 600** (`chmod 600 ~/.ssh/auth_service`): ssh silently ignores a key file that others can read, and
+sshd on cpbee then throttles connections after the failed attempts, so the job (and your own ssh) fails for a while.
+
+**A worked example:** `auth-canary` (installed as `~/bin/auth-canary`) is a harmless job: it fetches its own record with the
+job key, tries a master-tier record with that key alone (must be refused) and appends one line (no secret) to
+`~/.local/state/auth-canary.log`. On cmlaptop it runs from the Scheduled Task `auth-canary` (`bash.exe -c "export HOME=...;
+~/bin/auth-canary"`; under Task Scheduler the Windows tools come first on the PATH, so use `uname -n`, not `hostname`); on
+cpbee from a crontab line (`17 6 * * * ~/bin/auth-canary`; cron's PATH is `/usr/bin:/bin`, so jobs set their own).
+Copy it for a real job.
+
 First time only: `auth init-service` on cpbee (the install script `auth-on-cpbee.sh` does it).
 
 ### A machine with its own store (the webhost)
