@@ -617,7 +617,8 @@ def main(argv=None, restricted=None):
     ap.add_argument("-n", "--dry-run", action="store_true")
     ap.add_argument("-h", "--help", action="store_true")
     try:
-        a, rest = ap.parse_known_args(argv)
+        a, rest = ap.parse_known_intermixed_args(argv)    # options and arguments in any order, on every Python (the plain
+                                                          # parser takes "bar --service --stdin X Y" for unknown options)
     except SystemExit:
         return 2
     if a.help or not a.cmd:

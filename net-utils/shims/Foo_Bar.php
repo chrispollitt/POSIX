@@ -39,11 +39,13 @@ function foo($one) {
 
 function bar($three, $two, $one) {
   // $three = login (or "-delete"), $two = secret, $one = label.  Goes into the service tier, the one foo() reads first.
-  $cmd = escapeshellarg(fb_auth_bin()) . ' bar --service ';
+  // The options go AFTER the label and login: with the options first, the webhost's Python argparse treats the label and
+  // login as unknown options ("auth: unknown option LABEL").
+  $cmd = escapeshellarg(fb_auth_bin()) . ' bar ' . escapeshellarg($one);
   if ($three === "-delete") {
-    $cmd .= '--delete ' . escapeshellarg($one);
+    $cmd .= ' --service --delete';
   } else {
-    $cmd .= '--stdin ' . escapeshellarg($one) . ' ' . escapeshellarg($three);
+    $cmd .= ' ' . escapeshellarg($three) . ' --service --stdin';
   }
   $p = proc_open($cmd, [0 => ['pipe', 'r'], 1 => ['file', '/dev/null', 'w'], 2 => ['file', '/dev/null', 'w']], $pipes);
   if (!is_resource($p)) {
