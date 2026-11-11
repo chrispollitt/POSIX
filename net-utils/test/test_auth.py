@@ -375,6 +375,41 @@ class T(unittest.TestCase):
         self.assertIn("[service]", out)
         self.assertNotIn("S3rv1ce", out)
 
+    def test_bar_stores_by_old_label_and_foo_reads_it(self):
+        self.fresh()                                 # an empty master tier, so a missing label is exit 1, not "locked"
+        self.fresh_service()
+        rc, out, err = self.run_auth("bar", "--service", "ahost:aserv", "auser", "--stdin", stdin="apass\n")
+        self.assertEqual((rc, out.strip()), (0, "added ahost:aserv"), err)
+        self.assertEqual(self.run_auth("foo", "ahost:aserv")[1], "auser\tapass\n")
+        rc, out, _ = self.run_auth("bar", "--service", "ahost:aserv", "auser2", "--stdin", stdin="apass2\n")   # same label: replaced
+        self.assertEqual((rc, out.strip()), (0, "changed ahost:aserv"))
+        self.assertEqual(self.run_auth("foo", "ahost:aserv")[1], "auser2\tapass2\n")
+        self.assertEqual(len(self.run_auth("list", "--service")[1].splitlines()), 1)
+        self.assertNotIn("apass", self.run_auth("list", "--service")[1])
+        self.assertEqual(self.run_auth("bar", "--service", "ahost:aserv", "u", "--stdin", stdin="\n")[0], 1)    # empty secret refused
+        self.assertEqual(self.run_auth("bar", "--service")[0], 2)
+        self.assertEqual(self.run_auth("bar", "--service", "--delete", "ahost:aserv")[1].strip(), "removed ahost:aserv")
+        self.assertEqual(self.run_auth("foo", "ahost:aserv")[0], 1)
+        self.assertEqual(self.run_auth("bar", "--service", "--delete", "ahost:aserv")[1].strip(), "nothing to remove")
+
+    def test_php_shim_foo_and_bar(self):
+        php = shutil.which("php-cli") or shutil.which("php")
+        if not php:
+            self.skipTest("no php on this machine")
+        self.fresh_service()
+        shim = os.path.join(TOOLS, "shims", "Foo_Bar.php")
+
+        def run_php(code):
+            p = self.put("t.php", "<?php require %r; %s" % (shim, code))
+            r = subprocess.run([php, p], env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+            return r.stdout
+
+        self.assertEqual(run_php('echo json_encode(foo("ahost:aserv"));'), '["",""]')            # nothing yet
+        self.assertEqual(run_php('echo json_encode(bar("auser", "ap ass\\"\'\\$x", "ahost:aserv"));'), "true")   # awkward characters
+        self.assertEqual(run_php('echo json_encode(foo("ahost:aserv"));'), '["auser","ap ass\\"\'$x"]')
+        self.assertEqual(run_php('echo json_encode(bar("-delete", "x", "ahost:aserv"));'), "true")
+        self.assertEqual(run_php('echo json_encode(foo("ahost:aserv"));'), '["",""]')
+
     def test_master_record_is_not_found_in_the_service_tier(self):
         self.fresh()
         self.fresh_service()

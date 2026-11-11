@@ -7,7 +7,9 @@
  *
  * foo($label)  -> [$login, $secret]  for the entry imported from ~/.foo under that label; ["", ""] when there is none
  *                 (what the callers test: if ($user == "") ...).
- * bar()        -> not supported here (it wrote ~/.foo/bar); use `auth set --service SCHEME@HOST LOGIN`.
+ * bar($login, $secret, $label)
+ *              -> stores the entry in the auth service tier under that label (what foo($label) then answers), replacing
+ *                 any entry with that label; $login "-delete" removes it.  true on success.  Nothing is written to ~/.foo/bar.
  *
  * `auth` is $AUTH_BIN, else ~/local/usr/bin/auth, else `auth` on the PATH.  The secret never touches a command line.
  */
@@ -36,6 +38,18 @@ function foo($one) {
 }
 
 function bar($three, $two, $one) {
-  fwrite(STDERR, "Foo_Bar shim: bar() is not supported; use: auth set --service SCHEME@HOST LOGIN\n");
-  return false;
+  // $three = login (or "-delete"), $two = secret, $one = label.  Goes into the service tier, the one foo() reads first.
+  $cmd = escapeshellarg(fb_auth_bin()) . ' bar --service ';
+  if ($three === "-delete") {
+    $cmd .= '--delete ' . escapeshellarg($one);
+  } else {
+    $cmd .= '--stdin ' . escapeshellarg($one) . ' ' . escapeshellarg($three);
+  }
+  $p = proc_open($cmd, [0 => ['pipe', 'r'], 1 => ['file', '/dev/null', 'w'], 2 => ['file', '/dev/null', 'w']], $pipes);
+  if (!is_resource($p)) {
+    return false;
+  }
+  fwrite($pipes[0], $two . "\n");                   // the secret goes on stdin, never on the command line
+  fclose($pipes[0]);
+  return proc_close($p) === 0;
 }

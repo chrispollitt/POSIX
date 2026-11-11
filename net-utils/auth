@@ -32,6 +32,9 @@ COMMANDS (answers on stdout, exit 1 when there is none)
   unlock                             ask for the passphrase now; the agent keeps it (use ssh -t from a client)
   list [SCHEME@HOST]                 records, no secrets
   get ... --with-login               print LOGIN, a tab, then the secret (what the old foo() returned: user and password)
+  bar LABEL LOGIN [--stdin]          the old Foo_Bar bar call: store the secret under the old label (host or host:what),
+                                     replacing any entry with that label; bar --delete LABEL removes it.  --service for
+                                     the service tier.
   foo LABEL                          the old Foo_Bar call: LOGIN, a tab, the secret, for an entry imported from ~/.foo
                                      by its old label (cp1.uhcloud.com:cpanel).  Exit 1 when there is none.
   get SCHEME HOST [LOGIN]            the secret; LOGIN may be left out when `identity login $AUTH_PERSON ...`
@@ -362,18 +365,22 @@ def from_foo(path, keyfile, lan, domain):
         if secret is None:
             bad.append(label)
             continue
-        host, what = label, ""
-        if ":" in label and not label.startswith("["):
-            host, _, what = label.rpartition(":")
-        kind = "password"
-        scheme = FOO_SCHEME.get(what.lower(), what.lower() if what else "*")
-        port = ":" + what if what.isdigit() else ""
-        h = host.lower().rpartition("@")[2]                          # "whatwelo@localhost" is user@host
-        if h in lan:
-            h = host_of(h, domain)
-        found.append({"scheme": scheme, "host": h, "hostspec": h + port, "login": user, "kind": kind, "secret": secret,  # allowlist secret
-                      "note": "from ~/.foo: %s" % label, "vaultonly": True, "label": label})
+        found.append(foo_record(label, user, secret, lan, domain))
     return found, bad
+
+
+def foo_record(label, user, secret, lan, domain):
+    """the vault record for an old ~/.foo entry: host and scheme come from the label (HOST or HOST:WHAT)."""
+    host, what = label, ""
+    if ":" in label and not label.startswith("["):
+        host, _, what = label.rpartition(":")
+    scheme = FOO_SCHEME.get(what.lower(), what.lower() if what else "*")
+    port = ":" + what if what.isdigit() else ""
+    h = host.lower().rpartition("@")[2]                          # "whatwelo@localhost" is user@host
+    if h in lan:
+        h = host_of(h, domain)
+    return {"scheme": scheme, "host": h, "hostspec": h + port, "login": user, "kind": "password", "secret": secret,  # allowlist secret
+            "note": "from ~/.foo: %s" % label, "vaultonly": True, "label": label}
 
 
 def totp_code(secret, now, digits=6, step=30):
@@ -606,6 +613,7 @@ def main(argv=None, restricted=None):
     ap.add_argument("--allow", action="append")
     ap.add_argument("--pubkey")
     ap.add_argument("--with-login", action="store_true")
+    ap.add_argument("--delete", action="store_true")
     ap.add_argument("-n", "--dry-run", action="store_true")
     ap.add_argument("-h", "--help", action="store_true")
     try:
@@ -851,6 +859,32 @@ def main(argv=None, restricted=None):
                 recs.append(rec)
             v.save(recs)
             print("%s %s@%s %s" % ("changed" if r else "added", raw, h, args[1]))
+            return 0
+        if cmd == "bar":                                    # the old Foo_Bar bar call: store (or --delete) an entry by its old label
+            if len(args) != (1 if a.delete else 2):
+                raise Err("bar LABEL LOGIN --stdin   |   bar --delete LABEL", 2)
+            label, note = args[0], "from ~/.foo: %s" % args[0]
+            recs = v.load()
+            keep = [r for r in recs if r.get("label") != label and r.get("note") != note]
+            if a.delete:
+                if len(keep) != len(recs):
+                    v.save(keep)
+                print("removed %s" % label if len(keep) != len(recs) else "nothing to remove")
+                return 0
+            if a.stdin:
+                secret = sys.stdin.readline().rstrip("\r\n")
+            else:
+                secret = getpass.getpass("secret for %s %s: " % (label, args[1]))
+                if getpass.getpass("again: ") != secret:
+                    raise Err("the two did not match")
+            if not secret:
+                raise Err("empty secret refused")
+            rec = foo_record(label, args[1], secret, set(DEFAULT_LAN), dom)
+            del rec["label"]                                # as import foo does: the note carries the old label
+            was = len(keep) != len(recs)
+            keep.append(rec)
+            v.save(keep)
+            print("%s %s" % ("changed" if was else "added", label))
             return 0
         if cmd == "remove":
             if len(args) != 2:

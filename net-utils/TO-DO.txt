@@ -122,7 +122,11 @@ Phase 2: the service tier and client access (the core of G3)
       cp -p Foo_Bar.php.orig Foo_Bar.php).  Checked: php -l ok, cpanel.php lists the 25 subdomains with no include_path
       override, Foo_Bar_w.php (so the bash foo) answers.  auth was updated in place (backup
       ~/local/usr/bin/auth.bak-20261110); ~/tmp-auth-shim (shim + t.php) can be deleted.  bar() no longer writes
-      ~/.foo/bar: new entries go in with auth set --service.  auth is on demand (no daemon); gpg starts its own
+      ~/.foo/bar.  2026-11-11: bar($login, $secret, $label) works in the shim too: it runs `auth bar --service LABEL LOGIN
+      --stdin` (secret on stdin; "-delete" as the login removes the label), so foo(LABEL) and bar() both work for every
+      language through Foo_Bar_w.php.  Tests: test_bar_stores_by_old_label..., test_php_shim_foo_and_bar (25 pass).
+      NOT YET RUN ON THE WEBHOST: copy auth and shims/Foo_Bar.php over, then `bar auser apass ahost:aserv` and
+      `foo ahost:aserv`, then `bar -delete x ahost:aserv`.  auth is on demand (no daemon); gpg starts its own
       gpg-agent as needed.
       CORRECTION 2026-11-11: no per-language shims are needed (the line that said the bash, perl, python and js
       libraries each need their own shim was wrong).  Every language's Foo_Bar library goes through Foo_Bar_w.php,
