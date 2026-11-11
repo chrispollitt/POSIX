@@ -30,7 +30,8 @@ class T(unittest.TestCase):
         cls.env = dict(os.environ, GNUPGHOME=cls.gh, AUTH_LOCAL="1", HOME=os.path.join(cls.d, "home"),
                        AUTH_VAULT=os.path.join(cls.d, "vault.gpg"), AUTH_GPG_ARGS="--pinentry-mode loopback --passphrase ''",
                        IDENTITY_FILE=os.path.join(cls.d, "identities"), IDENTITY_SYSTEM=os.path.join(cls.d, "none"),
-                       AUTH_PERSON="chris", PATH=TOOLS + os.pathsep + os.environ["PATH"])
+                       AUTH_PERSON="chris", AUTH_SERVICE=os.path.join(cls.d, "service.gpg"), AUTH_CLIENTS=os.path.join(cls.d, "clients"),
+                       AUTH_BIN=TOOL, PATH=TOOLS + os.pathsep + os.environ["PATH"])
         os.makedirs(cls.env["HOME"])
 
     @classmethod
@@ -53,6 +54,8 @@ class T(unittest.TestCase):
         """a new empty vault (the key is made once)."""
         if os.path.exists(self.env["AUTH_VAULT"]):
             os.remove(self.env["AUTH_VAULT"])
+        if os.path.exists(self.env["AUTH_SERVICE"]):   # no service tier left over either
+            os.remove(self.env["AUTH_SERVICE"])
         if os.path.exists(self.env["IDENTITY_FILE"]):   # no identity list left over from an earlier test
             os.remove(self.env["IDENTITY_FILE"])
         rc, out, err = self.run_auth("init")
@@ -347,6 +350,71 @@ class T(unittest.TestCase):
         text = open(out_file).read()
         self.assertIn("password new", text)       # still rendered into the netrc, with the new secret
         self.assertNotIn("password old", text)
+
+    PUB = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAItestkeytestkeytestkeytestkey1 job@laptop"
+
+    def fresh_service(self):
+        if os.path.exists(self.env["AUTH_SERVICE"]):
+            os.remove(self.env["AUTH_SERVICE"])
+        rc, out, err = self.run_auth("init-service")
+        self.assertEqual(rc, 0, err)
+
+    def test_service_tier_reads_without_the_master_vault(self):
+        self.fresh_service()
+        rc, out, err = self.run_auth("set", "--service", "https@cpbee", "michelle", "--stdin", "--note", "radicale", stdin="S3rv1ce\n")
+        self.assertEqual(rc, 0, err)
+        nomaster = dict(self.env, AUTH_VAULT=os.path.join(self.d, "no-such-master.gpg"))   # master tier missing = locked
+        rc, out, _ = self.run_auth("get", "https", "cpbee", "michelle", env=nomaster)
+        self.assertEqual((rc, out), (0, "S3rv1ce\n"))
+        rc, out, _ = self.run_auth("list", env=nomaster)
+        self.assertEqual(rc, 4)                      # the master tier cannot be listed, and it says so
+        self.assertIn("[service]", out)
+        self.assertNotIn("S3rv1ce", out)
+
+    def test_master_record_is_not_found_in_the_service_tier(self):
+        self.fresh()
+        self.fresh_service()
+        self.run_auth("set", "imaps@cpbee", "chris", "--stdin", stdin="M4ster\n")
+        self.assertEqual(self.run_auth("get", "imaps", "cpbee", "chris")[1], "M4ster\n")      # falls through to the master tier
+        self.assertEqual(self.run_auth("remove", "--service", "imaps@cpbee", "chris")[1].strip(), "nothing to remove")
+
+    def test_enroll_serve_unenroll(self):
+        self.fresh()
+        self.fresh_service()
+        self.run_auth("set", "--service", "https@cpbee", "michelle", "--stdin", stdin="S3rv1ce\n")
+        self.run_auth("set", "--service", "irc@cpbee", "other", "--stdin", stdin="N0tAllowed\n")
+        self.run_auth("set", "imaps@cpbee", "chris", "--stdin", stdin="M4ster\n")
+        ak = os.path.join(self.env["HOME"], ".ssh", "authorized_keys")
+        for _ in range(2):                                                               # twice: one line only
+            rc, out, err = self.run_auth("enroll", "c1", "--allow", "https@cpbee/michelle", "--stdin", stdin=self.PUB + "\n")
+            self.assertEqual(rc, 0, err)
+        text = open(ak).read()
+        self.assertEqual(text.count("auth-client-c1"), 1)
+        self.assertIn('command="%s serve c1",restrict ssh-ed25519 ' % TOOL, text)
+        self.assertIn("c1: http@cpbee.cmnet/michelle", self.run_auth("clients")[1])
+
+        def served(cmdline):
+            return self.run_auth("serve", "c1", env=dict(self.env, SSH_ORIGINAL_COMMAND=cmdline))
+
+        rc, out, _ = served("auth get https cpbee michelle --domain cmnet")
+        self.assertEqual((rc, out), (0, "S3rv1ce\n"))
+        self.assertEqual(served("auth get irc cpbee other --domain cmnet")[0], 1)          # service record, not on the list
+        rc, out, _ = served("auth get imaps cpbee chris --domain cmnet")                  # master record: never served
+        self.assertEqual((rc, out), (1, ""))
+        for bad in ("auth list", "auth set https@cpbee michelle", "auth _export", "auth get --service https cpbee michelle", "", "ls /"):
+            rc, out, _ = served(bad)
+            self.assertEqual(rc, 1, bad)
+            self.assertNotIn("S3rv1ce", out)
+        self.run_auth("unenroll", "c1")
+        self.assertNotIn("auth-client-c1", open(ak).read())
+        self.assertEqual(served("auth get https cpbee michelle")[0], 1)
+
+    def test_enroll_refuses_bad_input(self):
+        self.fresh_service()
+        self.assertEqual(self.run_auth("enroll", "c2", "--stdin", stdin=self.PUB + "\n")[0], 2)                  # no --allow
+        self.assertEqual(self.run_auth("enroll", "c2", "--allow", "https@cpbee", "--stdin", stdin=self.PUB + "\n")[0], 2)  # no /LOGIN
+        self.assertEqual(self.run_auth("enroll", "../c2", "--allow", "https@cpbee/x", "--stdin", stdin=self.PUB + "\n")[0], 2)
+        self.assertEqual(self.run_auth("enroll", "c2", "--allow", "https@cpbee/x", "--stdin", stdin="not a key\n")[0], 2)
 
 
 if __name__ == "__main__":

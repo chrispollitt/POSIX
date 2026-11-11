@@ -89,10 +89,41 @@ Things to know:
 - Way 1 means the secret **is a plaintext file on that machine** (mode 600), exactly as before. The vault
   protects the master copy and gives one place to change a password; it does not encrypt the rendered files.
 - Way 2 needs the vault unlocked at that moment. Scripts should handle exit 4 (`ssh -t cpbee auth unlock`).
-- Other Unix users and services (Floyd, Michelle) do not read your vault. Decision of 2026-11-10: setup scripts
-  render their files once while you are unlocked. A root-owned broker may come later (see `TO-DO.txt`, phase 4).
+- Other Unix users and services (Floyd, Michelle) and jobs do not read your master vault. They get **service
+  records** (next section), which need no unlock.
 - Planned, not built: a git credential helper, `auth` called directly by the tv apps with the files as a
   fallback, `auth ca` to hand out the CA file (all in `TO-DO.txt`).
+
+## Jobs: cron and Scheduled Tasks (the service tier)
+
+A job cannot type the vault passphrase, so it uses a second tier:
+
+- **Service tier:** records stored with `--service` live in `service.gpg`, encrypted to a key with **no
+  passphrase**. Put in it only what a job truly needs. These secrets are protected by file permissions on cpbee
+  and by the ssh restrictions below, not by a passphrase.
+- **One ssh key per job or machine**, tied to a forced command (`auth serve NAME`) that can only `get` or `totp`,
+  only from the service tier, and only the records on that client's allow list. A stolen job key cannot list,
+  change, or read anything else.
+
+```bash
+# once, on cpbee's side (from any machine, you at the keyboard):
+auth set --service imaps@cpbee chris --note "nightly mail check"     # a service record
+# on the machine that runs the job:
+ssh-keygen -t ed25519 -N '' -f ~/.ssh/auth_service                   # a key with no passphrase, for this job only
+auth enroll nightly --allow imaps@cpbee/chris --stdin < ~/.ssh/auth_service.pub
+
+# in the job (cron line, Scheduled Task, script): no unlock, no prompt
+pw=$(auth get imaps cpbee chris)            # uses ~/.ssh/auth_service automatically when nothing is typing at it
+
+auth clients                                # who is enrolled and what each may read
+auth unenroll nightly                       # revoke
+```
+
+On a client, `auth get` and `auth totp` use `~/.ssh/auth_service` when stdin is not a terminal (or when
+`AUTH_SERVICE_KEY` names a key file), and fall back to your normal ssh key if that fails. On cpbee itself a job
+reads the service tier directly. `auth list` marks service records `[service]`.
+
+First time only: `auth init-service` on cpbee (the install script `auth-on-cpbee.sh` does it).
 
 ## Changing a password, start to finish
 

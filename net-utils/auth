@@ -14,6 +14,14 @@ THE VAULT   ~/.local/share/auth/vault.gpg on the server ($AUTH_VAULT), a GnuPG f
     in `identity`: imap/imaps, smtp/smtps, irc/ircs, http/https are one scheme each; `*` is any scheme;
     a bare host gets the LAN domain (cmnet); a port is kept for rendering and ignored for matching.
 
+TWO TIERS   The master tier above needs the passphrase, so a person unlocks it.  Jobs (cron, Scheduled Tasks)
+    cannot, so records can also live in the SERVICE tier: ~/.local/share/auth/service.gpg ($AUTH_SERVICE),
+    encrypted to the key `auth-service` ($AUTH_SERVICE_RECIPIENT), which has NO passphrase.  Put in it only what a
+    job truly needs.  A job gets its own ssh key (`auth enroll`): the key is tied by authorized_keys to a forced
+    command, `auth serve NAME`, which answers only `get` and `totp`, only from the service tier, and only for the
+    records on that client's allow list.  The service secrets are protected by file permissions and those ssh
+    restrictions, not by a passphrase.  `get` and `totp` look in the service tier first, then the master tier.
+
 WHERE IT RUNS   On the server itself (hostname $AUTH_HOST, default cpbee) every command works on the vault
     directly.  Anywhere else the commands run over `ssh $AUTH_HOST auth ...`; nothing is stored on the client.
     `get` and `list` are forwarded as they are (only the one answer crosses); `set`, `import` and `render`
@@ -28,6 +36,17 @@ COMMANDS (answers on stdout, exit 1 when there is none)
   set SCHEME@HOST LOGIN [--kind K] [--note TEXT] [--stdin]
                                      store a secret: prompted without echo, or one line on stdin with --stdin  # allowlist secret
   remove SCHEME@HOST LOGIN
+  set / remove ... --service         the same in the service tier (no passphrase needed; shown as [service] in list)
+  init-service                       create the passphrase-less key auth-service and an empty service tier (server)
+  enroll NAME --allow SPEC... (--pubkey FILE | --stdin)
+                                     let a job's ssh public key read the listed service records: SPEC is
+                                     SCHEME@HOST/LOGIN (e.g. imaps@cpbee/chris).  Writes the restricted line into
+                                     ~/.ssh/authorized_keys on the server and the allow list; run again to change
+                                     either.  Make the key on the client: ssh-keygen -t ed25519 -N '' -f ~/.ssh/auth_service
+                                     then: auth enroll NAME --allow SPEC --stdin < ~/.ssh/auth_service.pub
+  unenroll NAME                      remove that client's key line and allow list
+  clients                            the enrolled clients and what each may read (no secrets)
+  serve NAME                         the forced command behind an enrolled key (not run by hand)
   totp HOST [LOGIN] [--digits N]     the current 6-digit code (RFC 6238, 30 s) from the record of kind totp for that
                                      host; computed on the server, only the code crosses; the last stdout line is
                                      the code (what ssh-wwl wants from get2fa_code.py).  Store a seed:
@@ -47,7 +66,10 @@ COMMANDS (answers on stdout, exit 1 when there is none)
                                      secret; --all also asks about outside hosts (gmail, github ...).  Never
                                      prints a secret; exit 3 when something is off
 
-Options: --domain D (default cmnet or $AUTH_DOMAIN)  --no-domain  -n/--dry-run  -h
+A client with ~/.ssh/auth_service ($AUTH_SERVICE_KEY) uses that key for get/totp when nothing is typing at it
+(no tty on stdin, or $AUTH_SERVICE_KEY set) and falls back to its normal ssh key if that fails.
+
+Options: --domain D (default cmnet or $AUTH_DOMAIN)  --no-domain  -n/--dry-run  --service  -h
 Exit: 0 ok, 1 none/refused, 2 usage, 3 findings, 4 vault locked or missing.
 """
 import argparse
@@ -121,12 +143,23 @@ def recipient():
     return os.environ.get("AUTH_RECIPIENT", "auth-vault")
 
 
-def load_local():
-    p = vault_path()
+def service_path():
+    return os.environ.get("AUTH_SERVICE") or os.path.expanduser("~/.local/share/auth/service.gpg")
+
+
+def service_recipient():
+    return os.environ.get("AUTH_SERVICE_RECIPIENT", "auth-service")
+
+
+def load_local(tier="master"):
+    p = service_path() if tier == "service" else vault_path()
     if not os.path.exists(p):
-        raise Err("no vault at %s (auth init)" % p, 4)
+        what, how = ("service tier", "init-service") if tier == "service" else ("vault", "init")
+        raise Err("no %s at %s (auth %s)" % (what, p, how), 4)
     r = subprocess.run(gpg_cmd("--decrypt", p), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if r.returncode:
+        if tier == "service":
+            raise Err("cannot read the service tier (%s)" % r.stderr.decode(errors="replace").strip()[-120:], 4)
         raise Err("vault is locked or unreadable: run 'auth unlock' (%s)" % r.stderr.decode(errors="replace").strip()[-120:], 4)
     return json.loads(r.stdout.decode("utf-8") or "[]")
 
@@ -141,14 +174,15 @@ def backup(path):
         os.chmod(b, 0o600)
 
 
-def save_local(recs):
-    p = vault_path()
+def save_local(recs, tier="master"):
+    p = service_path() if tier == "service" else vault_path()
+    rcpt = service_recipient() if tier == "service" else recipient()
     os.makedirs(os.path.dirname(os.path.abspath(p)), exist_ok=True)
     tmp = "%s.tmp%d" % (p, os.getpid())
-    r = subprocess.run(gpg_cmd("--yes", "--trust-model", "always", "--encrypt", "--recipient", recipient(), "--output", tmp),
+    r = subprocess.run(gpg_cmd("--yes", "--trust-model", "always", "--encrypt", "--recipient", rcpt, "--output", tmp),
                        input=json.dumps(recs, indent=1).encode("utf-8"), stderr=subprocess.PIPE)
     if r.returncode:
-        raise Err("cannot encrypt to %s (auth init?): %s" % (recipient(), r.stderr.decode(errors="replace").strip()[-160:]), 4)
+        raise Err("cannot encrypt to %s (auth init?): %s" % (rcpt, r.stderr.decode(errors="replace").strip()[-160:]), 4)
     backup(p)
     os.chmod(tmp, 0o600)
     os.replace(tmp, p)
@@ -162,27 +196,41 @@ def is_server():
     return os.environ.get("AUTH_LOCAL") == "1" or socket.gethostname().split(".")[0].lower() == server().split(".")[0].lower()
 
 
+def service_key():
+    k = os.environ.get("AUTH_SERVICE_KEY") or os.path.expanduser("~/.ssh/auth_service")
+    return k if os.path.exists(k) else None
+
+
 def ssh(args, data=None, tty=False):
-    cmd = ["ssh"] + (["-t"] if tty else ["-o", "BatchMode=yes"]) + [server(), "auth"] + [shlex.quote(a) for a in args]
-    r = subprocess.run(cmd, input=data, stdout=None if tty else subprocess.PIPE)
+    base = ["ssh"] + (["-t"] if tty else ["-o", "BatchMode=yes"])
+    quoted = [shlex.quote(a) for a in args]
+    key = service_key()
+    if key and not tty and args and args[0] in ("get", "totp") and (os.environ.get("AUTH_SERVICE_KEY") or not sys.stdin.isatty()):
+        r = subprocess.run(base + ["-i", key, "-o", "IdentitiesOnly=yes", server(), "auth"] + quoted, input=data, stdout=subprocess.PIPE)
+        if r.returncode == 0:
+            return 0, r.stdout
+    r = subprocess.run(base + [server(), "auth"] + quoted, input=data, stdout=None if tty else subprocess.PIPE)
     return r.returncode, (r.stdout or b"")
 
 
 class Vault:
-    """The record list, wherever it lives."""
+    """The record list, wherever it lives (tier: master or service)."""
+
+    def __init__(self, tier="master"):
+        self.tier = tier
 
     def load(self):
         if is_server():
-            return load_local()
-        rc, out = ssh(["_export"])
+            return load_local(self.tier)
+        rc, out = ssh(["_export"] + (["--service"] if self.tier == "service" else []))
         if rc:
             raise Err("ssh %s auth _export failed (exit %d; locked? run: ssh -t %s auth unlock)" % (server(), rc, server()), 4 if rc == 4 else 1)
         return json.loads(out.decode("utf-8") or "[]")
 
     def save(self, recs):
         if is_server():
-            return save_local(recs)
-        rc, _ = ssh(["_save"], data=json.dumps(recs).encode("utf-8"))
+            return save_local(recs, self.tier)
+        rc, _ = ssh(["_save"] + (["--service"] if self.tier == "service" else []), data=json.dumps(recs).encode("utf-8"))
         if rc:
             raise Err("ssh %s auth _save failed (exit %d)" % (server(), rc))
 
@@ -460,7 +508,81 @@ def identity_rows():
 
 
 # ------------------------------------------------------------------- main ---
-def main(argv=None):
+CLIENT_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,40}$")
+
+
+def clients_dir():
+    return os.path.expanduser(os.environ.get("AUTH_CLIENTS") or "~/.config/auth/clients")
+
+
+def allow_file(name):
+    if not CLIENT_NAME.match(name or ""):
+        raise Err("a client name is letters, digits . _ - (got %r)" % name, 2)
+    return os.path.join(clients_dir(), name + ".allow")
+
+
+def read_allow(name):
+    p = allow_file(name)
+    if not os.path.exists(p):
+        raise Err("no such client: %s" % name)
+    out = []
+    for ln in read_text(p).splitlines():
+        f = ln.split("\t")
+        if len(f) == 3:
+            out.append(tuple(f))
+    return out
+
+
+def allowed(rec, entries):
+    for sch, host, login in entries:
+        if host == rec["host"] and login == rec["login"] and (sch == "*" or sch in sset(rec["scheme"])):
+            return True
+    return False
+
+
+def authorized_keys_path():
+    return os.path.expanduser("~/.ssh/authorized_keys")
+
+
+def rewrite_authorized_keys(name, newline=None):
+    """drop the line for client NAME from authorized_keys, add newline (when given); mode 600."""
+    p = authorized_keys_path()
+    os.makedirs(os.path.dirname(p), mode=0o700, exist_ok=True)
+    mark = " auth-client-%s" % name
+    old = read_text(p).splitlines() if os.path.exists(p) else []
+    new = [ln for ln in old if not ln.rstrip().endswith(mark)]
+    if newline:
+        new.append(newline)
+    tmp = "%s.tmp%d" % (p, os.getpid())
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(new) + ("\n" if new else ""))
+    os.replace(tmp, p)
+    os.chmod(p, 0o600)
+
+
+def serve(name):
+    """the forced command behind an enrolled key: get and totp from the service tier, for the allowed records only."""
+    allow_file(name)
+    orig = os.environ.get("SSH_ORIGINAL_COMMAND", "")
+    try:
+        toks = shlex.split(orig)
+    except ValueError:
+        toks = []
+    if toks and os.path.basename(toks[0]) == "auth":
+        toks = toks[1:]
+    if not toks or toks[0] not in ("get", "totp"):
+        print("auth: this key may only get and totp", file=sys.stderr)
+        return 1
+    try:
+        read_allow(name)
+    except Err as e:
+        print("auth: %s" % e, file=sys.stderr)
+        return 1
+    return main(toks, restricted=name)
+
+
+def main(argv=None, restricted=None):
     ap = argparse.ArgumentParser(prog="auth", add_help=False)
     ap.add_argument("cmd", nargs="?")
     ap.add_argument("args", nargs="*")
@@ -475,6 +597,9 @@ def main(argv=None):
     ap.add_argument("--lan", action="append")
     ap.add_argument("--skip", action="append")
     ap.add_argument("--all", action="store_true")
+    ap.add_argument("--service", action="store_true")
+    ap.add_argument("--allow", action="append")
+    ap.add_argument("--pubkey")
     ap.add_argument("-n", "--dry-run", action="store_true")
     ap.add_argument("-h", "--help", action="store_true")
     try:
@@ -489,9 +614,42 @@ def main(argv=None):
         return 2
     dom = None if a.no_domain else a.domain
     cmd, args = a.cmd, a.args
-    v = Vault()
+    if restricted and cmd not in ("get", "totp"):
+        print("auth: this key may only get and totp", file=sys.stderr)
+        return 1
+    if restricted and (a.service or a.allow or a.pubkey):
+        print("auth: option not allowed for this key", file=sys.stderr)
+        return 1
+    v = Vault("service" if a.service else "master")
+    tier = "service" if a.service else "master"
+    raw_argv = list(argv if argv is not None else sys.argv[1:])
+
+    def lookup(pick):
+        """matching records: from the service tier first, then (unless this is a restricted client) the master tier."""
+        svc = []
+        if restricted:
+            svc = [r for r in load_local("service") if allowed(r, read_allow(restricted))]
+        elif os.path.exists(service_path()):
+            try:
+                svc = load_local("service")
+            except Err:
+                svc = []
+        hits = pick(svc)
+        if hits or restricted:
+            return hits
+        return pick(load_local())
+
     try:
+        if cmd == "serve":
+            if len(args) != 1:
+                raise Err("serve NAME", 2)
+            return serve(args[0])
         # ---- on the server only
+        if cmd in ("init-service", "enroll", "unenroll", "clients") and not is_server():
+            data = sys.stdin.buffer.read() if (a.stdin and cmd == "enroll") else None
+            rc, out = ssh([x for x in raw_argv], data=data)
+            sys.stdout.write(out.decode("utf-8", errors="replace"))
+            return rc
         if cmd in ("init", "unlock", "_export", "_save") and not is_server():
             if cmd == "unlock":
                 return ssh(["unlock"], tty=True)[0]
@@ -499,10 +657,65 @@ def main(argv=None):
                 return ssh(["init"], tty=True)[0]
             raise Err("%s is for the server" % cmd, 2)
         if cmd == "_export":
-            json.dump(load_local(), sys.stdout)
+            json.dump(load_local(tier), sys.stdout)
             return 0
         if cmd == "_save":
-            save_local(json.load(sys.stdin))
+            save_local(json.load(sys.stdin), tier)
+            return 0
+        if cmd == "init-service":
+            if os.path.exists(service_path()):
+                print("service tier exists: %s" % service_path())
+                return 0
+            have = subprocess.run(gpg_cmd("--list-keys", service_recipient()), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+            if not have:
+                r = subprocess.run(gpg_cmd("--pinentry-mode", "loopback", "--passphrase", "", "--quick-gen-key",
+                                           "%s <auth-service@%s>" % (service_recipient(), socket.gethostname()), "default", "default", "never"))
+                if r.returncode:
+                    raise Err("key creation failed", 4)
+            save_local([], "service")
+            print("service tier created: %s   (key %s has no passphrase; back it up: gpg --export-secret-keys --armor %s)"
+                  % (service_path(), service_recipient(), service_recipient()))
+            return 0
+        if cmd == "enroll":
+            if len(args) != 1 or not a.allow or not (a.stdin or a.pubkey):
+                raise Err("enroll NAME --allow SCHEME@HOST/LOGIN... (--pubkey FILE | --stdin)", 2)
+            name = args[0]
+            path = allow_file(name)
+            entries = []
+            for spec in a.allow:
+                head, slash, login = spec.rpartition("/")
+                if not slash or not login:
+                    raise Err("--allow %s: want SCHEME@HOST/LOGIN" % spec, 2)
+                sch, h, _, _raw = split_spec(head, dom)
+                entries.append((sch, h, login))
+            text = sys.stdin.read() if a.stdin else read_text(a.pubkey)
+            lines = [x.strip() for x in text.splitlines() if x.strip()]
+            f = lines[0].split() if lines else []
+            if len(lines) != 1 or len(f) < 2 or not re.match(r"^(ssh-|ecdsa-|sk-)", f[0]):
+                raise Err("expected one ssh public key line", 2)
+            authbin = os.environ.get("AUTH_BIN") or os.path.abspath(sys.argv[0])
+            line = 'command="%s serve %s",restrict %s %s auth-client-%s' % (authbin, name, f[0], f[1], name)
+            os.makedirs(clients_dir(), mode=0o700, exist_ok=True)
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write("".join("%s\t%s\t%s\n" % e for e in entries))
+            rewrite_authorized_keys(name, line)
+            print("enrolled %s: may read %d record%s" % (name, len(entries), "" if len(entries) == 1 else "s"))
+            return 0
+        if cmd == "unenroll":
+            if len(args) != 1:
+                raise Err("unenroll NAME", 2)
+            p = allow_file(args[0])
+            rewrite_authorized_keys(args[0])
+            if os.path.exists(p):
+                os.remove(p)
+            print("unenrolled %s" % args[0])
+            return 0
+        if cmd == "clients":
+            d = clients_dir()
+            names = sorted(x[:-6] for x in os.listdir(d) if x.endswith(".allow")) if os.path.isdir(d) else []
+            for n in names:
+                print("%s: %s" % (n, ", ".join("%s@%s/%s" % e for e in read_allow(n)) or "(nothing)"))
             return 0
         if cmd == "init":
             if os.path.exists(vault_path()):
@@ -534,24 +747,44 @@ def main(argv=None):
             return rc
 
         if cmd == "list":
-            recs = load_local()
+            svc = []
+            if os.path.exists(service_path()):
+                try:
+                    svc = [dict(r, _svc=True) for r in load_local("service")]
+                except Err:
+                    svc = []
+            master_err = None
+            try:
+                recs = svc if a.service else svc + load_local()
+            except Err as e:
+                if not svc:
+                    raise
+                recs, master_err = svc, e
             want = split_spec(args[0].partition(",")[0] + "@" + args[0].partition("@")[2] if "," in args[0] else args[0], dom)[:2] if args else None
             for r in sorted(recs, key=lambda r: (r["host"], r["scheme"], r["login"])):
                 if want is None or (r["host"] == want[1] and sset(r["scheme"]) & {want[0], "*"}):
-                    print("%-10s %-28s %-18s %-9s %s" % (r["scheme"], r["host"], r["login"], r.get("kind", "password"), ("# " + r["note"]) if r.get("note") else ""))
+                    note = ("[service] " if r.get("_svc") else "") + r.get("note", "")
+                    print("%-10s %-28s %-18s %-9s %s" % (r["scheme"], r["host"], r["login"], r.get("kind", "password"), ("# " + note) if note else ""))
+            if master_err:
+                print("auth: the master tier is not listed: %s" % master_err, file=sys.stderr)
+                return master_err.code
             return 0
         if cmd == "get":
             if len(args) not in (2, 3):
                 raise Err("get SCHEME HOST [LOGIN]", 2)
             sch, h = scheme_of(args[0]), host_of(args[1], dom)
-            recs = load_local()
-            login = args[2] if len(args) == 3 else identity_login(args[0], args[1])
-            hits = find(recs, sch, h, login)
-            if login is None:
-                logins = sorted({r["login"] for r in hits})
-                if len(logins) != 1:
-                    raise Err("which login? %s" % (", ".join(logins) if logins else "none stored for %s@%s" % (sch, h)))
-                hits = [r for r in hits if r["login"] == logins[0]]
+            login = args[2] if len(args) == 3 else (None if restricted else identity_login(args[0], args[1]))
+
+            def pick(recs):
+                hits = find(recs, sch, h, login)
+                if login is None and hits:
+                    logins = sorted({r["login"] for r in hits})
+                    if len(logins) != 1:
+                        raise Err("which login? %s" % ", ".join(logins))
+                    hits = [r for r in hits if r["login"] == logins[0]]
+                return hits
+
+            hits = lookup(pick)
             if not hits:
                 return 1
             hits.sort(key=lambda r: sch not in sset(r["scheme"]))           # the exact scheme before *
@@ -562,7 +795,7 @@ def main(argv=None):
             if len(args) not in (1, 2):
                 raise Err("totp HOST [LOGIN]", 2)
             h = host_of(args[0], dom)
-            hits = [r for r in load_local() if r.get("kind") == "totp" and r["host"] == h and (len(args) < 2 or r["login"] == args[1])]
+            hits = lookup(lambda recs: [r for r in recs if r.get("kind") == "totp" and r["host"] == h and (len(args) < 2 or r["login"] == args[1])])
             if len(hits) != 1:
                 if not hits:
                     return 1
