@@ -70,11 +70,28 @@ function fb_auth_foo($one) {
 
 // do the foo() operation ////////////////////////////////
 function foo($one) {
-  $r = fb_auth_foo($one);
+  $r = fb_auth_foo(fb_alias($one));
   if ($r !== null) {
     return $r;
   }
-  return fb_file_foo($one);
+  return fb_file_foo($one);                // the old file knows the label as written
+}
+
+// Old labels that mean the same secret as another label.  mesh:pg is the same login and secret as mesh; the vault keeps
+// it once (postgres mesh.cmnet mesh), so foo("mesh:pg") asks the vault for "mesh".  More can go in the file
+// ~/.config/auth/foo-aliases (or $FOO_BAR_ALIASES), one per line:  OLDLABEL TAB-or-spaces TARGETLABEL  (# starts a comment).
+function fb_alias($one) {
+  $map = ['mesh:pg' => 'mesh'];
+  $file = getenv('FOO_BAR_ALIASES') ?: (fb_lan_home() . '/.config/auth/foo-aliases');
+  if (is_readable($file)) {
+    foreach (file($file, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) as $line) {
+      $line = trim(preg_replace('/#.*/', '', $line));
+      if ($line !== '' && preg_match('/^(\S+)\s+(\S+)$/', $line, $m)) {
+        $map[$m[1]] = $m[2];
+      }
+    }
+  }
+  return isset($map[$one]) ? $map[$one] : $one;
 }
 
 // do the foo() operation ////////////////////////////////

@@ -99,6 +99,7 @@ Things to know:
 - **`auth render netrc|tickets --tmp`** writes a fresh file into a private directory (`$XDG_RUNTIME_DIR`, else `/dev/shm`, else the
   temp dir; mode 700) and prints its path as the last line, for tools that take a file name and should not leave one in `~`.
 - **`auth ca [--smtp] [--out FILE]`** prints cpbee's CA file (public, no unlock); `--smtp` adds the self-signed certificate port 587 presents, fetched on cpbee, so a client can pin it.
+- **The laptop's `~/user_php/Foo_Bar.php`** is `net-utils/shims/Foo_Bar_lan.php`: `foo LABEL` asks the vault first and falls back to `~/.foo/bar`. An old label that means another label's secret is an alias (built in: `mesh:pg` is `mesh`; more in `~/.config/auth/foo-aliases`, one `OLDLABEL TARGETLABEL` per line), so retiring `~/.foo/bar` cannot break a caller of it on this laptop.
 - **`auth-ftp HOST [options]`** and **`auth-telnet HOST [PORT]`** log in to the VAX (or any ftp/telnet host) from `auth get ftp|telnet HOST`: auth-ftp writes a private one-line `.netrc` in a mode-700 directory and removes it when ftp ends; auth-telnet answers `Username:` and `Password:` with expect. Store the login once: `auth set ftp,telnet@cpvax system`.
 - Planned, not built: `auth` called directly by the tv apps with the files as a
   fallback (tracked in the GitHub issues, chrispollitt/POSIX#14).
