@@ -94,6 +94,20 @@ Phase 2: the service tier and client access (the core of G3)
       WebApps (Bookshelf/updateB.sh, TinyShell/config.php, UpdateSSL/update_dropbox.py, cmnet_test/call.sh,
       user_perl GetHosts.pm and Router/Actiontec.pm, Zyxel.pm, user_js/myexpress.js).  Each calls foo HOST (user and
       password); the replacement is auth get SCHEME HOST LOGIN with a service record per host the script reads.
+  [ ] THE WEBHOST (whatwelove.org = cp1.uhcloud.com, user whatwelo) also uses Foo_Bar (looked 2026-11-10 via ssh-wwl,
+      read-only):
+        libraries   ~/user_bash/Foo_Bar.bash, ~/user_js/Foo_Bar.js, ~/user_perl/Foo_Bar.pm, ~/user_php/Foo_Bar_w.php,
+                    ~/user_python/Foo_Bar.py
+        callers     ~/user_php/cpanel.php, ~/user_perl/GetHosts.pm, ~/user_js/myexpress.js,
+                    ~/www/cmnet/www/index.php, ~/local/usr/bin/OLD/update_dropbox.py (OLD: probably dead)
+        crontab     five jobs, all in ~/local/usr/bin: cleanmail.sh, truncate_logs.sh, 2fa_state_clean.sh (every 15 min),
+                    update_ssl.sh, geoipupdate-wrapper.sh.  None of them names Foo_Bar directly.
+        not fully searched   www/ul (grep timed out), shirley, thinkup, together (shallow search only, no hit).
+      OPEN QUESTION: the webhost is outside the LAN.  A job there cannot ssh to cpbee (192.168.10.1) unless cpbee is
+      reachable from outside (or a reverse tunnel).  Options to decide: (a) leave the webhost on its own Foo_Bar for
+      now (it is its own store, with its own key); (b) give the webhost a small service store of its own (the same
+      `auth` tool and a service tier on that host, secrets pushed from cpbee); (c) expose a service-only ssh endpoint
+      for it.  This affects goals G1 and G4 (a second store to keep in step).
   done when a scheduled job can fetch its own secret and nothing else, with the vault locked.
 
 Phase 3: shims, so tools stop reading password files (G1, G2)
