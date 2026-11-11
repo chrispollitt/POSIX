@@ -402,6 +402,48 @@ class T(unittest.TestCase):
         self.assertIn("no rule", err)
         self.assertNotIn("pw", err + out)
 
+    def test_git_credential_helper(self):
+        self.fresh()
+        rc, _, err = self.run_auth("set", "https@github.com", "ghuser", "--stdin", stdin="ghtok-9\n")
+        self.assertEqual(rc, 0, err)
+        helper = os.path.join(TOOLS, "git-credential-auth")
+
+        def run(op, text):
+            r = subprocess.run(["bash", helper, op], input=text, env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                               universal_newlines=True)
+            return r.returncode, r.stdout, r.stderr
+
+        self.assertEqual(run("get", "protocol=https\nhost=github.com\n\n")[:2], (0, "username=ghuser\npassword=ghtok-9\n"))  # allowlist secret
+        self.assertEqual(run("get", "protocol=https\nhost=github.com:443\nusername=ghuser\n\n")[:2],
+                         (0, "username=ghuser\npassword=ghtok-9\n"))  # allowlist secret
+        self.assertEqual(run("get", "protocol=https\nhost=elsewhere.example\n\n")[:2], (0, ""))            # no record: no answer
+        self.assertEqual(run("get", "protocol=https\nhost=github.com\nusername=other\n\n")[:2], (0, ""))   # other login: no answer
+        self.assertEqual(run("store", "protocol=https\nhost=github.com\nusername=ghuser\npassword=x\n\n")[:2], (0, ""))
+        self.assertEqual(run("erase", "protocol=https\nhost=github.com\n\n")[:2], (0, ""))
+        self.assertEqual(self.run_auth("get", "https", "github.com", "ghuser")[1], "ghtok-9\n")             # store/erase changed nothing
+
+    def test_render_tmp_writes_a_private_file_not_the_real_one(self):
+        self.fresh()
+        rc, _, err = self.run_auth("set", "imaps@cpbee", "chris", "--stdin", stdin="tmpw-5\n")
+        self.assertEqual(rc, 0, err)
+        rtd = os.path.join(self.d, "runtime")
+        os.makedirs(rtd, mode=0o700)
+        env = dict(self.env, XDG_RUNTIME_DIR=rtd)
+        rc, out, err = self.run_auth("render", "tickets", "--tmp", env=env)
+        self.assertEqual(rc, 0, err)
+        path = out.strip().splitlines()[-1]
+        self.assertTrue(path.startswith(rtd), path)
+        with open(path) as fh:
+            self.assertIn("tmpw-5", fh.read())
+        if not sys.platform.startswith("cygwin"):                                                         # Cygwin shows other modes
+            self.assertEqual(os.stat(path).st_mode & 0o077, 0)
+        self.assertFalse(os.path.exists(os.path.join(self.env["HOME"], ".mu-tickets")))                    # the real file untouched
+        rc, out2, _ = self.run_auth("render", "tickets", "--tmp", env=env)                                 # again: fresh, same path
+        self.assertEqual((rc, out2.strip().splitlines()[-1]), (0, path))
+        rc, out3, _ = self.run_auth("render", "netrc", "--tmp", env=env)
+        self.assertNotEqual(out3.strip().splitlines()[-1], path)                                           # its own file
+        self.assertTrue(os.path.exists(out3.strip().splitlines()[-1]))
+
     def test_auth_canary_job(self):
         self.fresh()
         self.fresh_service()

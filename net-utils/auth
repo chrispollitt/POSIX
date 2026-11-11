@@ -62,6 +62,10 @@ COMMANDS (answers on stdout, exit 1 when there is none)
                                      old ssh key, default ~/.ssh-OLD/id_rsa) into the vault, kept out of every file
   import netrc|tickets [FILE]        take the logins of ~/.netrc or ~/.mu-tickets into the vault (-n: plan only;
                                      the same login with another secret is reported and left alone)
+  render ... --tmp                   write a fresh file into a private directory (mode 700) on tmpfs where there is one
+                                     ($XDG_RUNTIME_DIR, else /dev/shm, else the temp dir) instead of your real file; the last
+                                     line printed is its path (f=$(auth render netrc --tmp | tail -1)); for tools that take a
+                                     file name.  Remove it when done; only $XDG_RUNTIME_DIR is emptied at logout.
   render tickets|netrc [--out FILE]  write the vault's passwords into the file (default ~/.mu-tickets, ~/.netrc)
                                      between `# BEGIN auth` / `# END auth` lines; the rest of the file is not
                                      touched except older lines for the same scheme+host+login, which the block
@@ -259,6 +263,18 @@ def exact(recs, scheme, host, login):
 
 
 # -------------------------------------------------------------- the files ---
+def tmp_render_dir():
+    """a private directory for `render --tmp`: $XDG_RUNTIME_DIR (tmpfs, emptied at logout), else /dev/shm (tmpfs), else
+    the system temp dir.  Mode 700, owned by this user."""
+    for base in (os.environ.get("XDG_RUNTIME_DIR"), "/dev/shm", tempfile.gettempdir()):
+        if base and os.path.isdir(base) and os.access(base, os.W_OK):
+            d = os.path.join(base, "auth-render-%d" % os.getuid())
+            os.makedirs(d, mode=0o700, exist_ok=True)
+            os.chmod(d, 0o700)
+            return d
+    raise Err("no writable temp directory for render --tmp")
+
+
 def read_text(p):
     try:
         with open(p, encoding="utf-8", errors="replace") as fh:
@@ -604,6 +620,7 @@ def main(argv=None, restricted=None):
     ap.add_argument("--note", default="")
     ap.add_argument("--stdin", action="store_true")
     ap.add_argument("--out")
+    ap.add_argument("--tmp", action="store_true")
     ap.add_argument("--key")
     ap.add_argument("--digits", type=int, default=6)
     ap.add_argument("--lan", action="append")
@@ -970,8 +987,13 @@ def main(argv=None, restricted=None):
 
         if cmd == "render":
             if not args or args[0] not in ("tickets", "netrc"):
-                raise Err("render tickets|netrc [--out FILE]", 2)
-            path = a.out or os.path.expanduser("~/.mu-tickets" if args[0] == "tickets" else "~/.netrc")
+                raise Err("render tickets|netrc [--out FILE | --tmp]", 2)
+            if a.tmp:                                  # a fresh file in a private temp directory, not your real ~/.netrc
+                path = a.out or os.path.join(tmp_render_dir(), "mu-tickets" if args[0] == "tickets" else "netrc")
+                if os.path.exists(path) and not a.dry_run:
+                    os.remove(path)
+            else:
+                path = a.out or os.path.expanduser("~/.mu-tickets" if args[0] == "tickets" else "~/.netrc")
             allrecs = [r for r in v.load() if not r.get("vaultonly")]       # imported from ~/.foo: never written to a file
             block = (tickets_block if args[0] == "tickets" else netrc_block)(allrecs)
             old = read_text(path)
@@ -983,7 +1005,7 @@ def main(argv=None, restricted=None):
             print("%s: %d line%s in the auth block%s%s" % (path, len(block), "" if len(block) == 1 else "s",
                                                            ", %d older line%s of the same logins replaced by it" % (gone, "" if gone == 1 else "s") if gone else "",
                                                            " (unchanged)" if new == old else ""))
-            if a.dry_run or new == old:
+            if a.dry_run or (new == old and not a.tmp):
                 return 0
             backup(path) if old is not None else None
             tmp = "%s.tmp%d" % (path, os.getpid())
@@ -992,6 +1014,8 @@ def main(argv=None, restricted=None):
                 fh.write(new)
             os.replace(tmp, path)
             os.chmod(path, 0o600)
+            if a.tmp:
+                print(path)                            # the last line is the file, for:  f=$(auth render netrc --tmp | tail -1)
             return 0
 
         if cmd == "check":

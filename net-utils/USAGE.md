@@ -94,7 +94,11 @@ Things to know:
   records** (next section), which need no unlock.
 - A sudo password is root: keep it, if at all, only in the **master** tier (never the service tier), and prefer sudoers
   entries for named commands.
-- Planned, not built: a git credential helper, `auth` called directly by the tv apps with the files as a
+- **git:** `git config --global credential.helper auth` (the file `git-credential-auth` on the PATH) answers git from
+  `auth get https HOST [LOGIN]`; store a token with `auth set https@github.com YOURLOGIN`.
+- **`auth render netrc|tickets --tmp`** writes a fresh file into a private directory (`$XDG_RUNTIME_DIR`, else `/dev/shm`, else the
+  temp dir; mode 700) and prints its path as the last line, for tools that take a file name and should not leave one in `~`.
+- Planned, not built: an ftp/telnet wrapper, `auth` called directly by the tv apps with the files as a
   fallback, `auth ca` to hand out the CA file (all tracked in the GitHub issues, chrispollitt/POSIX#14).
 
 ## Jobs: cron and Scheduled Tasks (the service tier)
