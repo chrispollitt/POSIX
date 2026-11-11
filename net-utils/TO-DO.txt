@@ -109,9 +109,12 @@ Phase 2: the service tier and client access (the core of G3)
       auth-service and ~/.local/share/auth/service.gpg, and `auth import foo ~/.foo/bar --service --skip three`
       loaded the 8 Foo_Bar entries (cmnet.whatwelove.org web, cp1 and cs16 cpanel, dropbox, mysql x2, tinyshell,
       api.github.com); Foo_Bar's key there is ~/.ssh-OLD/id_rsa (the default).
-      NOT VERIFIED: for cp1.uhcloud.com:cpanel the old `foo -p` printed 13 characters and `auth get` 32 (a cPanel
-      API token is 32 long, so auth may well be right, but a probe of the contents was declined, so it is open).
-      Compare the two yourself on the webhost before any caller is switched.  Callers are NOT switched yet.
+      COMPARED 2026-11-10 (TO_BE_RUN/compare-foo-auth-on-webhost.sh, lengths only): `foo -p LABEL` gave 13 characters
+      for ALL 8 labels, so the old bash foo call on the webhost does not return the stored values (cause not
+      investigated: it may be the call, not the data).  `auth get` gave lengths that fit each secret: cp1 cpanel 32,
+      api.github.com 40 (a classic token), dropbox 64, cs16 cpanel 18, mysql 8 and 10, web 8, tinyshell 8: no constant or
+      block-sized padding.  So the import is judged right, but equality with the old store was NOT proven.
+      The real proof is a caller: switch one and see it work.  Callers are NOT switched yet.
       Still to do: back up the webhost's auth-service key (no passphrase); decide how new/changed secrets reach it
       (a second store to keep in step: goals G1/G4), e.g. `auth set --service` there by hand, or push from cpbee.
   done when a scheduled job can fetch its own secret and nothing else, with the vault locked.
