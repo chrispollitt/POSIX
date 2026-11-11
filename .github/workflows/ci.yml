@@ -54,11 +54,8 @@ jobs:
       # Only the sandboxed suites: never tests/e2e_master.sh, which sends real mail through a live master.
       - name: unit
         run: bash mail-setup/tests/run-tests.sh unit
-      # 3 of the 229 shell tests (configure-sendmail-relay --print-header-checks) fail on a fresh
-      # Ubuntu 24.04; not diagnosed yet. Allowed to fail until that is looked at.
       - name: shell
         run: bash mail-setup/tests/run-tests.sh shell
-        continue-on-error: true
       - name: pull end-to-end
         working-directory: mail-setup
         run: python3 -B -m unittest tests/e2e/test_pull_e2e.py -v
