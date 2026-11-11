@@ -92,7 +92,7 @@ Things to know:
 - Other Unix users and services (Floyd, Michelle) and jobs do not read your master vault. They get **service
   records** (next section), which need no unlock.
 - Planned, not built: a git credential helper, `auth` called directly by the tv apps with the files as a
-  fallback, `auth ca` to hand out the CA file (all in `TO-DO.txt`).
+  fallback, `auth ca` to hand out the CA file (all tracked in the GitHub issues, chrispollitt/POSIX#14).
 
 ## Jobs: cron and Scheduled Tasks (the service tier)
 
@@ -183,7 +183,7 @@ identity check      # logins in use that the list does not know; Floyd's admins;
 ```
 
 Expect `identity check` to show 0 findings. `auth check` lists identity lines that still have no vault secret
-(Delta Chat, Floyd's IRC logins, `cpollitt` on the VAX): these are Phase 2 items in `TO-DO.txt`.
+(Delta Chat, Floyd's IRC logins, `cpollitt` on the VAX): these are Phase 2 items in the GitHub issues (chrispollitt/POSIX#14).
 
 ## When something goes wrong
 
