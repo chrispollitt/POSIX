@@ -129,8 +129,12 @@ Phase 2: the service tier and client access (the core of G3)
       ~/.foo/bar.  2026-11-11: bar($login, $secret, $label) works in the shim too: it runs `auth bar --service LABEL LOGIN
       --stdin` (secret on stdin; "-delete" as the login removes the label), so foo(LABEL) and bar() both work for every
       language through Foo_Bar_w.php.  Tests: test_bar_stores_by_old_label..., test_php_shim_foo_and_bar (25 pass).
-      NOT YET RUN ON THE WEBHOST: copy auth and shims/Foo_Bar.php over, then `bar auser apass ahost:aserv` and
-      `foo ahost:aserv`, then `bar -delete x ahost:aserv`.  auth is on demand (no daemon); gpg starts its own
+      DEPLOYED AND VERIFIED ON THE WEBHOST 2026-11-11 (TO_BE_RUN/DONE/webhost-deploy-*.sh): auth, the shim and the -p
+      Foo_Bar.bash installed (backups: auth.bak-20261111, Foo_Bar.php.bak-20261111, Foo_Bar.bash.orig); bar add / replace /
+      -delete, foo and foo -p all work through the real chain.  The first try failed and rolled back: the webhost's Python
+      is 3.7.17 and its argparse took `auth bar --service --stdin LABEL LOGIN` for unknown options (LESSON: on that host put
+      options after the arguments, or rely on the intermixed parser now in auth).  Still: delete ~/tmp-deploy; re-run a
+      real caller (cpanel.php) and the cron scripts that use foo.  auth is on demand (no daemon); gpg starts its own
       gpg-agent as needed.
       CORRECTION 2026-11-11: no per-language shims are needed (the line that said the bash, perl, python and js
       libraries each need their own shim was wrong).  Every language's Foo_Bar library goes through Foo_Bar_w.php,
@@ -138,15 +142,14 @@ Phase 2: the service tier and client access (the core of G3)
       WEBHOST SETTINGS, 2026-11-11: ~/.config/auth/local makes auth use the local files (no ssh to cpbee), and the
       word kill-agent in that file makes auth stop the gpg-agent after each call (no long-running process left on
       the shared host).  The webhost store has NO dependency on cpbee: it works with cpbee down and unreachable.
-      foo -p PUZZLE, EXPLAINED 2026-11-11 (from the sources; not yet confirmed on the webhost): on the webhost,
+      foo -p PUZZLE, SOLVED AND FIXED 2026-11-11 (the diagnosis below was confirmed on the webhost: the installed
+      Foo_Bar.bash had 0 lines with "skip"; the -p version is installed and foo -p gives the 32-char secret alone): on the webhost,
       `bash foo LABEL` returns the correct 8-char login and 32-char secret, but `foo -p LABEL` printed "failed<TAB>failed"
       (6 chars, tab, 6 chars = the 13 characters seen for all 8 labels).  Cause: the webhost's ~/user_bash/Foo_Bar.bash is
       the old WebApps repo copy, which has no -p handling, so foo took "-p" as the label, found nothing and printed
       failed twice.  The copy in the Cygwin home (used by Strata/bin/check_garbage.sh, fob-log-query.pl/.js: foo -p mesh)
       does handle -p (prints only the secret).  Neither the data, the import nor the shim is at fault.
-      FIX: WebApps branch foo-bar-p-option has the -p version of user_bash/Foo_Bar.bash.  To do on the webhost: confirm
-      first with `grep -c skip ~/user_bash/Foo_Bar.bash` (0 = no -p handling), keep the old file as Foo_Bar.bash.orig,
-      copy the new one over, then `foo -p LABEL` must print the 32-char secret alone.
+      FIX (done): WebApps main has the -p version of user_bash/Foo_Bar.bash; the old webhost file is Foo_Bar.bash.orig there.
       Still to do: back up the webhost's auth-service key (no passphrase); decide how new/changed secrets reach it
       (a second store to keep in step: goals G1/G4), e.g. `auth set --service` there by hand, or push from cpbee.
   done when a scheduled job can fetch its own secret and nothing else, with the vault locked.

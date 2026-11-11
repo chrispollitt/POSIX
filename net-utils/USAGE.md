@@ -139,10 +139,13 @@ from cpbee's: a password changed in one is not changed in the other. <!-- allowl
 - The webhost store has no dependency on cpbee: it works with cpbee down or unreachable.
 - Every language's `Foo_Bar` library (bash, perl, python, js) goes through `Foo_Bar_w.php`, so the one PHP shim
   (`shims/Foo_Bar.php`) covers them all. No per-language shims are needed.
-- **`foo -p` on the webhost:** `bash foo LABEL` returns the right login and secret, but `foo -p LABEL` printed
-  `failed` twice. The webhost's `~/user_bash/Foo_Bar.bash` is the old copy with no `-p` handling (so `-p` was taken as
-  the label). The fix is the `-p` version of that file (WebApps branch `foo-bar-p-option`); copy it to the webhost.
-  See `TO-DO.txt`.
+- **`foo -p` on the webhost (fixed 2026-11-11):** `foo -p LABEL` used to print `failed` twice because the webhost's
+  `~/user_bash/Foo_Bar.bash` was an old copy with no `-p` handling. The `-p` version (WebApps `user_bash/Foo_Bar.bash`)
+  is installed there now; the old file is `Foo_Bar.bash.orig`.
+- **`bar` works through the shim:** `bar($login, $secret, $label)` stores the entry in the service tier under that label
+  (what `foo($label)` answers); `bar("-delete", x, $label)` removes it. The webhost's Python is 3.7: `auth` parses options
+  and arguments in any order, so `auth set --service SCHEME@HOST LOGIN` and `auth set SCHEME@HOST LOGIN --service` should both work (checked on
+  Python 3.11 and 3.12; on the webhost only the shim's options-last `bar` call has been run).
 
 ## Changing a password, start to finish
 
