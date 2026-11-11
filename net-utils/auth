@@ -18,7 +18,7 @@ TWO TIERS   The master tier above needs the passphrase, so a person unlocks it. 
     cannot, so records can also live in the SERVICE tier: ~/.local/share/auth/service.gpg ($AUTH_SERVICE),
     encrypted to the key `auth-service` ($AUTH_SERVICE_RECIPIENT), which has NO passphrase.  Put in it only what a
     job truly needs.  A job gets its own ssh key (`auth enroll`): the key is tied by authorized_keys to a forced
-    command, `auth serve NAME`, which answers only `get` and `totp`, only from the service tier, and only for the
+    command, `auth serve NAME`, which answers only `get`, `foo` and `totp`, only from the service tier, and only for the
     records on that client's allow list.  The service secrets are protected by file permissions and those ssh
     restrictions, not by a passphrase.  `get` and `totp` look in the service tier first, then the master tier.
 
@@ -217,7 +217,7 @@ def ssh(args, data=None, tty=False):
     base = ["ssh"] + (["-t"] if tty else ["-o", "BatchMode=yes"])
     quoted = [shlex.quote(a) for a in args]
     key = service_key()
-    if key and not tty and args and args[0] in ("get", "totp") and (os.environ.get("AUTH_SERVICE_KEY") or not sys.stdin.isatty()):
+    if key and not tty and args and args[0] in ("get", "totp", "foo") and (os.environ.get("AUTH_SERVICE_KEY") or not sys.stdin.isatty()):
         r = subprocess.run(base + ["-i", key, "-o", "IdentitiesOnly=yes", server(), "auth"] + quoted, input=data, stdout=subprocess.PIPE)
         if r.returncode == 0:
             return 0, r.stdout
@@ -590,7 +590,7 @@ def rewrite_authorized_keys(name, newline=None):
 
 
 def serve(name):
-    """the forced command behind an enrolled key: get and totp from the service tier, for the allowed records only."""
+    """the forced command behind an enrolled key: get, foo and totp from the service tier, for the allowed records only."""
     allow_file(name)
     orig = os.environ.get("SSH_ORIGINAL_COMMAND", "")
     try:
@@ -599,8 +599,8 @@ def serve(name):
         toks = []
     if toks and os.path.basename(toks[0]) == "auth":
         toks = toks[1:]
-    if not toks or toks[0] not in ("get", "totp"):
-        print("auth: this key may only get and totp", file=sys.stderr)
+    if not toks or toks[0] not in ("get", "totp", "foo"):
+        print("auth: this key may only get, foo and totp", file=sys.stderr)
         return 1
     try:
         read_allow(name)
@@ -646,8 +646,8 @@ def main(argv=None, restricted=None):
         return 2
     dom = None if a.no_domain else a.domain
     cmd, args = a.cmd, a.args
-    if restricted and cmd not in ("get", "totp"):
-        print("auth: this key may only get and totp", file=sys.stderr)
+    if restricted and cmd not in ("get", "totp", "foo"):
+        print("auth: this key may only get, foo and totp", file=sys.stderr)
         return 1
     if restricted and (a.service or a.allow or a.pubkey):
         print("auth: option not allowed for this key", file=sys.stderr)

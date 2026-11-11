@@ -545,6 +545,16 @@ class T(unittest.TestCase):
             rc, out, _ = served(bad)
             self.assertEqual(rc, 1, bad)
             self.assertNotIn("S3rv1ce", out)
+        # the old foo LABEL call is served too, from the service tier and only for records on the allow list
+        self.run_auth("bar", "--service", "cp.cmnet:web", "wuser", "--stdin", stdin="W3bpass\n")
+        self.run_auth("bar", "--service", "dbx.cmnet:web", "otheruser", "--stdin", stdin="Hidd3n\n")
+        rc, _, err = self.run_auth("enroll", "c1", "--allow", "https@cpbee/michelle", "--allow", "https@cp.cmnet/wuser",
+                                   "--stdin", stdin=self.PUB + "\n")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(served("auth foo cp.cmnet:web")[:2], (0, "wuser\tW3bpass\n"))
+        rc, out, _ = served("auth foo dbx.cmnet:web")                                      # service record, not on the list
+        self.assertEqual((rc, out), (1, ""))
+        self.assertEqual(served("auth foo nowhere.cmnet:web")[0], 1)
         self.run_auth("unenroll", "c1")
         self.assertNotIn("auth-client-c1", open(ak).read())
         self.assertEqual(served("auth get https cpbee michelle")[0], 1)

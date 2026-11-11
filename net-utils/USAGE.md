@@ -108,7 +108,7 @@ A job cannot type the vault passphrase, so it uses a second tier:
 - **Service tier:** records stored with `--service` live in `service.gpg`, encrypted to a key with **no
   passphrase**. Put in it only what a job truly needs. These secrets are protected by file permissions on cpbee
   and by the ssh restrictions below, not by a passphrase.
-- **One ssh key per job or machine**, tied to a forced command (`auth serve NAME`) that can only `get` or `totp`,
+- **One ssh key per job or machine**, tied to a forced command (`auth serve NAME`) that can only `get`, `foo` or `totp`,
   only from the service tier, and only the records on that client's allow list. A stolen job key cannot list,
   change, or read anything else.
 
