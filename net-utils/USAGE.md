@@ -156,6 +156,7 @@ from cpbee's: a password changed in one is not changed in the other. <!-- allowl
 - `~/.config/auth/local` makes `auth` use the local files. The word `kill-agent` in that file makes `auth` stop the
   gpg-agent after each call, so nothing keeps running on the shared host.
 - The webhost store has no dependency on cpbee: it works with cpbee down or unreachable.
+- New or changed secrets reach the webhost by hand: log in with `ssh-wwl` and run `~/local/usr/bin/auth set --service ...` there. There is no push tool, and the webhost TOTP seed stays in the master tier (ssh-wwl is person-unlocked).
 - Every language's `Foo_Bar` library (bash, perl, python, js) goes through `Foo_Bar_w.php`, so the one PHP shim
   (`shims/Foo_Bar.php`) covers them all. No per-language shims are needed.
 - **`foo -p` on the webhost (fixed 2026-11-11):** `foo -p LABEL` used to print `failed` twice because the webhost's
