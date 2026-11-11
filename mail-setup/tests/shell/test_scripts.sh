@@ -246,7 +246,15 @@ miche:x:1001:1001::/h:/bin/sh
 daemon:x:1:1::/:/bin/false
 nobody:x:65534:65534::/:/bin/false
 ' > "$PWF"
-HC=$(MAIL_SETUP_PASSWD="$PWF" "$R" --print-header-checks --fqdn mx.lan.example)
+# The tool name is "Postfix" plus the version when postconf can say it, so the result depends on whether Postfix is
+# installed on the machine running the tests (a Linux CI image has it: "Postfix 3.9.1"; Cygwin does not).  Stub postconf
+# first on the PATH, so the run is the same everywhere.
+PCSTUB="$SANDBOX/postconf-stub"; mkdir -p "$PCSTUB"
+printf '#!/bin/sh\nexit 1\n' > "$PCSTUB/postconf"; chmod +x "$PCSTUB/postconf"
+HC=$(PATH="$PCSTUB:$PATH" MAIL_SETUP_PASSWD="$PWF" "$R" --print-header-checks --fqdn mx.lan.example)
+printf '#!/bin/sh\n[ "$1 $2" = "-h mail_version" ] && { echo 3.9.1; exit 0; }\nexit 1\n' > "$PCSTUB/postconf"
+HCV=$(PATH="$PCSTUB:$PATH" MAIL_SETUP_PASSWD="$PWF" "$R" --print-header-checks --fqdn mx.lan.example)
+check "with a Postfix version the tool name carries it" 'grep -q "PREPEND X-Relayed-By: Postfix 3.9.1 on \${1} (submitted by chris, uid 1000)" <<<"$HCV"'
 check "a rule per human account (and root), none for system users" 'has_str() { grep -qF -- "$2" <<<"$1"; }; has_str "$HC" "from userid 1000" && has_str "$HC" "from userid 1001" && has_str "$HC" "from userid 0" && ! grep -q "userid 1\\)" <<<"$HC" && ! grep -q "userid 65534" <<<"$HC"'
 check "names the user and the tool" 'grep -q "PREPEND X-Relayed-By: Postfix on \${1} (submitted by chris, uid 1000)" <<<"$HC"'
 check "catch-all for any other uid comes last" '[ "$(grep -v "^#" <<<"$HC" | tail -1 | grep -c "(submitted by uid \${2})")" = 1 ]'
