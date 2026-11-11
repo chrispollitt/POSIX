@@ -534,6 +534,7 @@ class T(unittest.TestCase):
         os.remove(counter)
         run_php('foo("l1:a");', AUTH_BIN=stub, FOO_BAR_NO_AUTH="1")                                          # skip the vault entirely
         self.assertFalse(os.path.exists(counter))
+        self.run_auth("bar", "--delete", "ahost:aserv")                                                    # leave the vault as found
 
     def test_php_shim_foo_and_bar(self):
         php = shutil.which("php-cli") or shutil.which("php")
