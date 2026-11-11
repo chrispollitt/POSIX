@@ -81,8 +81,16 @@ Phase 2: the service tier and client access (the core of G3)
       hand): create them when the first real job is moved (see the next item).
   [ ] note: sshd on cpbee throttled connections after failed key attempts (bad key file permissions: ssh ignores a
       key file that others can read; chmod 600).  A job key must be mode 600 or the job fails.
-  [ ] move what Foo_Bar.* serves today into service records.  Users found in the repos (git grep Foo_Bar): Strata/bin
-      (check_email.pl and .js, check_garbage.sh, fob-log-query.pl/.js, program_enterphone.sh, unit-query.pl),
+  [x] first one moved 2026-11-10: Strata/bin/check_garbage.sh (commit b66ae2f in Strata, not pushed) asks
+      auth get postgres mesh mesh, foo -p mesh as the fallback (remove it in Phase 5).  The mesh Postgres secret is now a
+      service record (the master copy was removed); the laptop has a job key ~/.ssh/auth_service enrolled as
+      "cmlaptop", allowed only postgres@mesh/mesh.  auth and identity are installed in the laptop's /usr/local/bin
+      (make install in net-utils; make diff shows when they fall behind).  The mesh DB (192.168.123.101) timed out from
+      here, so the script's query itself was not run: only the password lookup was verified.  # allowlist secret
+      NOTE: every further job on the laptop needs its allow-list entry: auth enroll cmlaptop --allow ... (the list
+      is replaced each time, so name all the records).
+  [ ] move the rest of what Foo_Bar.* serves today into service records.  Users found in the repos (git grep Foo_Bar): Strata/bin
+      (check_email.pl and .js, fob-log-query.pl/.js, program_enterphone.sh, unit-query.pl),
       WebApps (Bookshelf/updateB.sh, TinyShell/config.php, UpdateSSL/update_dropbox.py, cmnet_test/call.sh,
       user_perl GetHosts.pm and Router/Actiontec.pm, Zyxel.pm, user_js/myexpress.js).  Each calls foo HOST (user and
       password); the replacement is auth get SCHEME HOST LOGIN with a service record per host the script reads.
