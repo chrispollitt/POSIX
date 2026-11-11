@@ -496,6 +496,45 @@ class T(unittest.TestCase):
         self.assertEqual(self.run_auth("foo", "ahost:aserv")[0], 1)
         self.assertEqual(self.run_auth("bar", "--service", "--delete", "ahost:aserv")[1].strip(), "nothing to remove")
 
+    def test_php_lan_shim_asks_the_vault_then_the_file(self):
+        php = shutil.which("php-cli") or shutil.which("php")
+        if not php or not shutil.which("timeout"):
+            self.skipTest("no php or no timeout on this machine")
+        shim = os.path.join(TOOLS, "shims", "Foo_Bar_lan.php")
+        tmp = os.path.join(self.d, "tmp")
+        os.makedirs(tmp, exist_ok=True)
+
+        def run_php(code, **extra):
+            env = dict(self.env, TMPDIR=tmp, **extra)
+            p = self.put("lan.php", "<?php require %r; %s" % (shim, code))
+            r = subprocess.run([php, p], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+            return r.stdout
+
+        self.fresh()
+        rc, _, err = self.run_auth("bar", "ahost:aserv", "auser", "--stdin", stdin="apass\n")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(run_php('echo json_encode(foo("ahost:aserv"));'), '["auser","apass"]')            # from the vault  # allowlist secret
+        out = run_php('echo json_encode(foo("nohost:none"));')                                           # not there: the original code
+        self.assertTrue(out.endswith('["failed","failed"]'), out)                                         # (no ~/.foo/bar here)
+        # locked (exit 4): asked once, then remembered, so a loop does not retry ssh for every label
+        counter = os.path.join(self.d, "calls")
+        stub = self.put("auth-stub", "#!/bin/sh\necho x >> %s\nexit 4\n" % counter)
+        os.chmod(stub, 0o755)
+        for f in os.listdir(tmp):
+            os.remove(os.path.join(tmp, f))
+        run_php('foo("l1:a"); foo("l2:a"); foo("l3:a");', AUTH_BIN=stub)
+        with open(counter) as fh:
+            self.assertEqual(len(fh.read().split()), 1)
+        os.remove(counter)
+        for f in os.listdir(tmp):
+            os.remove(os.path.join(tmp, f))
+        run_php('foo("l1:a"); foo("l2:a");', AUTH_BIN=stub, FOO_BAR_DOWN_SECS="0")                        # 0 = never remember
+        with open(counter) as fh:
+            self.assertEqual(len(fh.read().split()), 2)
+        os.remove(counter)
+        run_php('foo("l1:a");', AUTH_BIN=stub, FOO_BAR_NO_AUTH="1")                                          # skip the vault entirely
+        self.assertFalse(os.path.exists(counter))
+
     def test_php_shim_foo_and_bar(self):
         php = shutil.which("php-cli") or shutil.which("php")
         if not php:
