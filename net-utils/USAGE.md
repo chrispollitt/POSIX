@@ -125,6 +125,15 @@ reads the service tier directly. `auth list` marks service records `[service]`.
 
 First time only: `auth init-service` on cpbee (the install script `auth-on-cpbee.sh` does it).
 
+### A machine with its own store (the webhost)
+
+A host that cannot reach cpbee (whatwelove.org is outside the LAN) keeps its own service tier. Install `auth` there
+(it is `~/local/usr/bin/auth`), create the file `~/.config/auth/local` (its presence makes `auth` use the local files
+instead of ssh to cpbee), and run `auth init-service`. Jobs there call `~/local/usr/bin/auth get SCHEME HOST LOGIN`
+directly; no ssh and no unlock are involved. Fill it with `auth set --service ...`, or take the old Foo_Bar file
+with `auth import foo ~/.foo/bar --service` (its key is `~/.ssh-OLD/id_rsa`, the default). This store is separate
+from cpbee's: a password changed in one is not changed in the other. <!-- allowlist secret -->
+
 ## Changing a password, start to finish
 
 1. Change it on the service (mail account, Radicale, router ...).

@@ -409,6 +409,23 @@ class T(unittest.TestCase):
         self.assertNotIn("auth-client-c1", open(ak).read())
         self.assertEqual(served("auth get https cpbee michelle")[0], 1)
 
+    def test_a_machine_with_its_own_store_runs_locally(self):
+        """~/.config/auth/local (the webhost) makes auth work on its own files, with no ssh to another host."""
+        self.fresh_service()
+        self.run_auth("set", "--service", "https@cpbee", "michelle", "--stdin", stdin="S3rv1ce\n")
+        env = {k: v for k, v in self.env.items() if k != "AUTH_LOCAL"}
+        env["AUTH_HOST"] = "no-such-host.invalid"
+        rc, out, _ = self.run_auth("get", "https", "cpbee", "michelle", env=env)       # would try ssh to that host
+        self.assertNotEqual(out, "S3rv1ce\n")
+        os.makedirs(os.path.join(self.env["HOME"], ".config", "auth"), exist_ok=True)
+        marker = os.path.join(self.env["HOME"], ".config", "auth", "local")
+        open(marker, "w").close()
+        try:
+            rc, out, _ = self.run_auth("get", "https", "cpbee", "michelle", env=env)
+            self.assertEqual((rc, out), (0, "S3rv1ce\n"))
+        finally:
+            os.remove(marker)
+
     def test_enroll_refuses_bad_input(self):
         self.fresh_service()
         self.assertEqual(self.run_auth("enroll", "c2", "--stdin", stdin=self.PUB + "\n")[0], 2)                  # no --allow

@@ -193,7 +193,9 @@ def server():
 
 
 def is_server():
-    return os.environ.get("AUTH_LOCAL") == "1" or socket.gethostname().split(".")[0].lower() == server().split(".")[0].lower()
+    """true where the vault files live: $AUTH_LOCAL=1, or a file ~/.config/auth/local (a machine with its own
+    store, such as the webhost), or the host named $AUTH_HOST (default cpbee)."""
+    return os.environ.get("AUTH_LOCAL") == "1" or os.path.exists(os.path.expanduser("~/.config/auth/local")) or socket.gethostname().split(".")[0].lower() == server().split(".")[0].lower()
 
 
 def service_key():
