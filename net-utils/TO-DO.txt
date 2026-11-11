@@ -89,8 +89,12 @@ Phase 2: the service tier and client access (the core of G3)
       here, so the script's query itself was not run: only the password lookup was verified.  # allowlist secret
       NOTE: every further job on the laptop needs its allow-list entry: auth enroll cmlaptop --allow ... (the list
       is replaced each time, so name all the records).
+  [x] check_email.pl moved 2026-11-11 (Strata 27ce1ba): auth get imaps gmail.com --with-login (master tier, personal
+      login), foo as the fallback; run end to end by Chris.  Needed auth with --with-login on cpbee too (installed).
+      Strata/bin/node/check_email.js is NOT a Node program: it is an unported copy of the Perl script under a Node
+      comment header (use Foo_Bar; ...), so it cannot run and cannot be tested.  Left alone until it is really ported.
   [ ] move the rest of what Foo_Bar.* serves today into service records.  Users found in the repos (git grep Foo_Bar): Strata/bin
-      (check_email.pl and .js, fob-log-query.pl/.js, program_enterphone.sh, unit-query.pl),
+      (fob-log-query.pl/.js, program_enterphone.sh, unit-query.pl),
       WebApps (Bookshelf/updateB.sh, TinyShell/config.php, UpdateSSL/update_dropbox.py, cmnet_test/call.sh,
       user_perl GetHosts.pm and Router/Actiontec.pm, Zyxel.pm, user_js/myexpress.js).  Each calls foo HOST (user and
       password); the replacement is auth get SCHEME HOST LOGIN with a service record per host the script reads.
