@@ -64,14 +64,24 @@ Phase 1: tidy and verify (small)
   [ ] tvmail on 587 with a login: point tvmail at smtp://cpbee:587 with auth on (tvmail config, TUIs repo).
 
 Phase 2: the service tier and client access (the core of G3)
-  auth  [ ] second vault file + key with no passphrase on cpbee; `auth set --service`, `auth list` shows the tier.
-        [ ] per-client ssh key: `auth enroll NAME` creates it, with an authorized_keys forced command
-            (`auth serve NAME`) that answers only `get` of the records that client may read (an allow list per client).
-        [ ] `auth get` on a client picks the service key automatically when run unattended (no tty).
-        [ ] prove it: a cron job on cpbee and a Windows Scheduled Task on cmlaptop each fetch one service secret with
-            nobody logged in to the vault.
-        [ ] move what Foo_Bar.* serves today into service records (list what the scripts read first).
-  tests [ ] forced command refuses everything but get; refuses records outside the allow list; never prints secrets in list.
+  BUILT 2026-11-10 (commit 0b64af6, 21 tests pass), NOT YET INSTALLED on cpbee:
+  [x] second vault file + passphrase-less key: auth init-service; auth set/remove --service; auth list marks [service].
+  [x] per-client ssh key: auth enroll NAME --allow SCHEME@HOST/LOGIN... --stdin (authorized_keys line with
+      command="auth serve NAME",restrict); auth unenroll; auth clients.  serve answers only get/totp, only service
+      records on that client's allow list; refuses list/set/_export/--service and anything else.
+  [x] auth get/totp on a client use ~/.ssh/auth_service when nothing is typing at it, else fall back to the normal key.
+  [x] tests: forced command refuses everything else, nothing outside the allow list, bad enroll input, list never shows secrets.
+  YOUR STEP: run TO_BE_RUN/auth-on-cpbee.sh (installs the new auth on cpbee, runs auth init-service there).
+  Then:
+  [ ] back up the new secret key: on cpbee, gpg --export-secret-keys --armor auth-service (it has no passphrase: keep
+      that copy as safe as the master backup).
+  [ ] prove it: a cron job on cpbee and a Windows Scheduled Task on cmlaptop each fetch one service secret with
+      the master vault locked (auth enroll the laptop's job key, set one --service record, test).
+  [ ] move what Foo_Bar.* serves today into service records.  Users found in the repos (git grep Foo_Bar): Strata/bin
+      (check_email.pl and .js, check_garbage.sh, fob-log-query.pl/.js, program_enterphone.sh, unit-query.pl),
+      WebApps (Bookshelf/updateB.sh, TinyShell/config.php, UpdateSSL/update_dropbox.py, cmnet_test/call.sh,
+      user_perl GetHosts.pm and Router/Actiontec.pm, Zyxel.pm, user_js/myexpress.js).  Each calls foo HOST (user and
+      password); the replacement is auth get SCHEME HOST LOGIN with a service record per host the script reads.
   done when a scheduled job can fetch its own secret and nothing else, with the vault locked.
 
 Phase 3: shims, so tools stop reading password files (G1, G2)
