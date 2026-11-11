@@ -139,8 +139,10 @@ from cpbee's: a password changed in one is not changed in the other. <!-- allowl
 - The webhost store has no dependency on cpbee: it works with cpbee down or unreachable.
 - Every language's `Foo_Bar` library (bash, perl, python, js) goes through `Foo_Bar_w.php`, so the one PHP shim
   (`shims/Foo_Bar.php`) covers them all. No per-language shims are needed.
-- **Open puzzle:** on the webhost, `bash foo LABEL` returns the correct 8-char login and 32-char secret, but
-  `foo -p LABEL` prints a 6-char field twice. Not yet explained; see `TO-DO.txt`.
+- **`foo -p` on the webhost:** `bash foo LABEL` returns the right login and secret, but `foo -p LABEL` printed
+  `failed` twice. The webhost's `~/user_bash/Foo_Bar.bash` is the old copy with no `-p` handling (so `-p` was taken as
+  the label). The fix is the `-p` version of that file (WebApps branch `foo-bar-p-option`); copy it to the webhost.
+  See `TO-DO.txt`.
 
 ## Changing a password, start to finish
 
