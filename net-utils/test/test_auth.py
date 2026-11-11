@@ -399,16 +399,22 @@ class T(unittest.TestCase):
         self.fresh_service()
         shim = os.path.join(TOOLS, "shims", "Foo_Bar.php")
 
-        def run_php(code):
+        def run_php(code, env=None):
             p = self.put("t.php", "<?php require %r; %s" % (shim, code))
-            r = subprocess.run([php, p], env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+            r = subprocess.run([php, p], env=env or self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
             return r.stdout
 
-        self.assertEqual(run_php('echo json_encode(foo("ahost:aserv"));'), '["",""]')            # nothing yet
+        failed = '["failed","failed"]'                                                            # the original contract (fb.php tests 'failed')
+        self.assertEqual(run_php('echo json_encode(foo("ahost:aserv"));'), failed)               # nothing yet
         self.assertEqual(run_php('echo json_encode(bar("auser", "ap ass\\"\'\\$x", "ahost:aserv"));'), "true")   # awkward characters
         self.assertEqual(run_php('echo json_encode(foo("ahost:aserv"));'), '["auser","ap ass\\"\'$x"]')
+        # a thin web-server environment: no HOME, and a short PATH (php itself, and the wrapper that starts it, must still
+        # be found, and on most hosts /usr/bin holds python3 and gpg too, so this proves the missing HOME, not the PATH part)
+        thin = {k: v for k, v in self.env.items() if k not in ("HOME", "PATH")}
+        thin["PATH"] = os.path.dirname(php) + os.pathsep + "/usr/bin"
+        self.assertEqual(run_php('echo json_encode(foo("ahost:aserv"));', env=thin), '["auser","ap ass\\"\'$x"]')
         self.assertEqual(run_php('echo json_encode(bar("-delete", "x", "ahost:aserv"));'), "true")
-        self.assertEqual(run_php('echo json_encode(foo("ahost:aserv"));'), '["",""]')
+        self.assertEqual(run_php('echo json_encode(foo("ahost:aserv"));'), failed)
 
     def test_master_record_is_not_found_in_the_service_tier(self):
         self.fresh()
