@@ -1,0 +1,43 @@
+name: Bug report
+description: Something does not work as it should
+labels: ["bug"]
+body:
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - mail-setup
+        - chat-setup
+        - web-ttyd
+        - net-utils/auth
+        - net-utils/identity
+        - net-utils/lan-port
+        - other-net-utils
+        - cmpi-router
+        - text-utils
+        - Other / not sure
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happens
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: How to reproduce
+      description: Steps, a command line, or a test case. Do not paste passwords, tokens or private hostnames you want to keep private.
+  - type: input
+    id: env
+    attributes:
+      label: Environment
+      description: OS (Cygwin, Linux, macOS ...), terminal, version or commit.
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes
+      description: Suspected cause, a guard (unit/e2e test) that should catch it, related issues.

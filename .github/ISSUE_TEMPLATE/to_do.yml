@@ -1,0 +1,38 @@
+name: To-do / feature
+description: Something to build, change or look into
+labels: ["enhancement"]
+body:
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - mail-setup
+        - chat-setup
+        - web-ttyd
+        - net-utils/auth
+        - net-utils/identity
+        - net-utils/lan-port
+        - other-net-utils
+        - cmpi-router
+        - text-utils
+        - Other / not sure
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What
+      description: What should exist or change, and why.
+    validations:
+      required: true
+  - type: textarea
+    id: done
+    attributes:
+      label: Done when
+      description: How you will know it is finished (a test, a check, a command that works).
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes
+      description: Design cost, options considered, related issues.
