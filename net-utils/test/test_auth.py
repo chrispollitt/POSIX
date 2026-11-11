@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -426,6 +427,32 @@ class T(unittest.TestCase):
         try:
             rc, out, _ = self.run_auth("get", "https", "cpbee", "michelle", env=env)
             self.assertEqual((rc, out), (0, "S3rv1ce\n"))
+        finally:
+            os.remove(marker)
+
+    def test_kill_agent_marker_leaves_no_gpg_agent_running(self):
+        """with 'kill-agent' in ~/.config/auth/local, auth stops the gpg-agent its gpg call started."""
+        self.fresh_service()
+        self.run_auth("set", "--service", "https@cpbee", "michelle", "--stdin", stdin="S3rv1ce\n")
+
+        def agent_up():
+            r = subprocess.run(["gpg-connect-agent", "--no-autostart", "getinfo pid", "/bye"], env=self.env,
+                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, universal_newlines=True)
+            return r.stdout.startswith("D ")             # an agent answers with its pid
+
+        self.assertEqual(self.run_auth("get", "https", "cpbee", "michelle")[1], "S3rv1ce\n")
+        self.assertTrue(agent_up())                      # normally the agent stays after a decrypt
+        os.makedirs(os.path.join(self.env["HOME"], ".config", "auth"), exist_ok=True)
+        marker = os.path.join(self.env["HOME"], ".config", "auth", "local")
+        with open(marker, "w") as fh:
+            fh.write("kill-agent\n")
+        try:
+            self.assertEqual(self.run_auth("get", "https", "cpbee", "michelle")[1], "S3rv1ce\n")
+            for _ in range(20):                          # the agent takes a moment to exit
+                if not agent_up():
+                    break
+                time.sleep(0.25)
+            self.assertFalse(agent_up())                 # stopped when auth finished
         finally:
             os.remove(marker)
 

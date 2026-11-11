@@ -991,5 +991,27 @@ def main(argv=None, restricted=None):
         return 1
 
 
+def stop_agent_if_asked():
+    """a machine that must leave no long-running process (the webhost) puts the word kill-agent in
+    ~/.config/auth/local: gpg starts a gpg-agent for every decrypt, and this stops it again when auth is done."""
+    try:
+        with open(os.path.expanduser("~/.config/auth/local"), encoding="utf-8") as fh:
+            ask = "kill-agent" in fh.read()
+    except OSError:
+        return
+    if not ask:
+        return
+    # gpgconf where there is one, else gpg-connect-agent, else pkill (the webhost has only gpg and pkill)
+    for cmd in (["gpgconf", "--kill", "gpg-agent"], ["gpg-connect-agent", "killagent", "/bye"],
+                ["pkill", "-u", str(os.getuid()), "-x", "gpg-agent"]):
+        try:
+            if subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
+                return
+        except OSError:
+            continue
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    rc = main()
+    stop_agent_if_asked()
+    sys.exit(rc)
