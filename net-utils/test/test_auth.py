@@ -53,6 +53,8 @@ class T(unittest.TestCase):
         """a new empty vault (the key is made once)."""
         if os.path.exists(self.env["AUTH_VAULT"]):
             os.remove(self.env["AUTH_VAULT"])
+        if os.path.exists(self.env["IDENTITY_FILE"]):   # no identity list left over from an earlier test
+            os.remove(self.env["IDENTITY_FILE"])
         rc, out, err = self.run_auth("init")
         self.assertEqual(rc, 0, err)
 
@@ -316,6 +318,35 @@ class T(unittest.TestCase):
         self.assertIn("NOSECRET    identity lists smtp@cpbee.cmnet chris", out)
         self.assertNotIn("imap@cpbee.cmnet chris;", out)
         self.assertNotIn("a\n", out.replace("vault has", ""))
+
+    def test_check_wildcard_identity_line_is_satisfied_by_any_record(self):
+        self.fresh()
+        self.run_auth("set", "imaps,smtp@cpbee", "chris", "--stdin", stdin="x\n")
+        self.put("../identities", "chris *@cpbee.cmnet chris\n")
+        rc, out, _ = self.run_auth("check")
+        self.assertEqual(rc, 0, out)
+
+    def test_check_only_asks_about_lan_hosts_unless_all(self):
+        self.fresh()
+        self.run_auth("set", "imaps@cpbee", "chris", "--stdin", stdin="a\n")
+        self.run_auth("set", "https@api.example.com", "me", "--stdin", stdin="b\n")
+        self.put("../identities", "chris imaps@cpbee.cmnet chris\n")
+        rc, out, _ = self.run_auth("check")
+        self.assertEqual(rc, 0, out)
+        rc, out, _ = self.run_auth("check", "--all")
+        self.assertEqual(rc, 3)
+        self.assertIn("NOIDENTITY  vault has https@api.example.com me", out)
+
+    def test_set_keeps_the_netrc_mark_of_a_record(self):
+        self.fresh()
+        p = self.put("n.in", "machine cpbee login chris password old\n")  # allowlist secret
+        self.assertEqual(self.run_auth("import", "netrc", p)[0], 0)
+        self.assertIn("changed", self.run_auth("set", "*@cpbee", "chris", "--stdin", stdin="new\n")[1])
+        out_file = os.path.join(self.env["HOME"], "n.out")
+        self.assertEqual(self.run_auth("render", "netrc", "--out", out_file)[0], 0)
+        text = open(out_file).read()
+        self.assertIn("password new", text)       # still rendered into the netrc, with the new secret
+        self.assertNotIn("password old", text)
 
 
 if __name__ == "__main__":

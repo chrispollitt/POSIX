@@ -595,6 +595,9 @@ def main(argv=None):
             rec = {"scheme": raw, "host": h, "hostspec": h + (":" + port.group(1) if port else ""), "login": args[1],
                    "kind": a.kind, "secret": secret, "note": a.note or (r or {}).get("note", "")}  # allowlist secret
             if r:
+                for k in ("vaultonly", "netrc"):  # marks of where the record came from survive a change of secret
+                    if k in r:
+                        rec[k] = r[k]
                 recs[recs.index(r)] = rec
             else:
                 recs.append(rec)

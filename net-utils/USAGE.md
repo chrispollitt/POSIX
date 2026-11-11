@@ -55,9 +55,8 @@ Notes:
   and secret apply to all of them (tvmail asks `imap://`, others ask `imaps://`; Mailutils matches exactly).
 - `--note TEXT` keeps a reminder with the record. `--kind` is `password` (default) or `totp`.
 - Matching ignores the port; `https@cpbee:5232` keeps `:5232` only for rendering.
-- **Update caveat:** `auth set` writes a fresh record. For a record that came from the old `~/.foo` manager
-  (kept out of every file on purpose) that also drops the "vault only" mark, so the next `render` would write
-  it into a file. Change those records with care, or tell me and I will fix `set` to keep the mark.
+- Changing a secret keeps where the record came from: a record imported from the old `~/.foo` manager stays
+  out of every rendered file, and one imported from a netrc stays in the netrc.
 
 ### After a change: render
 
