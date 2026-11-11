@@ -14,14 +14,21 @@ Everything below is on `main` in POSIX, WebApps (`user_bash/Foo_Bar.bash`) and S
 
 ## Not verified
 
-- Every language's library (perl, python, js) goes through `Foo_Bar_w.php`: Chris's claim, not checked.
 - The webhost store works with cpbee down: Chris's claim, not checked.
-- The real webhost callers (cpanel.php and the cron-run scripts) were not re-run after this deploy beyond the bash `foo`/`bar` test.
+- `www/cmnet/www/index.php` calls `foo($host.":web")` through the web server (php-cgi), not the command line; the web path (exec, HOME and gpg as the web user) was not tested. `myexpress.js` (node) could not be tested: there is no node on the webhost.
+- `GetHosts.pm` also looks up `$router:zyxel`, which is not among the webhost's 8 labels (not new; a LAN-side lookup).
+
+## Checked 2026-11-11 (TO_BE_RUN/DONE/webhost-regression-check-foo-bar.sh, read-only, after the deploy)
+
+- Every language's library goes through `Foo_Bar_w.php`: confirmed from the perl, python and js sources (each runs `php-cli Foo_Bar_w.php`).
+- For all 8 labels, bash `foo`, perl, python and the PHP shim return the same login and secret as `auth foo` (0 differences). Node: not tested (not installed).
+- `cpanel.php` (cpinit cp1.uhcloud.com / whatwelove.org, get_subdomains) returned 25, as before.
+- The five cron jobs (cleanmail, truncate_logs, 2fa_state_clean, update_ssl, geoipupdate-wrapper) do not refer to `Foo_Bar`, `user_*` or `cpanel.php`, so the deploy cannot have affected them.
 - `ssh-wwl` reports "login failed" and exits whenever remote output contains the words "permission denied" (a false match in its expect pattern); it hid the output of one diagnostic run.
 
 ## Next (see `TO-DO.txt`)
 
-1. Re-run one real webhost caller (e.g. cpanel.php) and the cron-run scripts that use `foo`, to confirm nothing regressed.
+1. Check the web path: read `www/cmnet/www/index.php` and load the page (or call `foo` from php-cgi) to see that `foo($host.":web")` still answers under the web server; delete `~/tmp-deploy` on the webhost.
 2. Back up the webhost's `auth-service` key (no passphrase) and the cpbee one.
 3. Move the remaining `Foo_Bar` callers (Strata: `fob-log-query.pl/.js`, `program_enterphone.sh`, `unit-query.pl`; WebApps: see TO-DO Phase 2) to `auth get`.
 4. A real Scheduled Task on cmlaptop and a crontab line on cpbee.

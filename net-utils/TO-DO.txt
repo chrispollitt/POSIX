@@ -133,8 +133,11 @@ Phase 2: the service tier and client access (the core of G3)
       Foo_Bar.bash installed (backups: auth.bak-20261111, Foo_Bar.php.bak-20261111, Foo_Bar.bash.orig); bar add / replace /
       -delete, foo and foo -p all work through the real chain.  The first try failed and rolled back: the webhost's Python
       is 3.7.17 and its argparse took `auth bar --service --stdin LABEL LOGIN` for unknown options (LESSON: on that host put
-      options after the arguments, or rely on the intermixed parser now in auth).  Still: delete ~/tmp-deploy; re-run a
-      real caller (cpanel.php) and the cron scripts that use foo.  auth is on demand (no daemon); gpg starts its own
+      options after the arguments, or rely on the intermixed parser now in auth).  REGRESSION CHECK 2026-11-11 (read-only,
+      TO_BE_RUN/DONE/webhost-regression-check-foo-bar.sh): all 8 labels give the same login and secret as auth foo through
+      bash, perl, python and the PHP shim; cpanel.php listed 25 subdomains; the five cron jobs do not use Foo_Bar.  Not
+      tested: node (not installed on the webhost, so myexpress.js cannot run there) and the WEB path (www/cmnet/www/index.php
+      calls foo($host.":web") under php-cgi).  Still: delete ~/tmp-deploy; check the web path.  auth is on demand (no daemon); gpg starts its own
       gpg-agent as needed.
       CORRECTION 2026-11-11: no per-language shims are needed (the line that said the bash, perl, python and js
       libraries each need their own shim was wrong).  Every language's Foo_Bar library goes through Foo_Bar_w.php,
