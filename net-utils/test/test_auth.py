@@ -416,6 +416,37 @@ class T(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn("no CA certificate", err)
 
+    def test_auth_ftp_and_telnet_wrappers(self):
+        self.fresh()
+        rc, _, err = self.run_auth("set", "ftp,telnet@vaxhost", "system", "--stdin", stdin="vax-pw-7\n")   # allowlist secret
+        self.assertEqual(rc, 0, err)
+        seen = os.path.join(self.d, "ftp-seen")
+        ftp = self.put("ftp-stub", "#!/bin/sh\necho \"$HOME\" > %s\ncat \"$HOME/.netrc\" | sed 's/password .*/password X/' >> %s\n"
+                                   "echo \"args: $*\" >> %s\n" % (seen, seen, seen))
+        os.chmod(ftp, 0o755)
+        env = dict(self.env, FTP_BIN=ftp, TMPDIR=self.d, XDG_RUNTIME_DIR="")
+        r = subprocess.run(["bash", os.path.join(TOOLS, "auth-ftp"), "vaxhost", "-n"], env=env, stdout=subprocess.PIPE,
+                           stderr=subprocess.PIPE, universal_newlines=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        lines = open(seen).read().splitlines()
+        self.assertEqual(lines[1], "machine vaxhost login system password X")
+        self.assertEqual(lines[2], "args: -n vaxhost")
+        self.assertFalse(os.path.exists(lines[0]))                                           # the private directory is gone
+        self.assertNotIn("vax-pw-7", r.stdout + r.stderr)
+        r = subprocess.run(["bash", os.path.join(TOOLS, "auth-ftp"), "nohost"], env=env, stdout=subprocess.PIPE,
+                           stderr=subprocess.PIPE, universal_newlines=True)
+        self.assertEqual(r.returncode, 1)
+        if not shutil.which("expect"):
+            return
+        tel = self.put("telnet-stub", "#!/bin/sh\nprintf 'Username: '; read u; stty -echo 2>/dev/null; printf 'Password: '; read p; stty echo 2>/dev/null\n"
+                                      "if [ \"$u\" = system ] && [ \"$p\" = vax-pw-7 ]; then echo WELCOME $#; else echo DENIED; fi\n")   # allowlist secret
+        os.chmod(tel, 0o755)
+        env = dict(self.env, TELNET_BIN=tel)
+        r = subprocess.run(["bash", os.path.join(TOOLS, "auth-telnet"), "vaxhost", "23"], env=env, stdin=subprocess.DEVNULL,
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=60)
+        self.assertIn("WELCOME 2", r.stdout, r.stdout + r.stderr)
+        self.assertNotIn("vax-pw-7", r.stdout + r.stderr)                                       # not echoed anywhere
+
     def test_git_credential_helper(self):
         self.fresh()
         rc, _, err = self.run_auth("set", "https@github.com", "ghuser", "--stdin", stdin="ghtok-9\n")

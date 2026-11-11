@@ -1,0 +1,26 @@
+#!/bin/bash
+# auth-ftp HOST [ftp options]: ftp (options first, then HOST) to HOST with the login and secret from `auth get ftp HOST` (POSIX issue #6), no ~/.netrc needed.
+#
+# ftp logs in from a ~/.netrc.  This writes a private one (mode 600, one `machine` line, in a mode-700 directory under
+# $XDG_RUNTIME_DIR, else the temp dir), runs ftp with HOME pointing at that directory, and removes the directory when ftp ends,
+# however it ends.  The secret goes from `auth get` into that file by the shell's printf: never on a command line.
+# With the vault locked, or no ftp record for the host, it says so and exits 1; it does not fall back to a file.
+#
+#   auth-ftp cpvax          store it once:  auth set ftp,telnet@cpvax system        (the old ~/.netrc line, imported)
+# Environment: AUTH_BIN (auth), FTP_BIN (ftp)
+export PATH="$PATH:/usr/local/bin:/usr/bin:/bin:$HOME/local/usr/bin"
+AUTH=${AUTH_BIN:-auth}
+FTP=${FTP_BIN:-ftp}
+host=${1:-}
+[ -n "$host" ] || { echo "usage: auth-ftp HOST [ftp options]" >&2; exit 2; }
+rec=$("$AUTH" get ftp "$host" --with-login </dev/null 2>/dev/null) || { echo "auth-ftp: no ftp login for $host from auth (vault locked? no record?)" >&2; exit 1; }
+login=${rec%%$'\t'*}
+secret=${rec#*$'\t'}
+base=${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}
+dir=$(umask 077; mktemp -d "$base/auth-ftp.XXXXXX") || { echo "auth-ftp: cannot make a private directory" >&2; exit 1; }
+trap 'rm -rf "$dir"' EXIT
+( umask 077; printf 'machine %s login %s password %s\n' "$host" "$login" "$secret" > "$dir/.netrc" )
+chmod 600 "$dir/.netrc" 2>/dev/null
+unset secret rec
+shift
+HOME=$dir "$FTP" "$@" "$host"
