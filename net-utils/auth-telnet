@@ -1,0 +1,39 @@
+#!/bin/bash
+# auth-telnet HOST [PORT]: telnet to HOST, answer its Username: and Password: prompts from `auth get telnet HOST` (POSIX issue #6),  # allowlist secret
+# then hand the terminal over.  For the VAX (OpenVMS) and anything else that prompts "Username:" and "Password:".
+#
+# Needs `expect`.  The login is typed at "Username:", the secret at "Password:"; the secret reaches expect in its environment
+# (readable only by you) and is unset there as soon as it is read, never on a command line.  If a prompt does not come within
+# 30 s it just hands the terminal over, so you can type.  With the vault locked, or no record, it says so and exits 1.
+#
+#   store it once:  auth set ftp,telnet@cpvax system
+# Environment: AUTH_BIN (auth), TELNET_BIN (telnet), AUTH_TELNET_USER_PROMPT / AUTH_TELNET_PASS_PROMPT (regexes; defaults
+# "sername:" and "assword:")
+export PATH="$PATH:/usr/local/bin:/usr/bin:/bin:$HOME/local/usr/bin"
+AUTH=${AUTH_BIN:-auth}
+host=${1:-}
+[ -n "$host" ] || { echo "usage: auth-telnet HOST [PORT]" >&2; exit 2; }
+command -v expect >/dev/null || { echo "auth-telnet: expect is not installed" >&2; exit 1; }
+rec=$("$AUTH" get telnet "$host" --with-login </dev/null 2>/dev/null) || { echo "auth-telnet: no telnet login for $host from auth (vault locked? no record?)" >&2; exit 1; }
+export AUTH_TELNET_LOGIN=${rec%%$'\t'*}
+export AUTH_TELNET_SECRET=${rec#*$'\t'}
+export AUTH_TELNET_BIN=${TELNET_BIN:-telnet}
+export AUTH_TELNET_ARGS="$*"
+unset rec
+exec expect -c '
+  set l $env(AUTH_TELNET_LOGIN)
+  set s $env(AUTH_TELNET_SECRET)
+  unset env(AUTH_TELNET_SECRET)
+  set up "sername:"; set pp "assword:"
+  if {[info exists env(AUTH_TELNET_USER_PROMPT)]} { set up $env(AUTH_TELNET_USER_PROMPT) }
+  if {[info exists env(AUTH_TELNET_PASS_PROMPT)]} { set pp $env(AUTH_TELNET_PASS_PROMPT) }
+  set timeout 30
+  spawn $env(AUTH_TELNET_BIN) {*}$env(AUTH_TELNET_ARGS)
+  expect {
+    -re $up { send -- "$l\r"; exp_continue }
+    -re $pp { send -- "$s\r"; set s ""; expect -timeout 3 -re "\n" {} }
+    timeout {}
+    eof { exit 1 }
+  }
+  interact
+'
