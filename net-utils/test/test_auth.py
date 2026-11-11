@@ -545,6 +545,9 @@ class T(unittest.TestCase):
         rc, _, err = self.run_auth("bar", "ahost:aserv", "auser", "--stdin", stdin="apass\n")
         self.assertEqual(rc, 0, err)
         self.assertEqual(run_php('echo json_encode(foo("ahost:aserv"));'), '["auser","apass"]')            # from the vault  # allowlist secret
+        aliases = self.put("aliases", "# old label  target\nahost:old   ahost:aserv\n")
+        self.assertEqual(run_php('echo json_encode(foo("ahost:old"));', FOO_BAR_ALIASES=aliases), '["auser","apass"]')   # alias   # allowlist secret
+        self.assertEqual(run_php('echo fb_alias("mesh:pg") . "|" . fb_alias("other");', FOO_BAR_ALIASES=aliases), "mesh|other")
         out = run_php('echo json_encode(foo("nohost:none"));')                                           # not there: the original code
         self.assertTrue(out.endswith('["failed","failed"]'), out)                                         # (no ~/.foo/bar here)
         # locked (exit 4): asked once, then remembered, so a loop does not retry ssh for every label
