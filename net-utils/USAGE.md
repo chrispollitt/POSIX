@@ -134,6 +134,14 @@ directly; no ssh and no unlock are involved. Fill it with `auth set --service ..
 with `auth import foo ~/.foo/bar --service` (its key is `~/.ssh-OLD/id_rsa`, the default). This store is separate
 from cpbee's: a password changed in one is not changed in the other. <!-- allowlist secret -->
 
+- `~/.config/auth/local` makes `auth` use the local files. The word `kill-agent` in that file makes `auth` stop the
+  gpg-agent after each call, so nothing keeps running on the shared host.
+- The webhost store has no dependency on cpbee: it works with cpbee down or unreachable.
+- Every language's `Foo_Bar` library (bash, perl, python, js) goes through `Foo_Bar_w.php`, so the one PHP shim
+  (`shims/Foo_Bar.php`) covers them all. No per-language shims are needed.
+- **Open puzzle:** on the webhost, `bash foo LABEL` returns the correct 8-char login and 32-char secret, but
+  `foo -p LABEL` prints a 6-char field twice. Not yet explained; see `TO-DO.txt`.
+
 ## Changing a password, start to finish
 
 1. Change it on the service (mail account, Radicale, router ...).

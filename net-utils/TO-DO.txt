@@ -123,7 +123,17 @@ Phase 2: the service tier and client access (the core of G3)
       override, Foo_Bar_w.php (so the bash foo) answers.  auth was updated in place (backup
       ~/local/usr/bin/auth.bak-20261110); ~/tmp-auth-shim (shim + t.php) can be deleted.  bar() no longer writes
       ~/.foo/bar: new entries go in with auth set --service.  auth is on demand (no daemon); gpg starts its own
-      gpg-agent as needed.  The bash, perl, python and js libraries still read ~/.foo/bar and each need their own shim.
+      gpg-agent as needed.
+      CORRECTION 2026-11-11: no per-language shims are needed (the line that said the bash, perl, python and js
+      libraries each need their own shim was wrong).  Every language's Foo_Bar library goes through Foo_Bar_w.php,
+      which is the PHP file now swapped for the shim, so the one PHP shim serves them all.
+      WEBHOST SETTINGS, 2026-11-11: ~/.config/auth/local makes auth use the local files (no ssh to cpbee), and the
+      word kill-agent in that file makes auth stop the gpg-agent after each call (no long-running process left on
+      the shared host).  The webhost store has NO dependency on cpbee: it works with cpbee down and unreachable.
+      OPEN PUZZLE: on the webhost, `bash foo LABEL` returns the correct 8-char login and 32-char secret, but
+      `foo -p LABEL` prints a 6-char field twice.  Not explained: the data is right (the first call), so look at the
+      -p path (Foo_Bar_w.php / the bash foo option handling) before blaming the import.  It may also explain the
+      earlier 13-character result of `foo -p` for all 8 labels.  Repo-only so far (no webhost access from here).
       Still to do: back up the webhost's auth-service key (no passphrase); decide how new/changed secrets reach it
       (a second store to keep in step: goals G1/G4), e.g. `auth set --service` there by hand, or push from cpbee.
   done when a scheduled job can fetch its own secret and nothing else, with the vault locked.
