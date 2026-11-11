@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  shellcheck:
+    name: ShellCheck (errors only)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # -S error keeps this green on day one; raise it to warning as the scripts are cleaned up.
+      # SC1087: net-utils/test/test-upnp.sh uses "$port[[:space:]]" inside a regex.
+      - name: ShellCheck
+        run: |
+          git ls-files '*.sh' | grep -v '/BAK/' | xargs shellcheck -S error -e SC1087 -x
+
+  net-utils:
+    name: net-utils tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: gpg and python are needed by the auth tests
+        run: |
+          gpg --version | head -1
+          python3 --version
+      # make check: syntax of every script plus the tests that need nothing but a shell.
+      - name: make check
+        run: make -C net-utils check
+      - name: auth
+        run: python3 net-utils/test/test_auth.py
+      - name: identity
+        run: python3 net-utils/test/test_identity.py
+      - name: netrc-to-tickets
+        run: python3 net-utils/test/test_netrc_to_tickets.py
+
+  mail-setup:
+    name: mail-setup tests (sandboxed)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      # Only the sandboxed suites: never tests/e2e_master.sh, which sends real mail through a live master.
+      - name: unit
+        run: bash mail-setup/tests/run-tests.sh unit
+      - name: shell
+        run: bash mail-setup/tests/run-tests.sh shell
+      - name: pull end-to-end
+        working-directory: mail-setup
+        run: python3 -B -m unittest tests/e2e/test_pull_e2e.py -v
+
+  chat-setup:
+    name: chat-setup tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: script tests
+        run: bash chat-setup/tests/test_chat_setup.sh
+      - name: talkd
+        run: python3 chat-setup/tests/test_talkd.py
