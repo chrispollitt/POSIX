@@ -20,7 +20,8 @@ OWN=${AUTH_CANARY_OWN:-postgres mesh mesh}
 OTHER=${AUTH_CANARY_OTHER:-imaps gmail.com}
 KEY=${AUTH_SERVICE_KEY:-$HOME/.ssh/auth_service}
 SERVER=${AUTH_HOST:-cpbee}
-host=$(hostname -s 2>/dev/null || hostname)
+# uname, not hostname: under Task Scheduler the Windows hostname.exe can come first on the PATH and ends its line with CR
+host=$(uname -n | tr -d '\r'); host=${host%%.*}
 
 server=0
 if [ "${AUTH_LOCAL:-}" = 1 ] || [ -e "$HOME/.config/auth/local" ] || [ "$host" = "${SERVER%%.*}" ]; then
