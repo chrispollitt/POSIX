@@ -9,14 +9,15 @@ Everything below is on `main` in POSIX, WebApps (`user_bash/Foo_Bar.bash`) and S
 - **`foo` and `bar` both work in the shim.** `bar($login, $secret, $label)` runs `auth bar LABEL LOGIN --service --stdin`; the secret goes on stdin. `bar("-delete", x, $label)` removes it.
 - **The `foo -p` puzzle is solved:** the webhost's `Foo_Bar.bash` was a 2016 copy with no `-p` handling, so `-p` was taken as the label and `failed<TAB>failed` (13 characters) came out. Not the data, the import or the shim.
 - **A second, separate bug was found on the webhost:** its Python is 3.7.17, whose `argparse` takes `auth bar --service --stdin LABEL LOGIN` for unknown options (reproduced on Python 3.11.2; Cygwin's 3.12 hides it). `auth` now uses `parse_known_intermixed_args`, and the shim puts the options last. This probably affected other commands with options before the arguments (e.g. `auth set --service ...`) on the webhost too.
-- **Backups on the webhost:** `auth.bak-20261110` (before the service tier) and `auth.bak-20261111` (before this deploy), `Foo_Bar.php.bak-20261111` and `Foo_Bar.php.orig` (2015 original), `Foo_Bar.bash.orig`. To undo: copy a backup over the installed file. `~/tmp-deploy` holds the downloaded files and can be deleted.
+- **Backups on the webhost:** `auth.bak-20261110` (before the service tier) and `auth.bak-20261111` (before this deploy), `Foo_Bar.php.bak-20261111` and `Foo_Bar.php.orig` (2015 original), `Foo_Bar.bash.orig`. To undo: copy a backup over the installed file. `~/tmp-deploy` and `~/tmp-auth-shim` were deleted by Chris (2026-11-11).
 - **Shim redeployed (2026-11-11, `webhost-redeploy-shim-failed-and-env.sh`, all tests passed):** `foo()` returns `["failed","failed"]` for a missing label (the original contract; `.pt/fb.php` tests `$user == 'failed'`), and `auth` is run with HOME and PATH set (`/usr/local/bin:/usr/bin:/bin`, `~/bin`, `~/local/usr/bin`; `python3` on the webhost is a wrapper in `~/bin`). Checked under `env -i` (nothing at all, and only the HOME/PATH that `.pt/.htaccess` passes on): the real labels `localhost:tinyshell`, `whatwelo@localhost:mysql` and `cp1.uhcloud.com:cpanel` give the same login and secret as `auth foo`; `.pt/ts/config.php` (TinyShell) defines the same 9 constants, none empty, in all three environments. Backup: `Foo_Bar.php.bak-20261111b`.
+- **Key backups made and verified (2026-11-11, `TO_BE_RUN/DONE/auth-backup-service-keys.sh` and `auth-backup-master-key.sh`):** the `auth-service` keys of the webhost and of cpbee are on cpbee as `~/backup/auth-service-{webhost,cpbee}-20261111.key.gpg` (encrypted to `auth-vault`; each decrypts to the live key's fingerprint) and in `~/auth-backup/` on the laptop. The master key `auth-vault` (fingerprint 2331E018...117438D) is in the bundle `~/backup/auth-master-20261111-1153.tar` on cpbee and `~/auth-backup/` on the laptop (sha256 469533eb..., same on both): the passphrase-protected secret key, public key, ownertrust, `vault.gpg`, `service.gpg`, `~/.config/auth`, the enrolment lines and a README with the restore steps. A restore drill in a throw-away gpg home passed (manifest, fingerprint, `vault.gpg` decrypted with the restored key). **Not done:** a copy on media that is neither cpbee nor the laptop, and the master passphrase on paper (not in the vault). Re-run `auth-backup-master-key.sh` (copy it back from `DONE/`) when the vault, the clients or the key change.
 - **Other:** `Strata/bin/check_email.pl` asks `auth` first (`imaps gmail.com --with-login`), `foo` as the fallback; run end to end by Chris. `Strata/bin/node/check_email.js` is an unported Perl copy, left alone. `auth` with `--with-login` is installed on the laptop and on cpbee.
 
 ## Not verified
 
 - The webhost store works with cpbee down: Chris's claim, not checked.
-- TinyShell (`.pt/ts/config.php`, calls `foo()` on every request) has not been opened in a browser since the redeploy, and `www/cmnet/www/index.php` (`foo($host.":web")`) has not been loaded through the web server: only `env -i` emulations of the web environment were run, not the real exec/gpg path as the web user. `myexpress.js` (node) could not be tested: there is no node on the webhost.
+- TinyShell (`.pt/ts/config.php`) is legacy and was disabled (Chris), so it needs no browser check; its config still loads with the same constants in the `env -i` emulations. Still not done: `www/cmnet/www/index.php` (`foo($host.":web")`) has not been loaded through the web server: only `env -i` emulations of the web environment were run, not the real exec/gpg path as the web user. `myexpress.js` (node) could not be tested: there is no node on the webhost.
 - `GetHosts.pm` also looks up `$router:zyxel`, which is not among the webhost's 8 labels (not new; a LAN-side lookup).
 
 ## Checked 2026-11-11 (TO_BE_RUN/DONE/webhost-regression-check-foo-bar.sh, read-only, after the deploy)
@@ -29,8 +30,8 @@ Everything below is on `main` in POSIX, WebApps (`user_bash/Foo_Bar.bash`) and S
 
 ## Next (open items are GitHub issues: chrispollitt/POSIX#5 webhost, #14 tracking epic; `TO-DO.txt` is only a done-log)
 
-1. Open TinyShell once in a browser (and the `index.php` page) to confirm the web path; delete `~/tmp-deploy` on the webhost.
-2. Back up the webhost's `auth-service` key (no passphrase) and the cpbee one.
+1. Load the `index.php` page through the web server to confirm the web path.
+2. Put a copy of `auth-master-*.tar` on offline media and the master passphrase on paper.
 3. Move the remaining `Foo_Bar` callers (Strata: `fob-log-query.pl/.js`, `program_enterphone.sh`, `unit-query.pl`; WebApps: see the issues) to `auth get`.
 4. A real Scheduled Task on cmlaptop and a crontab line on cpbee.
 5. Phase 3 shims (tv suite `password_cmd`, `auth render --tmp`), then Phase 4 and 5.
