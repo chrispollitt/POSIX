@@ -742,7 +742,7 @@ def main(argv=None, restricted=None):
 
         # ---- forwarded as they are
         if cmd in ("get", "list", "totp") and not is_server():
-            rc, out = ssh([cmd] + args + (["--no-domain"] if a.no_domain else ["--domain", a.domain]))
+            rc, out = ssh([cmd] + args + (["--service"] if a.service and cmd == "list" else []) + (["--no-domain"] if a.no_domain else ["--domain", a.domain]))
             sys.stdout.write(out.decode("utf-8", errors="replace"))
             return rc
 
