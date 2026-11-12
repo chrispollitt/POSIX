@@ -8,6 +8,8 @@ docstring at the top of the file. Python 3 and bash only; they run on Linux, mac
 |---|---|
 | [auth](auth) | password vault on cpbee |
 | [identity](identity) | who is who: the logins a person uses on each service (no secrets) |
+| [net-login](net-login) | one script for `ssh-mfa`, `sudo-mfa` and `telnet-netrc`: logs in and answers the password / one-time-code prompts (mode = the name it is called by) |
+| [get_mfa_code.py](get_mfa_code.py) | the current one-time code (TOTP) for a host, from the vault or a token file; used by `net-login` |
 | [netrc-to-tickets](netrc-to-tickets) | move logins from `~/.netrc` into `~/.mu-tickets` |
 | [lan-port](lan-port) | open, close and audit the LAN ports of cpbee |
 | [traceroute-plus.sh](traceroute-plus.sh) | traceroute that also asks each hop about itself |
@@ -115,6 +117,31 @@ make diff                   # repo against the installed copies
 make check                  # syntax checks and the lan-port tests
 ```
 
+## net-login: ssh, sudo and telnet that answer for you
+
+`make install` puts `net-login` and `get_mfa_code.py` in `$(PREFIX)/bin` with three symlinks to `net-login`. The
+script looks at the name it was called by:
+
+| call | what it does |
+|---|---|
+| `ssh-mfa HOST [ssh options] [command]` | ssh; answers the host's `Token:` / `Verification code:` prompt with a fresh code from `get_mfa_code.py HOST` |
+| `sudo-mfa HOST [ssh options] [sudo args]` | `ssh -t HOST sudo ...`; answers sudo's password from `~/.netrc` and its code prompt from `get_mfa_code.py` (no sudo args: `sudo -i`) |
+| `telnet-netrc [HOST [PORT]]` | telnet; answers `login:`/`Username:` and `Password:` from `~/.netrc` (the VAX works) |
+
+Any name starting with `ssh-`, `sudo-` or `telnet-` works. A name with another label is a shortcut from
+`~/.config/mfa/aliases` (`KEY HOST [USER [READY-REGEX]]`): `ssh-wwl` with the line `wwl whatwelove.org whatwelo Ready!` is
+the old `ssh-wwl`; `default-telnet cpvax` is what `telnet-netrc` uses with no host. Without a recognised name:
+`net-login ssh|sudo|telnet ...`. More links: `make install MFA_LINKS="ssh-mfa sudo-mfa telnet-netrc ssh-wwl"`.
+
+`get_mfa_code.py HOST [USER]` asks the vault first (`auth totp HOST [USER]`, record kind `totp`), then a token file
+(`$MFA_TOKENS`, `~/.config/mfa/tokens.json`; shapes `{"HOST": "SECRET"}`, `{"HOST": {"USER": "SECRET"}}` and the old
+`{"USER": "SECRET"}`). It needs no pip package.
+
+Secrets never go on a command line or into the output. A seed for a *second factor* belongs in the master tier of the
+vault (needs the vault unlocked), not the service tier. `sudo-mfa` only helps if the host's sudo asks for a code (PAM:
+`pam_google_authenticator`, with the seed in a root-owned file) and root ssh is off. Tests: `bash net-utils/test/test_net_login.sh`
+(a fake ssh and telnet; needs `expect`).
+
 `PREFIX`, `DESTDIR` and `TRAFFIC_DIR` can be overridden (`make install DESTDIR=/tmp/stage` is a dry run).
 
 ## Tests
@@ -127,4 +154,5 @@ python3 net-utils/test/test_auth.py
 python3 net-utils/test/test_identity.py
 python3 net-utils/test/test_netrc_to_tickets.py
 bash net-utils/test/test_lan_port.sh
+bash net-utils/test/test_net_login.sh
 ```

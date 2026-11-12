@@ -1,0 +1,455 @@
+#!/bin/sh
+# the next line is a comment to Tcl but not to sh: it starts expect with "--", so options such as -v, -o and --help reach
+# this script instead of being taken by expect itself \
+exec expect -f "$0" -- ${1+"$@"}
+# net-login: one script for the three ways to log in and be answered automatically.  What it does is decided by the NAME it
+# is called by, so install it once and add symlinks (make install does):
+#
+#   ssh-mfa    HOST [ssh options] [command]   ssh; answers the host's "Token:" / "Verification code:" prompt with a fresh
+#                                             one-time code (get_mfa_code.py HOST)
+#   sudo-mfa   HOST [ssh options] [sudo args] runs  ssh -t HOST sudo ...  and answers sudo's prompt for the password from ~/.netrc
+#                                             and its code prompt with get_mfa_code.py.  No sudo args: sudo -i (a root shell)
+#   telnet-netrc [HOST [PORT]]                telnet; answers "login:"/"Username:" and "Password:" from ~/.netrc
+#
+# Any name that starts with ssh-, sudo- or telnet- works.  A name that goes on with a label other than mfa or netrc is a
+# shortcut taken from ~/.config/mfa/aliases ($MFA_ALIASES), so  ssh-wwl  is "ssh-mfa" to a fixed host.  Without a
+# recognised name, give the mode first:  net-login ssh|sudo|telnet ...      net-login --help
+#
+# The aliases file, one line each, "#" starts a comment:     KEY  HOST  [USER  [READY-REGEX]]
+#     wwl            whatwelove.org   whatwelo   Ready!       ssh-wwl and sudo-wwl; USER is whose code/sudo login it is
+#     default-telnet cpvax                                      telnet-netrc with no host
+#   READY-REGEX is what the host prints once you are logged in (ssh-mfa then hands over the terminal at once); the default
+#   is a shell prompt ending in $ # % or >.
+#
+# How it behaves (ssh and sudo)
+#   - A prompt for a code is answered whenever it appears, up to $MFA_TRIES times; a rejected code is retried with a fresh
+#     one (if the new code equals the old one it waits for the next 30 s period).  A sudo prompt for the password is answered once
+#     per round: if it comes again straight after, the password was wrong and it stops.
+#   - It only waits $MFA_LOGIN_TIMEOUT s for a prompt or the ready text.  After that it stops watching for login failures,
+#     so the output of a long remote command can never be mistaken for one, and it waits for the command to end with no
+#     time limit.  A late code prompt is still answered.
+#   - Login failures are ssh's and sudo's own messages (Permission denied, host key verification failed, connection
+#     refused/timed out/reset, could not resolve host, sudo refusing: wrong password 3 times / not in the sudoers file).  They
+#     end it with exit 1 and a clear line.  The remote command's exit status is passed on.
+#   - Interactive or command is worked out from the arguments (the first word after the host that is not an ssh option or
+#     an option's value starts the command); MFA_MODE=interactive|command overrides it.
+#   - The code comes from get_mfa_code.py: the vault (auth totp) first, then a token file.  See its --help.
+#   - Secrets never go on a command line or into the output.  ~/.netrc should be readable by you only (it warns if not).
+#
+# Environment (all optional; SSH_WWL_QUIET, _SSH, _USER, _LOGIN_TIMEOUT, _TRIES and _MODE from the old ssh-wwl still work)
+#   MFA_SSH (ssh)  MFA_TELNET (telnet)   MFA_GETCODE (get_mfa_code.py)   MFA_NETRC (~/.netrc)   MFA_ALIASES
+#   MFA_LOGIN_TIMEOUT (45)   MFA_TRIES (3)   MFA_GRACE (3; 5 for sudo)   MFA_QUIET (0; 1 hides the info lines)
+#   MFA_MODE interactive|command   MFA_READY (regex)   MFA_USER (whose code, if not in the host or alias)
+#   MFA_PASSWORD_PROMPT (regex for the sudo prompt that asks for the password)   MFA_TELNET_TIMEOUT (120)
+
+proc env_or {names default} {
+    foreach n $names {
+        if {[info exists ::env($n)] && $::env($n) ne ""} { return $::env($n) }
+    }
+    return $default
+}
+
+set me          [file tail [info script]]
+set quiet       [env_or {MFA_QUIET SSH_WWL_QUIET} 0]
+
+proc info_line {msg} {
+    global quiet me
+    if {!$quiet} { send_user "$me: $msg\n" }
+}
+
+proc print_help {} {
+    set fh [open [info script] r]
+    set n 0
+    while {[gets $fh line] >= 0} {
+        incr n
+        if {$n <= 4} continue                   ;# the shebang and the exec trick
+        if {![string match "#*" $line]} break
+        puts [string range $line 2 end]
+    }
+    close $fh
+}
+
+proc fail {msg {code 1}} {
+    global me
+    send_user "$me: $msg\n"
+    exit $code
+}
+
+# ---- which mode, which alias ------------------------------------------------------------------------------------------
+if {[lsearch -exact $argv --help] >= 0} { print_help; exit 0 }
+
+set mode ""
+set tag  ""
+if {![regexp {^(ssh|sudo|telnet)(-(.*))?$} $me -> mode -> tag]} {
+    set mode [lindex $argv 0]
+    if {[lsearch -exact {ssh sudo telnet} $mode] < 0} {
+        send_user "usage: net-login ssh|sudo|telnet ARGS...   (or call it as ssh-NAME, sudo-NAME, telnet-NAME)\n       net-login --help\n"
+        exit 2
+    }
+    set argv [lrange $argv 1 end]
+    set me "net-login $mode"
+}
+if {[lsearch -exact {mfa netrc login} $tag] >= 0} { set tag "" }
+
+set alias_host ""; set alias_user ""; set alias_ready ""
+proc read_alias {key} {
+    global alias_host alias_user alias_ready
+    set f [env_or MFA_ALIASES ~/.config/mfa/aliases]
+    if {[catch {open $f r} fh]} { return 0 }
+    set found 0
+    while {[gets $fh line] >= 0} {
+        set line [string trim $line]
+        if {$line eq "" || [string match "#*" $line]} continue
+        set w [regexp -all -inline {\S+} $line]
+        if {[lindex $w 0] eq $key && [llength $w] >= 2} {
+            set alias_host [lindex $w 1]
+            set alias_user [lindex $w 2]
+            set alias_ready [join [lrange $w 3 end] " "]
+            set found 1
+            break
+        }
+    }
+    close $fh
+    return $found
+}
+if {$tag ne ""} {
+    if {![read_alias $tag]} { fail "no shortcut \"$tag\" in [env_or MFA_ALIASES ~/.config/mfa/aliases] (lines: $tag HOST \[USER \[READY\]\])" 2 }
+}
+
+# where the code script lives: beside the real file this was started from (symlinks followed), else on PATH
+proc real_path {p} {
+    set p [file normalize $p]
+    for {set i 0} {$i < 20} {incr i} {
+        if {[catch {file readlink $p} l]} break
+        if {[file pathtype $l] eq "relative"} { set l [file join [file dirname $p] $l] }
+        set p [file normalize $l]
+    }
+    return $p
+}
+set getcode [env_or MFA_GETCODE ""]
+if {$getcode eq ""} {
+    set side [file join [file dirname [real_path [info script]]] get_mfa_code.py]
+    set getcode [expr {[file exists $side] ? $side : "get_mfa_code.py"}]
+}
+
+# a fresh code for HOST (and USER): the answer must end in six digits
+proc get_code {host user} {
+    global getcode
+    set cmd [list $getcode $host]
+    if {$user ne ""} { lappend cmd $user }
+    if {![catch {exec {*}$cmd 2>/dev/null} out] && [regexp {(^|\n)\d{6}\s*$} $out]} {
+        return [lindex [split [string trim $out] "\n"] end]
+    }
+    return ""
+}
+
+proc give_up {msg} {
+    global me
+    send_user "\n$me: $msg\n"
+    catch {close}
+    catch {wait}
+    exit 1
+}
+
+# the first word that is not an ssh option (or an option's value): where the host, or after it the command, starts
+proc first_word_index {words} {
+    set optargs {-B -b -c -D -E -e -F -I -i -J -L -l -m -O -o -p -Q -R -S -W -w}
+    set i 0
+    while {$i < [llength $words]} {
+        set a [lindex $words $i]
+        if {$a eq "--"} { return [expr {$i + 1 < [llength $words] ? $i + 1 : -1}] }
+        if {[string match -* $a]} {
+            if {[lsearch -exact $optargs $a] >= 0} { incr i }
+            incr i
+            continue
+        }
+        return $i
+    }
+    return -1
+}
+
+# ---- ~/.netrc ---------------------------------------------------------------------------------------------------------
+# returns {login password} for HOST (exact, then the short name, then "default"); LOGIN, if given, picks among several
+proc netrc_lookup {host {want_login ""}} {
+    set f [env_or {MFA_NETRC NETRC} ~/.netrc]
+    if {[catch {open $f r} fh]} { fail "cannot read $f: no logins for $host" }
+    set text [read $fh]
+    close $fh
+    if {![catch {file attributes $f -permissions} perm] && ($perm & 0077) && $::tcl_platform(platform) eq "unix"} {
+        info_line "warning: $f is readable by others (chmod 600 $f)"
+    }
+    # split into words ("double quoted" ones may hold spaces; \" and \\ escape); lines starting with # are comments; macdef runs to a blank line
+    set toks {}
+    set inmacdef 0
+    foreach line [split $text "\n"] {
+        set line [string trimright $line "\r"]
+        if {$inmacdef} { if {[string trim $line] eq ""} { set inmacdef 0 }; continue }
+        if {[regexp {^\s*#} $line]} continue
+        set i 0; set n [string length $line]
+        while {$i < $n} {
+            set c [string index $line $i]
+            if {[string is space $c]} { incr i; continue }
+            if {$c eq "\""} {
+                incr i; set w ""
+                while {$i < $n && [string index $line $i] ne "\""} {
+                    if {[string index $line $i] eq "\\" && $i + 1 < $n} { incr i }
+                    append w [string index $line $i]; incr i
+                }
+                incr i
+            } else {
+                set j $i
+                while {$j < $n && ![string is space [string index $line $j]]} { incr j }
+                set w [string range $line $i [expr {$j - 1}]]
+                set i $j
+            }
+            lappend toks $w
+            if {$w eq "macdef"} { set inmacdef 1; break }
+        }
+    }
+    # entries: machine X / default, then login, password, account words
+    set entries {}
+    set cur {}
+    set k 0
+    while {$k < [llength $toks]} {
+        set t [lindex $toks $k]
+        switch -- $t {
+            machine { if {$cur ne ""} { lappend entries $cur }; set cur [list machine [lindex $toks [incr k]]] }
+            default { if {$cur ne ""} { lappend entries $cur }; set cur [list machine *default*] }
+            login - password - account { lappend cur $t [lindex $toks [incr k]] }
+            macdef { incr k }
+        }
+        incr k
+    }
+    if {$cur ne ""} { lappend entries $cur }
+    set short [lindex [split $host .] 0]
+    foreach round {exact short default} {
+        foreach e $entries {
+            array unset d; array set d {login "" password ""}
+            array set d $e
+            set m $d(machine)
+            switch -- $round {
+                exact   { set hit [expr {$m eq $host}] }
+                short   { set hit [expr {$m eq $short || [lindex [split $m .] 0] eq $short}] }
+                default { set hit [expr {$m eq "*default*"}] }
+            }
+            if {!$hit} continue
+            if {$want_login ne "" && $d(login) ne $want_login} continue
+            return [list $d(login) $d(password)]
+        }
+    }
+    return {}
+}
+
+# ---- telnet -----------------------------------------------------------------------------------------------------------
+if {$mode eq "telnet"} {
+    set telnet [env_or MFA_TELNET telnet]
+    set ttimeout [env_or MFA_TELNET_TIMEOUT 120]
+    set host $alias_host
+    set port 23
+    set words $argv
+    if {$host eq ""} {
+        if {[llength $words] > 0} {
+            set host [lindex $words 0]; set words [lrange $words 1 end]
+        } elseif {[read_alias default-telnet]} {
+            set host $alias_host
+        } else {
+            send_user "usage: $me HOST \[PORT\]\n"; exit 2
+        }
+    }
+    if {[llength $words] > 0} { set port [lindex $words 0] }
+    set cred [netrc_lookup $host]
+    if {$cred eq ""} { fail "no entry for $host in [env_or {MFA_NETRC NETRC} ~/.netrc]" }
+    lassign $cred login pw
+    if {$login eq ""} { fail "the ~/.netrc entry for $host has no login" }
+    set timeout $ttimeout
+    log_user 1                                 ;# show the connect/login dialogue as it happens (the password is not echoed)
+    spawn -noecho $telnet $host $port
+    set spawn_tty $spawn_out(slave,name)
+    expect {
+        -re {([Ll]ogin|[Uu]ser[Nn]ame|LOGIN|USERNAME):} { }
+        timeout { fail "timed out after ${ttimeout}s waiting for the login prompt" }
+        eof     { fail "connection closed by the remote host" }
+    }
+    send -- "$login\r"                         ;# CR, not LF: OpenVMS rejects a bare LF
+    expect {
+        -re {([Pp]assword|PASSWORD):} { }          ;# no (?i) here: expect's "gate keeper" would then match case-sensitively anyway
+        timeout { fail "timed out after ${ttimeout}s waiting for the second prompt" }
+        eof     { fail "connection closed by the remote host" }
+    }
+    send -- "$pw\r"
+    set pw ""
+    # let the post-login banner or prompt print before handing over; host specific (VMS, Linux, ...), so never fatal
+    set timeout 5
+    expect {
+        -re {(?i)welcome|last (interactive )?login|[$#>] ?$|incorrect|failure|invalid} { }
+        timeout { }
+        eof     { catch {wait}; exit 0 }
+    }
+    catch {
+        trap {
+            catch {
+                set rows [stty rows]
+                set cols [stty columns]
+                stty rows $rows columns $cols < $spawn_tty
+            }
+        } WINCH
+    }
+    interact
+    catch {wait} result
+    exit [expr {[llength $result] >= 4 ? [lindex $result 3] : 0}]
+}
+
+# ---- ssh and sudo -----------------------------------------------------------------------------------------------------
+set ssh           [env_or {MFA_SSH SSH_WWL_SSH} ssh]
+set login_timeout [env_or {MFA_LOGIN_TIMEOUT SSH_WWL_LOGIN_TIMEOUT} 45]
+set tries         [env_or {MFA_TRIES SSH_WWL_TRIES} 3]
+set grace         [env_or MFA_GRACE [expr {$mode eq "sudo" ? 5 : 3}]]   ;# seconds to watch for a rejection after a code was sent
+set ready         [env_or MFA_READY [expr {$alias_ready ne "" ? $alias_ready : {[$#%>] ?$}}]]
+set pw_prompt     [env_or MFA_PASSWORD_PROMPT {\[sudo\] [Pp]assword for [^\r\n:]*: ?$}]
+
+# split the arguments into: options, the host, the words after the host
+set hidx [first_word_index $argv]
+if {$alias_host ne ""} {
+    set hostspec $alias_host
+    if {$hidx < 0} { set pre $argv; set post {} } else { set pre [lrange $argv 0 [expr {$hidx - 1}]]; set post [lrange $argv $hidx end] }
+} else {
+    if {$hidx < 0} { send_user "usage: $me HOST \[ssh options\] \[[expr {$mode eq "sudo" ? "sudo args" : "command"}]\]\n"; exit 2 }
+    set hostspec [lindex $argv $hidx]
+    set pre  [lrange $argv 0 [expr {$hidx - 1}]]
+    set post [lrange $argv [expr {$hidx + 1}] end]
+}
+# whose code, and which host name to ask the vault about
+set host $hostspec
+set user [env_or {MFA_USER SSH_WWL_USER} $alias_user]
+if {[regexp {^([^@]+)@(.+)$} $hostspec -> u h]} { set user $u; set host $h }
+for {set i 0} {$i < [llength $pre]} {incr i} {
+    if {[lindex $pre $i] eq "-l" && $i + 1 < [llength $pre]} { set user [lindex $pre [expr {$i + 1}]] }
+}
+
+if {$mode eq "sudo"} {
+    set sudoargs [expr {[llength $post] ? $post : {-i}}]
+    set cmdline [concat $ssh -t $pre [list $hostspec sudo] $sudoargs]
+    set cmdmode [expr {[llength $post] > 0 && [lindex $post 0] ni {-i -s}}]
+    # sudo prompts for the login of the account on the host; the netrc entry is looked up by host (and that login)
+    set cred [netrc_lookup $host $user]
+    if {$cred eq ""} { set cred [netrc_lookup $host] }
+    if {$cred eq ""} { fail "no entry for $host in [env_or {MFA_NETRC NETRC} ~/.netrc] (machine $host login USER password SECRET)" } ;# allowlist secret
+    set sudo_pw [lindex $cred 1]
+    if {$user eq ""} { set user [lindex $cred 0] }
+} else {
+    set cmdline [concat $ssh $pre [list $hostspec] $post]
+    set cmdmode [expr {[llength $post] > 0}]
+}
+switch -- [env_or {MFA_MODE SSH_WWL_MODE} auto] {
+    interactive { set cmdmode 0 }
+    command     { set cmdmode 1 }
+}
+
+log_user 1
+spawn -noecho {*}$cmdline
+set spawn_tty $spawn_out(slave,name)
+
+set re_token {(?i)(token|verification code|one-time password|authenticator code)[^\r\n:]*: ?$}
+set re_fail  {(?i)permission denied( \(|, please)|too many authentication failures|host key verification failed|connection (refused|timed out|reset by peer|closed by)|could not resolve hostname|no route to host|network is unreachable|incorrect password attempts?|is not in the sudoers file|may not run sudo|a terminal is required|a password is required} ;# allowlist secret
+set re_bad   {(?i)(invalid token|token: error|invalid verification code)} ;# allowlist secret
+
+set phase     login     ;# login: watch for failures; session: only the code prompts and the end
+set otp_sent  0         ;# codes sent so far
+set last_code ""
+set last_sent ""        ;# what was sent last: pw or otp
+set closed    0
+set timeout   $login_timeout
+
+# the next code to send: never the one already spent
+proc next_code {} {
+    global host user last_code
+    set code [get_code $host $user]
+    if {$code ne "" && $code eq $last_code} {
+        # the same code again: it is spent; wait for the next 30 s period
+        set wait_s [expr {30 - [clock seconds] % 30 + 1}]
+        info_line "same code again, waiting ${wait_s}s for the next one"
+        sleep $wait_s
+        set code [get_code $host $user]
+        if {$code eq $last_code} { set code "" }
+    }
+    return $code
+}
+
+expect {
+    -re $re_token {
+        if {$otp_sent >= $tries} { give_up "code rejected $otp_sent times, giving up" }
+        set code [next_code]
+        if {$code eq ""} { give_up "no new 6-digit code from $getcode (for $host)" }
+        set last_code $code
+        incr otp_sent
+        set last_sent otp
+        send -- "$code\r"
+        if {$phase eq "login"} { set timeout $grace }
+        exp_continue
+    }
+    -re $pw_prompt {
+        if {$mode ne "sudo"} { exp_continue }
+        if {$last_sent eq "pw"} { give_up "sudo password rejected" } ;# allowlist secret
+        set last_sent pw
+        send -- "$sudo_pw\r"
+        if {$phase eq "login"} { set timeout $grace }
+        exp_continue
+    }
+    -re $re_fail {
+        if {$phase eq "login"} {
+            regsub {\s*[(,]\s*(please)?$} [string trim $expect_out(0,string)] {} why
+            give_up "login failed (it said: $why)"
+        }
+        exp_continue
+    }
+    -re $re_bad {
+        # the prompt comes again and is answered above; just keep watching
+        exp_continue
+    }
+    -re $ready {
+        # the remote shell is up (interactive); no more code to wait for.  In command mode keep going to the end.
+        set phase session
+    }
+    timeout {
+        # no prompt, no ready text: no code is needed, or the remote command is just slow.  Stop watching for failures.
+        set phase session
+        if {!$cmdmode && !$otp_sent && $last_sent eq ""} { info_line "no prompt within ${login_timeout}s; continuing without one" }
+        if {$cmdmode} {
+            set timeout -1
+            exp_continue          ;# wait for the command to finish, answering a late code prompt if one comes
+        }
+    }
+    eof {
+        set closed 1
+    }
+}
+
+# keep the remote terminal size in step with this window (only when there is a terminal)
+catch {
+    trap {
+        catch {
+            set rows [stty rows]
+            set cols [stty columns]
+            stty rows $rows columns $cols < $spawn_tty
+        }
+    } WINCH
+}
+
+if {!$closed} {
+    if {$cmdmode} {
+        set timeout -1
+        expect {
+            -re $re_token {
+                if {$otp_sent >= $tries} { give_up "code rejected $otp_sent times, giving up" }
+                set code [next_code]
+                if {$code ne ""} { set last_code $code; incr otp_sent; send -- "$code\r" }
+                exp_continue
+            }
+            eof
+        }
+    } else {
+        interact
+    }
+}
+catch {wait} result
+exit [expr {[llength $result] >= 4 ? [lindex $result 3] : 0}]
