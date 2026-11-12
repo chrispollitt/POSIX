@@ -15,6 +15,12 @@ exec expect -f "$0" -- ${1+"$@"}
 #                                             get_mfa_code.py <this machine>.  Handy on cpbee itself, where `auth` is the vault.
 #                                             Already root here: no prompts to answer, so it just runs the command (or sudo
 #                                             with the same arguments if they start with an option) with no expect layer.
+#   sudo-mfa --local on Windows (Cygwin)      there is no sudo: elevate with what Windows has.  Already administrator: run the
+#                                             command (bash -c).  Otherwise ask for a one-time code (typed by you, checked against the
+#                                             vault seed for this machine: a soft check, see the README), then
+#                                               terminal:  ssh localhost COMMAND         (the elevated shell, as the old sudo function did)
+#                                               GUI:       RunAsAdminClient.exe COMMAND  (--gui, or the name sudo-gui)
+#                                             Leading options (-i, -u ...) are dropped, as the old function did.  MFA_NO_CODE=1 skips the code.
 #   telnet-netrc [HOST [PORT]]                telnet; answers "login:"/"Username:" and "Password:" from ~/.netrc
 #
 # Any name that starts with ssh-, sudo- or telnet- works.  A name that goes on with a label other than mfa or netrc is a
@@ -49,6 +55,8 @@ exec expect -f "$0" -- ${1+"$@"}
 #   MFA_PASSWORD_PROMPT (regex for the sudo prompt that asks for the password)   MFA_TELNET_TIMEOUT (120)
 #   MFA_SUDO (sudo; the local sudo to run)   MFA_LOCAL (1 = sudo mode runs sudo here, as --local)
 #   MFA_UID (the user id to treat as "already root" if it is 0; default: id -u)
+#   Windows: MFA_PLATFORM (windows|unix, to override detection)   MFA_ADMIN_CMD (net session: succeeds when elevated)
+#            MFA_RUNAS_CLIENT (/dos/RunAsAdminClient.exe)   MFA_NO_CODE (1: no code check)
 
 proc env_or {names default} {
     foreach n $names {
@@ -98,10 +106,13 @@ if {![regexp {^(ssh|sudo|telnet)(-(.*))?$} $me -> mode -> tag]} {
     set me "net-login $mode"
 }
 set local 0
+set gui 0
 if {$mode eq "sudo" && $tag eq "local"} { set local 1 }
+if {$mode eq "sudo" && $tag eq "gui"} { set local 1; set gui 1 }
 if {$mode eq "sudo" && [lindex $argv 0] eq "--local"} { set local 1; set argv [lrange $argv 1 end] }
+if {$mode eq "sudo" && [lindex $argv 0] eq "--gui"} { set local 1; set gui 1; set argv [lrange $argv 1 end] }
 if {$mode eq "sudo" && [env_or MFA_LOCAL 0] eq "1"} { set local 1 }
-if {[lsearch -exact {mfa netrc login local} $tag] >= 0} { set tag "" }
+if {[lsearch -exact {mfa netrc login local gui} $tag] >= 0} { set tag "" }
 
 set alias_host ""; set alias_user ""; set alias_ready ""
 proc read_alias {key} {
@@ -311,6 +322,39 @@ if {$mode eq "telnet"} {
     exit [expr {[llength $result] >= 4 ? [lindex $result 3] : 0}]
 }
 
+# run a command with this process's terminal and exit with its status (no spawn: nothing to answer)
+proc run_through {cmd} {
+    global me
+    if {[catch {exec {*}$cmd <@stdin >@stdout 2>@stderr} err]} {
+        if {[lindex $::errorCode 0] eq "CHILDSTATUS"} { exit [lindex $::errorCode 2] }
+        send_user "$me: $err\n"
+        exit 127
+    }
+    exit 0
+}
+
+# Windows only: ask for a one-time code and check it against the seed in the vault (up to 3 tries)
+proc check_code {host user} {
+    global getcode me
+    for {set n 0} {$n < 3} {incr n} {
+        send_user "Verification code: "
+        flush stdout
+        set istty [expr {![catch {exec tty -s <@stdin}]}]
+        if {$istty} { catch {exec stty -echo <@stdin} }
+        set got [gets stdin code]
+        if {$istty} { catch {exec stty echo <@stdin} }
+        send_user "\n"
+        if {$got < 0} { fail "no code given (is there a terminal?)" }
+        set cmd [list $getcode --verify [string trim $code] $host]
+        if {$user ne ""} { lappend cmd $user }
+        if {![catch {exec {*}$cmd 2>/dev/null}]} { return }
+        set rc 1
+        if {[lindex $::errorCode 0] eq "CHILDSTATUS"} { set rc [lindex $::errorCode 2] }
+        if {$rc == 3} { fail "no code seed for $host/$user in the vault (make one: mfa-seed $host $user); MFA_NO_CODE=1 skips the check" }
+    }
+    fail "code rejected 3 times"
+}
+
 # does the sudo argument list contain a command to run (as opposed to only options such as -i or -u bob)?
 proc sudo_is_command {words} {
     set valopts {-u -g -h -p -C -U -r -t -T -D -R}
@@ -373,6 +417,25 @@ for {set i 0} {$i < [llength $pre]} {incr i} {
     if {[lindex $pre $i] eq "-l" && $i + 1 < [llength $pre]} { set user [lindex $pre [expr {$i + 1}]] }
 }
 
+# Windows (Cygwin): no sudo; elevate with ssh localhost (terminal) or RunAsAdminClient.exe (GUI), after a soft code check
+set platform [env_or MFA_PLATFORM [expr {[regexp {^(CYGWIN|MSYS|MINGW)} $::tcl_platform(os)] ? "windows" : "unix"}]]
+if {$mode eq "sudo" && $local && $platform eq "windows"} {
+    set words $post
+    while {[llength $words] && [string match -* [lindex $words 0]]} { set words [lrange $words 1 end] }
+    set admin [expr {![catch {exec {*}[env_or MFA_ADMIN_CMD {net session}] 2>@1}]}]
+    if {$admin} {
+        # already elevated: nothing to ask, just run it the way the old function did (eval)
+        if {[llength $words]} { run_through [list bash -c [join $words " "]] } else { run_through [list bash -l] }
+    }
+    if {$gui && ![llength $words]} { send_user "usage: $me --gui COMMAND \[ARGS\]\n"; exit 2 }
+    if {[env_or MFA_NO_CODE 0] ne "1"} { check_code $host $user }
+    if {$gui} {
+        run_through [concat [env_or MFA_RUNAS_CLIENT /dos/RunAsAdminClient.exe] $words]
+    } else {
+        run_through [concat [env_or {MFA_SSH SSH_WWL_SSH} ssh] localhost $words]
+    }
+}
+
 # already root on this machine: nothing to answer, so run the command itself (no spawn, no netrc, no code)
 if {$mode eq "sudo" && $local} {
     if {[catch {exec id -u} myuid]} { set myuid -1 }
@@ -382,12 +445,7 @@ if {$mode eq "sudo" && $local} {
         } else {
             set direct [concat [env_or MFA_SUDO sudo] [expr {[llength $post] ? $post : {-i}}]]   ;# -i, -u bob ...: sudo needs no password for root
         }
-        if {[catch {exec {*}$direct <@stdin >@stdout 2>@stderr} err]} {
-            if {[lindex $::errorCode 0] eq "CHILDSTATUS"} { exit [lindex $::errorCode 2] }
-            send_user "$me: $err\n"
-            exit 127
-        }
-        exit 0
+        run_through $direct
     }
 }
 

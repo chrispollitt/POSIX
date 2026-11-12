@@ -78,6 +78,7 @@ printf 'box   boxhost   alice   Ready!\ndefault-telnet vax.example.org\n' >"$T/a
   echo 'machine boxhost login alice password alicepw'                           # allowlist secret
   echo 'default login anon password anonpw'; } >"$T/netrc"                       # allowlist secret
 chmod 600 "$T/netrc"
+export MFA_PLATFORM=unix
 export MFA_SSH="$T/fakessh" MFA_TELNET="$T/faketelnet" MFA_NETRC="$T/netrc" MFA_ALIASES="$T/aliases" MFA_GETCODE="$GET" MFA_QUIET=1
 export FAKE_TOKENS="$T/tokens.json" FAKE_GET="$GET" MFA_NO_VAULT=1 MFA_TOKENS="$T/tokens.json" FAKE_PW=sudopw FAKE_TUSER=system FAKE_TPW='pa ss"w0rd'
 
@@ -127,7 +128,7 @@ LH=$(hostname -s); LU=$(id -un)
 printf '{"%s": {"%s": "%s"}}\n' "$LH" "$LU" "$SECRET" >"$T/ltokens.json"
 printf 'machine %s login %s password localpw\n' "$LH" "$LU" >"$T/lnetrc"; chmod 600 "$T/lnetrc"      # allowlist secret
 printf 'machine elsewhere login a password b\n' >"$T/lnetrc3"; chmod 600 "$T/lnetrc3"      # allowlist secret
-ln -s "$here/net-login" "$T/bin/sudo-local"
+ln -s "$here/net-login" "$T/bin/sudo-local"; ln -s "$here/net-login" "$T/bin/sudo-gui"
 export FAKE_LPW=localpw
 lenv() { MFA_SUDO="$T/fakesudo" MFA_NETRC="$T/lnetrc" MFA_TOKENS="$T/ltokens.json" FAKE_TOKENS="$T/ltokens.json" "$@"; }
 out=$(lenv "$T/bin/sudo-mfa" --local id -un </dev/null 2>&1); rc=$?
@@ -156,6 +157,37 @@ has "root, local, sudo options: plain sudo, no expect" "root-direct-sudo: -u bob
 out=$(MFA_UID=0 MFA_SUDO="$T/rootsudo" MFA_NETRC="$T/missing" "$T/bin/sudo-mfa" --local </dev/null 2>&1); has "root, local, no args: sudo -i" "root-direct-sudo: -i" "$out"
 out=$(MFA_UID=0 "$T/bin/sudo-mfa" --local no-such-command-xyz </dev/null 2>&1); rc=$?; eq "root, local: missing command is an error" 127 "$rc"
 out=$(MFA_UID=1000 MFA_NETRC="$T/missing" MFA_SUDO="$T/fakesudo" "$T/bin/sudo-mfa" --local echo hi </dev/null 2>&1); rc=$?; eq "not root, local: the netrc is needed again" 1 "$rc"
+
+# ---- sudo mode, local, on Windows (Cygwin): already admin / ssh localhost / RunAsAdminClient, after a typed code ------------
+cat >"$T/winssh" <<'EOF'
+#!/bin/bash
+echo "elevated-ssh: $*"; exit 5
+EOF
+cat >"$T/winrunas" <<'EOF'
+#!/bin/bash
+echo "elevated-gui: $*"; exit 8
+EOF
+chmod +x "$T/winssh" "$T/winrunas"
+sec=$(( $(date +%s) % 30 )); [ $sec -ge 25 ] && sleep $(( 32 - sec ))
+CODE=$(MFA_NO_VAULT=1 MFA_TOKENS="$T/ltokens.json" python3 "$GET" "$LH" "$LU")
+wenv() { MFA_PLATFORM=windows MFA_SSH="$T/winssh" MFA_RUNAS_CLIENT="$T/winrunas" MFA_NO_VAULT=1 MFA_TOKENS="$T/ltokens.json" "$@"; }
+out=$(MFA_ADMIN_CMD=true wenv "$T/bin/sudo-mfa" --local echo "already admin" </dev/null 2>&1); rc=$?
+eq "windows, admin: runs it directly (no code asked)" "already admin" "$out"; eq "windows, admin: status 0" 0 "$rc"
+out=$(MFA_ADMIN_CMD=true wenv "$T/bin/sudo-mfa" --local -i "exit 4" </dev/null 2>&1); rc=$?; eq "windows, admin: leading options dropped, status passed on" 4 "$rc"
+out=$(echo "$CODE" | MFA_ADMIN_CMD=false wenv "$T/bin/sudo-mfa" --local -i net user 2>&1); rc=$?
+has "windows, not admin: ssh localhost after a good code" "elevated-ssh: localhost net user" "$out"; eq "windows, not admin: status of the elevated command" 5 "$rc"
+out=$(echo "$CODE" | MFA_ADMIN_CMD=false wenv "$T/bin/sudo-gui" notepad.exe C:/x.txt 2>&1); rc=$?
+has "windows, not admin, sudo-gui: RunAsAdminClient" "elevated-gui: notepad.exe C:/x.txt" "$out"; eq "windows gui: status" 8 "$rc"
+out=$(echo "$CODE" | MFA_ADMIN_CMD=false wenv "$T/bin/sudo-mfa" --gui regedit </dev/stdin 2>&1); has "windows, --gui flag" "elevated-gui: regedit" "$out"
+out=$(printf '000000\n000000\n000000\n' | MFA_ADMIN_CMD=false wenv "$T/bin/sudo-mfa" --local net user 2>&1); rc=$?
+has "windows, wrong code 3 times: nothing is run" "code rejected 3 times" "$out"; eq "windows, wrong code: status 1" 1 "$rc"
+case "$out" in *elevated-ssh*) bad "windows, wrong code ran the command" "$out";; *) ok;; esac
+out=$(echo "$CODE" | MFA_ADMIN_CMD=false wenv env MFA_TOKENS="$T/tokens.json" "$T/bin/sudo-mfa" --local net user 2>&1); rc=$?
+has "windows, no seed for this machine: says how to make one" "mfa-seed" "$out"; eq "windows, no seed: status 1" 1 "$rc"
+out=$(MFA_NO_CODE=1 MFA_ADMIN_CMD=false wenv "$T/bin/sudo-mfa" --local net user </dev/null 2>&1); has "windows, MFA_NO_CODE=1 skips the check" "elevated-ssh: localhost net user" "$out"
+out=$(MFA_NO_CODE=1 MFA_ADMIN_CMD=false wenv "$T/bin/sudo-mfa" --local </dev/null 2>&1); has "windows, no command: plain ssh localhost (a shell)" "elevated-ssh: localhost" "$out"
+out=$(MFA_NO_CODE=1 MFA_ADMIN_CMD=false wenv "$T/bin/sudo-mfa" --gui </dev/null 2>&1); rc=$?; eq "windows --gui with no command is a usage error" 2 "$rc"
+out=$(echo "$CODE" | MFA_ADMIN_CMD=false wenv "$T/bin/sudo-mfa" "$LH" net user 2>&1); has "windows, this machine's own name as host" "elevated-ssh: localhost net user" "$out"
 
 # ---- telnet mode --------------------------------------------------------------------------------------------------------
 out=$( (sleep 5) | "$T/bin/telnet-netrc" vax.example.org 2323 2>&1 ); has "telnet-netrc: logged in with a quoted password" "logged-in-as system" "$out"

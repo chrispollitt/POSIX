@@ -15,6 +15,8 @@ Where the secret comes from, first hit wins
 
 Options
   --no-vault      skip step 1 (also: MFA_NO_VAULT=1)       --digits N   code length (default 6)
+  --verify CODE   print nothing; exit 0 if CODE is the current code for HOST [USER], 1 if not, 3 if there is no seed.
+                  (With a token file the previous and next code count too; the vault answers with the current one only.)
   --file PATH     use this token file only                 -h, --help
 Environment: MFA_AUTH (the auth tool; default `auth` on PATH, else next to this script), MFA_TOKENS (token file),
 MFA_NO_VAULT.
@@ -122,6 +124,7 @@ def main(argv):
     digits = 6
     novault = bool(os.environ.get("MFA_NO_VAULT"))
     explicit = None
+    verify = None
     it = iter(argv)
     for a in it:
         if a in ("-h", "--help"):
@@ -134,6 +137,11 @@ def main(argv):
                 digits = int(next(it))
             except (StopIteration, ValueError):
                 print("get_mfa_code: --digits needs a number", file=sys.stderr)
+                return 2
+        elif a == "--verify":
+            verify = next(it, None)
+            if not verify:
+                print("get_mfa_code: --verify needs a code", file=sys.stderr)
                 return 2
         elif a == "--file":
             explicit = next(it, None)
@@ -154,9 +162,20 @@ def main(argv):
     if not novault and not explicit:
         code = from_vault(host, user, digits)
         if code:
+            if verify is not None:
+                return 0 if hmac.compare_digest(code, verify.strip()) else 1
             print(code)
             return 0
     sec = from_file(host, user, explicit)
+    if sec and verify is not None:
+        try:
+            now = time.time()
+            ok = any(hmac.compare_digest(totp(sec, now=now + d * 30, digits=digits), verify.strip()) for d in (-1, 0, 1))
+        except (ValueError, TypeError):
+            return 1
+        return 0 if ok else 1
+    if verify is not None and not sec:
+        return 3
     if sec:
         try:
             print(totp(sec, digits=digits))

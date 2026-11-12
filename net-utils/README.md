@@ -10,6 +10,7 @@ docstring at the top of the file. Python 3 and bash only; they run on Linux, mac
 | [identity](identity) | who is who: the logins a person uses on each service (no secrets) |
 | [net-login](net-login) | one script for `ssh-mfa`, `sudo-mfa` and `telnet-netrc`: logs in and answers the password / one-time-code prompts (mode = the name it is called by) |
 | [get_mfa_code.py](get_mfa_code.py) | the current one-time code (TOTP) for a host, from the vault or a token file; used by `net-login` |
+| [mfa-seed](mfa-seed) | make a one-time-code seed for a host, keep it in the vault, show it once for a phone app, and check the first code |
 | [netrc-to-tickets](netrc-to-tickets) | move logins from `~/.netrc` into `~/.mu-tickets` |
 | [lan-port](lan-port) | open, close and audit the LAN ports of cpbee |
 | [traceroute-plus.sh](traceroute-plus.sh) | traceroute that also asks each hop about itself |
@@ -127,7 +128,8 @@ script looks at the name it was called by:
 |---|---|
 | `ssh-mfa HOST [ssh options] [command]` | ssh; answers the host's `Token:` / `Verification code:` prompt with a fresh code from `get_mfa_code.py HOST` |
 | `sudo-mfa HOST [ssh options] [sudo args]` | `ssh -t HOST sudo ...`; answers sudo's password from `~/.netrc` and its code prompt from `get_mfa_code.py` (no sudo args: `sudo -i`) |
-| `sudo-mfa --local [sudo args]` | the same for `sudo` on **this** machine, no ssh (also: the name `sudo-local`, `MFA_LOCAL=1`, or this machine's own name or `localhost` as the host) |
+| `sudo-mfa --local [sudo args]` | the same for `sudo` on **this** machine, no ssh (also: the name `sudo-local`, `MFA_LOCAL=1`, or this machine's own name or `localhost` as the host). On Windows/Cygwin it elevates instead, see below |
+| `sudo-gui COMMAND` (or `sudo-mfa --gui`) | Windows only: run a GUI program elevated through `RunAsAdminClient.exe` |
 | `telnet-netrc [HOST [PORT]]` | telnet; answers `login:`/`Username:` and `Password:` from `~/.netrc` (the VAX works) |
 
 Any name starting with `ssh-`, `sudo-` or `telnet-` works. A name with another label is a shortcut from
@@ -143,6 +145,24 @@ Secrets never go on a command line or into the output. A seed for a *second fact
 vault (needs the vault unlocked), not the service tier. `sudo-mfa` only helps if the host's sudo asks for a code: see
 [sudo needs a code on cpbee](#sudo-needs-a-code-on-cpbee). Tests: `bash net-utils/test/test_net_login.sh` (a fake ssh
 and telnet; needs `expect`).
+
+### Windows (Cygwin): elevation instead of sudo
+
+Cygwin has no `sudo`, so on Windows `sudo-mfa --local` (and `sudo-local`, `sudo-gui`) elevate with what Windows offers. It
+replaces the two helpers that were in `~/.bashrc` (a `sudo` function and the `sudo2` alias):
+
+1. **Already an administrator** (`net session` succeeds): no code, the command just runs (`bash -c`, like the old `eval`).
+2. Otherwise it asks **Verification code:** (typed by you, not shown) and checks it against the seed for this machine in the vault
+   (`get_mfa_code.py --verify`); three tries.
+3. Then **terminal**: `ssh localhost COMMAND` (an elevated shell; no command gives you that shell), or **GUI**
+   (`sudo-gui`, `sudo-mfa --gui`): `RunAsAdminClient.exe COMMAND`.
+
+Leading options (`-i`, `-u x`, ...) are dropped, as the old function did. Make the seed once with `mfa-seed cmlaptop` (vault
+unlocked; add the seed to a phone app and type the first code). `MFA_NO_CODE=1` skips the check for scripts.
+
+**This code check is a speed bump, not a barrier.** Any process running as you can call `ssh localhost` or
+`RunAsAdminClient.exe` directly and be elevated without a code. It stops mistakes and shoulder-surfing, not malware. A real barrier
+would need the localhost ssh path and the RunAsAdmin server (whose named pipe is open to Everyone) to demand the code themselves.
 
 ## sudo needs a code on cpbee
 
