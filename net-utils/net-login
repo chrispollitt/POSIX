@@ -9,6 +9,10 @@ exec expect -f "$0" -- ${1+"$@"}
 #                                             one-time code (get_mfa_code.py HOST)
 #   sudo-mfa   HOST [ssh options] [sudo args] runs  ssh -t HOST sudo ...  and answers sudo's prompt for the password from ~/.netrc
 #                                             and its code prompt with get_mfa_code.py.  No sudo args: sudo -i (a root shell)
+#   sudo-mfa   --local [sudo args]            the same for sudo on THIS machine (no ssh).  Also local: the name sudo-local, MFA_LOCAL=1,
+#                                             or this machine's own name (or localhost) as the host:  sudo-mfa localhost systemctl ...
+#                                             The password comes from the ~/.netrc line for this machine's name, the code from
+#                                             get_mfa_code.py <this machine>.  Handy on cpbee itself, where `auth` is the vault.
 #   telnet-netrc [HOST [PORT]]                telnet; answers "login:"/"Username:" and "Password:" from ~/.netrc
 #
 # Any name that starts with ssh-, sudo- or telnet- works.  A name that goes on with a label other than mfa or netrc is a
@@ -41,6 +45,7 @@ exec expect -f "$0" -- ${1+"$@"}
 #   MFA_LOGIN_TIMEOUT (45)   MFA_TRIES (3)   MFA_GRACE (3; 5 for sudo)   MFA_QUIET (0; 1 hides the info lines)
 #   MFA_MODE interactive|command   MFA_READY (regex)   MFA_USER (whose code, if not in the host or alias)
 #   MFA_PASSWORD_PROMPT (regex for the sudo prompt that asks for the password)   MFA_TELNET_TIMEOUT (120)
+#   MFA_SUDO (sudo; the local sudo to run)   MFA_LOCAL (1 = sudo mode runs sudo here, as --local)
 
 proc env_or {names default} {
     foreach n $names {
@@ -89,7 +94,11 @@ if {![regexp {^(ssh|sudo|telnet)(-(.*))?$} $me -> mode -> tag]} {
     set argv [lrange $argv 1 end]
     set me "net-login $mode"
 }
-if {[lsearch -exact {mfa netrc login} $tag] >= 0} { set tag "" }
+set local 0
+if {$mode eq "sudo" && $tag eq "local"} { set local 1 }
+if {$mode eq "sudo" && [lindex $argv 0] eq "--local"} { set local 1; set argv [lrange $argv 1 end] }
+if {$mode eq "sudo" && [env_or MFA_LOCAL 0] eq "1"} { set local 1 }
+if {[lsearch -exact {mfa netrc login local} $tag] >= 0} { set tag "" }
 
 set alias_host ""; set alias_user ""; set alias_ready ""
 proc read_alias {key} {
@@ -299,6 +308,28 @@ if {$mode eq "telnet"} {
     exit [expr {[llength $result] >= 4 ? [lindex $result 3] : 0}]
 }
 
+# does the sudo argument list contain a command to run (as opposed to only options such as -i or -u bob)?
+proc sudo_is_command {words} {
+    set valopts {-u -g -h -p -C -U -r -t -T -D -R}
+    set i 0
+    while {$i < [llength $words]} {
+        set a [lindex $words $i]
+        if {$a eq "--"} { return [expr {$i + 1 < [llength $words]}] }
+        if {[string match -* $a]} {
+            if {[lsearch -exact $valopts $a] >= 0} { incr i }
+            incr i
+            continue
+        }
+        return 1
+    }
+    return 0
+}
+
+proc this_host {} {
+    if {![catch {exec hostname -s} h] && $h ne ""} { return $h }
+    return [lindex [split [info hostname] .] 0]
+}
+
 # ---- ssh and sudo -----------------------------------------------------------------------------------------------------
 set ssh           [env_or {MFA_SSH SSH_WWL_SSH} ssh]
 set login_timeout [env_or {MFA_LOGIN_TIMEOUT SSH_WWL_LOGIN_TIMEOUT} 45]
@@ -309,7 +340,19 @@ set pw_prompt     [env_or MFA_PASSWORD_PROMPT {\[sudo\] [Pp]assword for [^\r\n:]
 
 # split the arguments into: options, the host, the words after the host
 set hidx [first_word_index $argv]
-if {$alias_host ne ""} {
+if {$mode eq "sudo" && !$local && $alias_host eq "" && $hidx >= 0} {
+    # this machine's own name (or localhost) as the host means sudo here, without ssh
+    set w [string trim [lindex $argv $hidx]]
+    if {[lsearch -exact [list localhost 127.0.0.1 ::1 [this_host] [info hostname]] $w] >= 0} {
+        set local 1
+        set argv [lrange $argv [expr {$hidx + 1}] end]
+    }
+}
+if {$local} {
+    set hostspec [this_host]
+    set pre {}
+    set post $argv
+} elseif {$alias_host ne ""} {
     set hostspec $alias_host
     if {$hidx < 0} { set pre $argv; set post {} } else { set pre [lrange $argv 0 [expr {$hidx - 1}]]; set post [lrange $argv $hidx end] }
 } else {
@@ -321,6 +364,7 @@ if {$alias_host ne ""} {
 # whose code, and which host name to ask the vault about
 set host $hostspec
 set user [env_or {MFA_USER SSH_WWL_USER} $alias_user]
+if {$local && $user eq ""} { catch {exec id -un} user }
 if {[regexp {^([^@]+)@(.+)$} $hostspec -> u h]} { set user $u; set host $h }
 for {set i 0} {$i < [llength $pre]} {incr i} {
     if {[lindex $pre $i] eq "-l" && $i + 1 < [llength $pre]} { set user [lindex $pre [expr {$i + 1}]] }
@@ -328,8 +372,12 @@ for {set i 0} {$i < [llength $pre]} {incr i} {
 
 if {$mode eq "sudo"} {
     set sudoargs [expr {[llength $post] ? $post : {-i}}]
-    set cmdline [concat $ssh -t $pre [list $hostspec sudo] $sudoargs]
-    set cmdmode [expr {[llength $post] > 0 && [lindex $post 0] ni {-i -s}}]
+    if {$local} {
+        set cmdline [concat [env_or MFA_SUDO sudo] $sudoargs]
+    } else {
+        set cmdline [concat $ssh -t $pre [list $hostspec sudo] $sudoargs]
+    }
+    set cmdmode [sudo_is_command $post]
     # sudo prompts for the login of the account on the host; the netrc entry is looked up by host (and that login)
     set cred [netrc_lookup $host $user]
     if {$cred eq ""} { set cred [netrc_lookup $host] }

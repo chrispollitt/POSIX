@@ -106,6 +106,41 @@ out=$(FAKE_USER=alice FAKE_PW=alicepw "$T/bin/sudo-box" id </dev/null 2>&1); has
 out=$(FAKE_USER=chris "$T/bin/sudo-mfa" nohost.example.org id </dev/null 2>&1); has "sudo-mfa: unknown host uses the netrc default entry (wrong password here)" "sudo password rejected" "$out"   # allowlist secret
 out=$(MFA_NETRC="$T/missing" "$T/bin/sudo-mfa" boxhost id </dev/null 2>&1); rc=$?; eq "sudo-mfa: no netrc is an error" 1 "$rc"
 
+# ---- sudo mode, local (no ssh) -------------------------------------------------------------------------------------------
+cat >"$T/fakesudo" <<'EOF'
+#!/bin/bash
+# fake local sudo: password, then a code, then runs "as root"
+host=$(hostname -s); me=$(id -un)
+n=0
+while [ $n -lt 3 ]; do
+  printf '[sudo] password for %s: ' "$me"; read -r -s pw; echo
+  if [ "$pw" != "$FAKE_LPW" ]; then echo "Sorry, try again."; n=$((n+1)); continue; fi
+  printf 'Verification code: '; read -r code; echo
+  [ "$code" = "$(MFA_NO_VAULT=1 MFA_TOKENS="$FAKE_TOKENS" python3 "$FAKE_GET" "$host" "$me")" ] || { echo "Sorry, try again."; n=$((n+1)); continue; }
+  echo "local-sudo-ok: $*"; exit 4
+done
+echo "sudo: 3 incorrect password attempts"; exit 1   # allowlist secret
+EOF
+chmod +x "$T/fakesudo"
+LH=$(hostname -s); LU=$(id -un)
+printf '{"%s": {"%s": "%s"}}\n' "$LH" "$LU" "$SECRET" >"$T/ltokens.json"
+printf 'machine %s login %s password localpw\n' "$LH" "$LU" >"$T/lnetrc"; chmod 600 "$T/lnetrc"      # allowlist secret
+printf 'machine elsewhere login a password b\n' >"$T/lnetrc3"; chmod 600 "$T/lnetrc3"      # allowlist secret
+ln -s "$here/net-login" "$T/bin/sudo-local"
+export FAKE_LPW=localpw
+lenv() { MFA_SUDO="$T/fakesudo" MFA_NETRC="$T/lnetrc" MFA_TOKENS="$T/ltokens.json" FAKE_TOKENS="$T/ltokens.json" "$@"; }
+out=$(lenv "$T/bin/sudo-mfa" --local id -un </dev/null 2>&1); rc=$?
+has "sudo-mfa --local: password and code answered" "local-sudo-ok: id -un" "$out"; eq "sudo-mfa --local: status passed on" 4 "$rc"
+out=$(lenv "$T/bin/sudo-local" systemctl status ssh </dev/null 2>&1); has "sudo-local (by name)" "local-sudo-ok: systemctl status ssh" "$out"
+out=$(lenv "$T/bin/sudo-mfa" "$LH" id </dev/null 2>&1); has "sudo-mfa with this machine's own name" "local-sudo-ok: id" "$out"
+out=$(lenv "$T/bin/sudo-mfa" localhost -u root id </dev/null 2>&1); has "sudo-mfa localhost, sudo options kept" "local-sudo-ok: -u root id" "$out"
+out=$(MFA_LOCAL=1 lenv "$T/bin/sudo-mfa" id </dev/null 2>&1); has "sudo-mfa with MFA_LOCAL=1" "local-sudo-ok: id" "$out"
+out=$( (sleep 3) | lenv "$T/bin/sudo-mfa" --local -u root 2>&1 ); has "sudo-mfa --local with only options is interactive (runs, ok)" "local-sudo-ok: -u root" "$out"
+out=$(FAKE_LPW=other lenv "$T/bin/sudo-mfa" --local id </dev/null 2>&1); rc=$?
+has "sudo-mfa --local: wrong password stops" "sudo password rejected" "$out"; eq "sudo-mfa --local: wrong password status" 1 "$rc"   # allowlist secret
+out=$(MFA_NETRC="$T/lnetrc3" MFA_SUDO="$T/fakesudo" "$T/bin/sudo-mfa" --local id </dev/null 2>&1); rc=$?
+has "sudo-mfa --local: no netrc entry for this machine" "no entry for $LH" "$out"; eq "sudo-mfa --local: no entry status" 1 "$rc"
+
 # ---- telnet mode --------------------------------------------------------------------------------------------------------
 out=$( (sleep 5) | "$T/bin/telnet-netrc" vax.example.org 2323 2>&1 ); has "telnet-netrc: logged in with a quoted password" "logged-in-as system" "$out"
 has "telnet-netrc: port passed" "Welcome to vax.example.org:2323" "$out"

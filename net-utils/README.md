@@ -127,6 +127,7 @@ script looks at the name it was called by:
 |---|---|
 | `ssh-mfa HOST [ssh options] [command]` | ssh; answers the host's `Token:` / `Verification code:` prompt with a fresh code from `get_mfa_code.py HOST` |
 | `sudo-mfa HOST [ssh options] [sudo args]` | `ssh -t HOST sudo ...`; answers sudo's password from `~/.netrc` and its code prompt from `get_mfa_code.py` (no sudo args: `sudo -i`) |
+| `sudo-mfa --local [sudo args]` | the same for `sudo` on **this** machine, no ssh (also: the name `sudo-local`, `MFA_LOCAL=1`, or this machine's own name or `localhost` as the host) |
 | `telnet-netrc [HOST [PORT]]` | telnet; answers `login:`/`Username:` and `Password:` from `~/.netrc` (the VAX works) |
 
 Any name starting with `ssh-`, `sudo-` or `telnet-` works. A name with another label is a shortcut from
@@ -178,13 +179,16 @@ and a check that `ssh root@cpbee` is refused). Options: `KEEP_ROOT_SSH=1` stops 
 
 ```bash
 sudo-mfa cpbee -i                    # a root shell; password and code are answered for you
+sudo-mfa --local -i                  # the same, run ON cpbee (no ssh); also: sudo-mfa cpbee ... or sudo-mfa localhost ... there
 sudo-mfa cpbee systemctl status ssh  # one command (a new terminal each time, so a new code each time)
 ssh -t cpbee sudo ...                # by hand: type the password, then the code from the vault or an app
 auth totp cpbee chris                # the current code (vault unlocked)
 ```
 
 `sudo-mfa` reads the password from `~/.netrc` (`machine cpbee login chris password ...`) and the code from
-`get_mfa_code.py` (vault first). To run several root commands, use one shell or one `sh -c '...'`: a second
+`get_mfa_code.py` (vault first). Run **on cpbee** it needs both there: a `machine cpbee ...` line in cpbee's own
+`~/.netrc`, and the vault unlocked (`auth totp cpbee chris` works directly on cpbee). The local mode takes the host
+name from `hostname -s` and the login from `id -un`, and runs `sudo` itself (`MFA_SUDO` to name another). To run several root commands, use one shell or one `sh -c '...'`: a second
 `sudo-mfa` within the same 30 seconds has to wait for the next code, because each code works once.
 
 **How long things last (cpbee, 6 hours on purpose, like the webhost's login state).**
@@ -197,7 +201,10 @@ auth totp cpbee chris                # the current code (vault unlocked)
 
 Reloading gpg-agent (`gpgconf --reload gpg-agent`) locks the vault; unlock it again afterwards.
 
-**Limits.** While the vault is unlocked, anything running as `chris` on cpbee can read the seed through `auth`, so the
+**Limits.** `sudo-mfa --local` on cpbee puts the sudo password in cpbee's `~/.netrc` and gets the code from the vault
+there, so while the vault is unlocked anything running as `chris` on cpbee can become root with it: on cpbee the code only
+keeps out someone who has the ssh key but not the vault passphrase and cannot read `~/.netrc`. Use it on cpbee for
+convenience, not as a second barrier. While the vault is unlocked, anything running as `chris` on cpbee can read the seed through `auth`, so the
 code is a real second factor only against someone who has the ssh key but not the vault passphrase. For full strength keep
 the seed only in a phone app (`PHONE=1`) and remove it from the vault (`auth remove 2fa@cpbee chris`); `sudo-mfa` then
 needs the code typed by hand. Keep an out-of-band way in (console, or another admin account with its own code): with root
