@@ -20,7 +20,7 @@ jobs:
     name: ShellCheck (errors only)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # -S error keeps this green on day one; raise it to warning as the scripts are cleaned up.
       # SC1087: net-utils/test/test-upnp.sh uses "$port[[:space:]]" inside a regex.
       - name: ShellCheck
@@ -32,7 +32,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: gpg and python are needed by the auth tests
         run: |
           gpg --version | head -1
@@ -52,7 +52,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # Only the sandboxed suites: never tests/e2e_master.sh, which sends real mail through a live master.
       - name: unit
         run: bash mail-setup/tests/run-tests.sh unit
@@ -67,7 +67,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: script tests
         run: bash chat-setup/tests/test_chat_setup.sh
       - name: talkd
