@@ -8,13 +8,14 @@
 # unlocked: ssh -t cpbee auth unlock); prints the seed and an otpauth:// line ONCE so you can add it to a phone app (type the seed in,
 # or make a QR code of the line); then asks you to type the code the app shows, and checks it.  If the check fails 3 times the record
 # is removed again.  `get_mfa_code.py HOST USER` then gives the same code, and `get_mfa_code.py --verify CODE HOST USER` checks one.
-# On Windows (Cygwin) `sudo-mfa --local` asks for this code before it elevates.  The seed is on your screen while this runs: clear it after.
+# On Windows (Cygwin) `sudo-mfa --local` needs the vault to give this code before it elevates (it offers to run this).  The seed is on
+# your screen while this runs: clear it after.
 set -u
 here=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
 GET=${MFA_GETCODE:-$here/get_mfa_code.py}
 AUTH=${MFA_AUTH:-auth}
 if ! command -v "$AUTH" >/dev/null 2>&1 && [[ -x $here/auth ]]; then AUTH=$here/auth; fi
-case ${1:-} in -h|--help|"") sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;; esac
+case ${1:-} in -h|--help|"") sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;; esac
 host=$1
 user=${2:-$(id -un)}
 die() { echo "mfa-seed: $*" >&2; exit 1; }

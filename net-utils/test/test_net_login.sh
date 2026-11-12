@@ -158,9 +158,12 @@ out=$(MFA_UID=0 MFA_SUDO="$T/rootsudo" MFA_NETRC="$T/missing" "$T/bin/sudo-mfa" 
 out=$(MFA_UID=0 "$T/bin/sudo-mfa" --local no-such-command-xyz </dev/null 2>&1); rc=$?; eq "root, local: missing command is an error" 127 "$rc"
 out=$(MFA_UID=1000 MFA_NETRC="$T/missing" MFA_SUDO="$T/fakesudo" "$T/bin/sudo-mfa" --local echo hi </dev/null 2>&1); rc=$?; eq "not root, local: the netrc is needed again" 1 "$rc"
 
-# ---- sudo mode, local, on Windows (Cygwin): already admin / ssh localhost / RunAsAdminClient, after a typed code ------------
+# ---- sudo mode, local, on Windows (Cygwin): already admin / ssh localhost / RunAsAdminClient; the vault gives the code itself ----
 cat >"$T/winssh" <<'EOF'
 #!/bin/bash
+# fake "ssh localhost": optionally asks for a password and a code the way sshd with PAM would
+if [ -n "${WIN_PW:-}" ]; then printf 'chris@localhost password: '; read -r -s p; echo; [ "$p" = "$WIN_PW" ] || { echo "Permission denied, please try again."; exit 255; }; fi
+if [ -n "${WIN_CODE:-}" ]; then printf 'Verification code: '; read -r c; echo; [ "$c" = "$WIN_CODE" ] || { echo "Permission denied (publickey)."; exit 255; }; fi
 echo "elevated-ssh: $*"; exit 5
 EOF
 cat >"$T/winrunas" <<'EOF'
@@ -170,24 +173,56 @@ EOF
 chmod +x "$T/winssh" "$T/winrunas"
 sec=$(( $(date +%s) % 30 )); [ $sec -ge 25 ] && sleep $(( 32 - sec ))
 CODE=$(MFA_NO_VAULT=1 MFA_TOKENS="$T/ltokens.json" python3 "$GET" "$LH" "$LU")
-wenv() { MFA_PLATFORM=windows MFA_SSH="$T/winssh" MFA_RUNAS_CLIENT="$T/winrunas" MFA_NO_VAULT=1 MFA_TOKENS="$T/ltokens.json" "$@"; }
+wenv() { MFA_PLATFORM=windows MFA_SSH="$T/winssh" MFA_RUNAS_CLIENT="$T/winrunas" MFA_NO_VAULT=1 MFA_TOKENS="$T/ltokens.json" MFA_NETRC="$T/lnetrc" "$@"; }
 out=$(MFA_ADMIN_CMD=true wenv "$T/bin/sudo-mfa" --local echo "already admin" </dev/null 2>&1); rc=$?
-eq "windows, admin: runs it directly (no code asked)" "already admin" "$out"; eq "windows, admin: status 0" 0 "$rc"
+eq "windows, admin: runs it directly (no code needed)" "already admin" "$out"; eq "windows, admin: status 0" 0 "$rc"
 out=$(MFA_ADMIN_CMD=true wenv "$T/bin/sudo-mfa" --local -i "exit 4" </dev/null 2>&1); rc=$?; eq "windows, admin: leading options dropped, status passed on" 4 "$rc"
-out=$(echo "$CODE" | MFA_ADMIN_CMD=false wenv "$T/bin/sudo-mfa" --local -i net user 2>&1); rc=$?
-has "windows, not admin: ssh localhost after a good code" "elevated-ssh: localhost net user" "$out"; eq "windows, not admin: status of the elevated command" 5 "$rc"
-out=$(echo "$CODE" | MFA_ADMIN_CMD=false wenv "$T/bin/sudo-gui" notepad.exe C:/x.txt 2>&1); rc=$?
+out=$(MFA_ADMIN_CMD=false wenv "$T/bin/sudo-mfa" --local -i net user </dev/null 2>&1); rc=$?
+has "windows, not admin: the vault gives the code by itself, then ssh localhost" "elevated-ssh: localhost net user" "$out"; eq "windows, not admin: status of the elevated command" 5 "$rc"
+out=$(MFA_ADMIN_CMD=false wenv "$T/bin/sudo-gui" notepad.exe C:/x.txt </dev/null 2>&1); rc=$?
 has "windows, not admin, sudo-gui: RunAsAdminClient" "elevated-gui: notepad.exe C:/x.txt" "$out"; eq "windows gui: status" 8 "$rc"
-out=$(echo "$CODE" | MFA_ADMIN_CMD=false wenv "$T/bin/sudo-mfa" --gui regedit </dev/stdin 2>&1); has "windows, --gui flag" "elevated-gui: regedit" "$out"
-out=$(printf '000000\n000000\n000000\n' | MFA_ADMIN_CMD=false wenv "$T/bin/sudo-mfa" --local net user 2>&1); rc=$?
-has "windows, wrong code 3 times: nothing is run" "code rejected 3 times" "$out"; eq "windows, wrong code: status 1" 1 "$rc"
-case "$out" in *elevated-ssh*) bad "windows, wrong code ran the command" "$out";; *) ok;; esac
-out=$(echo "$CODE" | MFA_ADMIN_CMD=false wenv env MFA_TOKENS="$T/tokens.json" "$T/bin/sudo-mfa" --local net user 2>&1); rc=$?
-has "windows, no seed for this machine: says how to make one" "mfa-seed" "$out"; eq "windows, no seed: status 1" 1 "$rc"
-out=$(MFA_NO_CODE=1 MFA_ADMIN_CMD=false wenv "$T/bin/sudo-mfa" --local net user </dev/null 2>&1); has "windows, MFA_NO_CODE=1 skips the check" "elevated-ssh: localhost net user" "$out"
+out=$(MFA_ADMIN_CMD=false wenv "$T/bin/sudo-mfa" --gui regedit </dev/null 2>&1); has "windows, --gui flag" "elevated-gui: regedit" "$out"
+out=$(MFA_ADMIN_CMD=false wenv env MFA_TOKENS="$T/tokens.json" "$T/bin/sudo-mfa" --local net user </dev/null 2>&1); rc=$?
+has "windows, no seed for this machine: nothing runs, says how to make one" "mfa-seed" "$out"; eq "windows, no seed: status 1" 1 "$rc"
+case "$out" in *elevated-ssh*) bad "windows, no seed: the command ran" "$out";; *) ok;; esac
+out=$(MFA_ADMIN_CMD=false wenv env MFA_TOKENS="$T/tokens.json" MFA_NO_CODE=1 "$T/bin/sudo-mfa" --local net user </dev/null 2>&1); has "windows, MFA_NO_CODE=1 skips the gate" "elevated-ssh: localhost net user" "$out"
 out=$(MFA_NO_CODE=1 MFA_ADMIN_CMD=false wenv "$T/bin/sudo-mfa" --local </dev/null 2>&1); has "windows, no command: plain ssh localhost (a shell)" "elevated-ssh: localhost" "$out"
 out=$(MFA_NO_CODE=1 MFA_ADMIN_CMD=false wenv "$T/bin/sudo-mfa" --gui </dev/null 2>&1); rc=$?; eq "windows --gui with no command is a usage error" 2 "$rc"
-out=$(echo "$CODE" | MFA_ADMIN_CMD=false wenv "$T/bin/sudo-mfa" "$LH" net user 2>&1); has "windows, this machine's own name as host" "elevated-ssh: localhost net user" "$out"
+out=$(MFA_ADMIN_CMD=false wenv "$T/bin/sudo-mfa" "$LH" net user </dev/null 2>&1); has "windows, this machine's own name as host" "elevated-ssh: localhost net user" "$out"
+out=$(WIN_CODE="$CODE" MFA_ADMIN_CMD=false wenv "$T/bin/sudo-mfa" --local net user </dev/null 2>&1); rc=$?
+has "windows: a code prompt from ssh localhost is answered from the vault" "elevated-ssh: localhost net user" "$out"; eq "windows, code prompt: status" 5 "$rc"
+out=$(WIN_PW=localpw MFA_ADMIN_CMD=false wenv "$T/bin/sudo-mfa" --local net user </dev/null 2>&1); rc=$?     # allowlist secret
+has "windows: a password prompt from ssh localhost is answered from ~/.netrc" "elevated-ssh: localhost net user" "$out"; eq "windows, password prompt: status" 5 "$rc"   # allowlist secret
+# a locked vault is told apart from a missing seed (get_mfa_code exit 4), and without a terminal nothing is asked
+cat >"$T/lockedauth" <<'EOF'
+#!/bin/bash
+exit 4
+EOF
+chmod +x "$T/lockedauth"
+MFA_AUTH="$T/lockedauth" MFA_NO_VAULT= MFA_TOKENS="$T/none.json" python3 "$GET" "$LH" "$LU" >/dev/null 2>&1; eq "get_mfa_code: locked vault exits 4" 4 $?
+out=$(MFA_ADMIN_CMD=false wenv env MFA_NO_VAULT= MFA_AUTH="$T/lockedauth" MFA_TOKENS="$T/none.json" "$T/bin/sudo-mfa" --local net user </dev/null 2>&1); rc=$?
+has "windows, locked vault, no terminal: refuses, nothing runs" "vault is locked" "$out"; eq "windows, locked vault: status 1" 1 "$rc"
+
+# with a terminal: a missing ~/.netrc entry is asked for, and once it has worked it can be saved (driven through a pty)
+: >"$T/emptynetrc"; chmod 600 "$T/emptynetrc"
+cat >"$T/drive.exp" <<'EOF'
+set timeout 30
+spawn $env(NL) sudo --local id
+expect "not shown):"
+send "localpw\r"
+expect -re {Save it in}
+send "y\r"
+expect eof
+catch wait r
+puts "\nEXIT=[lindex $r 3]"
+EOF
+out=$(NL="$here/net-login" MFA_PLATFORM=unix MFA_SUDO="$T/fakesudo" MFA_NETRC="$T/emptynetrc" MFA_TOKENS="$T/ltokens.json" FAKE_TOKENS="$T/ltokens.json" expect "$T/drive.exp" 2>&1)
+has "with a terminal: asks for the missing password" "no entry for $LH" "$out"
+has "with a terminal: the sudo then works with it" "local-sudo-ok: id" "$out"
+has "with a terminal: offers to save, and does" "saved in" "$out"
+case $(cat "$T/emptynetrc") in *"machine $LH login $LU password "*) ok;; *) bad "saved netrc line" "$(sed 's/password .*/password <hidden>/' "$T/emptynetrc")";; esac
+[[ $(stat -c %a "$T/emptynetrc") =~ ^[67]00$ ]] && ok || bad "saved netrc is private (no group/other access)"
+ls "$T"/BAK/emptynetrc.* >/dev/null 2>&1 && ok || bad "the old netrc was backed up"
 
 # ---- telnet mode --------------------------------------------------------------------------------------------------------
 out=$( (sleep 5) | "$T/bin/telnet-netrc" vax.example.org 2323 2>&1 ); has "telnet-netrc: logged in with a quoted password" "logged-in-as system" "$out"

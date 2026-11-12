@@ -16,11 +16,20 @@ exec expect -f "$0" -- ${1+"$@"}
 #                                             Already root here: no prompts to answer, so it just runs the command (or sudo
 #                                             with the same arguments if they start with an option) with no expect layer.
 #   sudo-mfa --local on Windows (Cygwin)      there is no sudo: elevate with what Windows has.  Already administrator: run the
-#                                             command (bash -c).  Otherwise ask for a one-time code (typed by you, checked against the
-#                                             vault seed for this machine: a soft check, see the README), then
-#                                               terminal:  ssh localhost COMMAND         (the elevated shell, as the old sudo function did)
+#                                             command (bash -c).  Otherwise the vault must give a code for this machine (nothing is
+#                                             typed: a soft gate that needs the vault unlocked and a seed made by mfa-seed), then
+#                                               terminal:  ssh localhost COMMAND         (the elevated shell, as the old sudo function did;
+#                                                          any password or code prompt it shows is answered like in the other modes)
 #                                               GUI:       RunAsAdminClient.exe COMMAND  (--gui, or the name sudo-gui)
-#                                             Leading options (-i, -u ...) are dropped, as the old function did.  MFA_NO_CODE=1 skips the code.
+#                                             Leading options (-i, -u ...) are dropped, as the old function did.  MFA_NO_CODE=1 skips the gate.
+#
+# Doing it for you, in every mode: the password comes from ~/.netrc, the one-time code from the vault (get_mfa_code.py).  When
+# someone is at the terminal and something is missing it asks, and fixes it:
+#   - the vault is locked        -> runs  ssh -t cpbee auth unlock  (you type the passphrase), then carries on
+#   - no code seed for the host  -> offers to run  mfa-seed HOST USER  (makes the seed, shows it for a phone app)
+#   - no ~/.netrc entry          -> asks for the password (not shown) and, once it has worked, offers to save it in ~/.netrc
+#                                   (mode 600, old file kept in ~/BAK, 3 newest)
+# MFA_NO_PROMPT=1 turns all of that off (cron, scripts): it then fails with a clear message instead.
 #   telnet-netrc [HOST [PORT]]                telnet; answers "login:"/"Username:" and "Password:" from ~/.netrc
 #
 # Any name that starts with ssh-, sudo- or telnet- works.  A name that goes on with a label other than mfa or netrc is a
@@ -54,7 +63,7 @@ exec expect -f "$0" -- ${1+"$@"}
 #   MFA_MODE interactive|command   MFA_READY (regex)   MFA_USER (whose code, if not in the host or alias)
 #   MFA_PASSWORD_PROMPT (regex for the sudo prompt that asks for the password)   MFA_TELNET_TIMEOUT (120)
 #   MFA_SUDO (sudo; the local sudo to run)   MFA_LOCAL (1 = sudo mode runs sudo here, as --local)
-#   MFA_UID (the user id to treat as "already root" if it is 0; default: id -u)
+#   MFA_UID (the user id to treat as "already root" if it is 0; default: id -u)   MFA_NO_PROMPT (1: never ask)   AUTH_HOST (cpbee)
 #   Windows: MFA_PLATFORM (windows|unix, to override detection)   MFA_ADMIN_CMD (net session: succeeds when elevated)
 #            MFA_RUNAS_CLIENT (/dos/RunAsAdminClient.exe)   MFA_NO_CODE (1: no code check)
 
@@ -66,6 +75,7 @@ proc env_or {names default} {
 }
 
 set me          [file tail [info script]]
+set ::env(MFA_NAME) $me
 set quiet       [env_or {MFA_QUIET SSH_WWL_QUIET} 0]
 
 proc info_line {msg} {
@@ -149,21 +159,133 @@ proc real_path {p} {
     }
     return $p
 }
+set real_dir [file dirname [real_path [info script]]]
 set getcode [env_or MFA_GETCODE ""]
 if {$getcode eq ""} {
-    set side [file join [file dirname [real_path [info script]]] get_mfa_code.py]
+    set side [file join $real_dir get_mfa_code.py]
     set getcode [expr {[file exists $side] ? $side : "get_mfa_code.py"}]
 }
 
-# a fresh code for HOST (and USER): the answer must end in six digits
+# a fresh code for HOST (and USER): the answer must end in six digits.  code_rc: why there was none (4 = the vault is locked, 1 = no seed)
+set code_rc 0
 proc get_code {host user} {
-    global getcode
+    global getcode code_rc
+    set code_rc 0
     set cmd [list $getcode $host]
     if {$user ne ""} { lappend cmd $user }
-    if {![catch {exec {*}$cmd 2>/dev/null} out] && [regexp {(^|\n)\d{6}\s*$} $out]} {
-        return [lindex [split [string trim $out] "\n"] end]
+    if {![catch {exec {*}$cmd 2>/dev/null} out]} {
+        if {[regexp {(^|\n)\d{6}\s*$} $out]} { return [lindex [split [string trim $out] "\n"] end] }
+        set code_rc 1
+    } else {
+        set code_rc [expr {[lindex $::errorCode 0] eq "CHILDSTATUS" ? [lindex $::errorCode 2] : 1}]
     }
     return ""
+}
+
+proc this_host {} {
+    if {![catch {exec hostname -s} h] && $h ne ""} { return $h }
+    return [lindex [split [info hostname] .] 0]
+}
+
+# is a person at the terminal who can be asked things?
+proc can_prompt {} {
+    if {[env_or MFA_NO_PROMPT 0] eq "1"} { return 0 }
+    return [expr {![catch {exec tty -s <@stdin}]}]
+}
+
+# read one line from the terminal; hidden = no echo
+proc ask {prompt {hidden 0}} {
+    send_user $prompt
+    flush stdout
+    if {$hidden} { catch {exec stty -echo <@stdin} }
+    set got [gets stdin line]
+    if {$hidden} { catch {exec stty echo <@stdin}; send_user "\n" }
+    if {$got < 0} { return "" }
+    return [string trim $line "\r\n"]
+}
+
+proc unlock_vault {} {
+    set h [env_or AUTH_HOST cpbee]
+    send_user "[env_or MFA_NAME net-login]: the vault is locked; unlocking it now (type the vault passphrase)\n"
+    if {[this_host] eq $h} { set cmd [list [env_or MFA_AUTH auth] unlock] } else { set cmd [list ssh -t $h auth unlock] }
+    return [expr {![catch {exec {*}$cmd <@stdin >@stdout 2>@stderr}]}]
+}
+
+# the one-time code for HOST/USER from the vault.  If there is none and someone is at the terminal: unlock a locked vault, or
+# offer to make the seed.  Returns "" when there is still none.
+proc fetch_code {host user} {
+    global code_rc real_dir
+    set unlocked 0
+    set offered 0
+    while {1} {
+        set c [get_code $host $user]
+        if {$c ne ""} { return $c }
+        if {![can_prompt]} { return "" }
+        if {$code_rc == 4 && !$unlocked} {
+            set unlocked 1
+            if {[unlock_vault]} continue
+            return ""
+        }
+        if {$code_rc == 1 && !$offered} {
+            set offered 1
+            set seedtool [file join $real_dir mfa-seed]
+            if {![file exists $seedtool]} { set seedtool mfa-seed }
+            set a [ask "There is no one-time-code seed for $host/$user.  Make one now with mfa-seed (you add it to a phone app)? \[Y/n\] "]
+            if {[regexp {^[Nn]} $a]} { return "" }
+            if {![catch {exec $seedtool $host $user <@stdin >@stdout 2>@stderr}]} continue
+            return ""
+        }
+        return ""
+    }
+}
+
+# the password for one of HOSTS (and USER): ~/.netrc, else ask (when someone is at the terminal) and remember to offer to save it
+set save_pending {}
+proc get_password {hosts user} {
+    global save_pending
+    foreach h $hosts {
+        set cred [netrc_lookup $h $user]
+        if {$cred eq ""} { set cred [netrc_lookup $h] }
+        if {$cred ne ""} { return [lindex $cred 1] }
+    }
+    set h [lindex $hosts 0]
+    if {![can_prompt]} { fail "no entry for $h in [env_or {MFA_NETRC NETRC} ~/.netrc] (machine $h login USER password SECRET)" } ;# allowlist secret
+    send_user "[env_or MFA_NAME net-login]: ~/.netrc has no entry for $h.\n"
+    set pw [ask "password for $user on $h (not shown): " 1]
+    if {$pw eq ""} { fail "no password given" } ;# allowlist secret
+    set save_pending [list $h $user $pw]
+    return $pw
+}
+
+# once a password has worked: offer to keep it in ~/.netrc (backup first, 3 newest kept, mode 600)
+proc offer_save_netrc {} {
+    global save_pending
+    if {$save_pending eq ""} return
+    lassign $save_pending h u pw
+    set save_pending {}
+    set a [ask "Save it in ~/.netrc so it is answered from now on? \[Y/n\] "]
+    if {[regexp {^[Nn]} $a]} { send_user "not saved (used for this run only)\n"; return }
+    set f [file normalize [env_or {MFA_NETRC NETRC} ~/.netrc]]
+    set stamp [clock format [clock seconds] -format %Y%m%d-%H%M%S]
+    if {[file exists $f]} {
+        set bakdir [file join [file dirname $f] BAK]
+        file mkdir $bakdir
+        set bak [file join $bakdir "[file tail $f].$stamp"]
+        file copy -force $f $bak
+        set olds [lsort -decreasing -command {apply {{a b} {expr {[file mtime $a] - [file mtime $b]}}}} [glob -nocomplain -directory $bakdir "[file tail $f].*"]]
+        foreach old [lrange $olds 3 end] { file delete $old }
+        send_user "backup of the old file: $bak\n"
+    }
+    set fh [open $f a]
+    if {[file size $f] > 0} {
+        set rd [open $f r]; seek $rd -1 end; set last [read $rd 1]; close $rd
+        if {$last ne "\n"} { puts $fh "" }
+    }
+    regsub -all {[\\"]} $pw {\\&} esc
+    puts $fh "machine $h login $u password \"$esc\"" ;# allowlist secret
+    close $fh
+    catch {exec chmod 600 $f}
+    send_user "saved in $f\n"
 }
 
 proc give_up {msg} {
@@ -195,7 +317,7 @@ proc first_word_index {words} {
 # returns {login password} for HOST (exact, then the short name, then "default"); LOGIN, if given, picks among several
 proc netrc_lookup {host {want_login ""}} {
     set f [env_or {MFA_NETRC NETRC} ~/.netrc]
-    if {[catch {open $f r} fh]} { fail "cannot read $f: no logins for $host" }
+    if {[catch {open $f r} fh]} { return {} }
     set text [read $fh]
     close $fh
     if {![catch {file attributes $f -permissions} perm] && ($perm & 0077) && $::tcl_platform(platform) eq "unix"} {
@@ -281,7 +403,16 @@ if {$mode eq "telnet"} {
     }
     if {[llength $words] > 0} { set port [lindex $words 0] }
     set cred [netrc_lookup $host]
-    if {$cred eq ""} { fail "no entry for $host in [env_or {MFA_NETRC NETRC} ~/.netrc]" }
+    if {$cred eq ""} {
+        if {![can_prompt]} { fail "no entry for $host in [env_or {MFA_NETRC NETRC} ~/.netrc]" }
+        send_user "$me: ~/.netrc has no entry for $host.\n"
+        set tl [ask "login on $host: "]
+        if {$tl eq ""} { fail "no login given" }
+        set tp [ask "password for $tl on $host (not shown): " 1]
+        if {$tp eq ""} { fail "no password given" } ;# allowlist secret
+        set cred [list $tl $tp]
+        set save_pending [list $host $tl $tp]
+    }
     lassign $cred login pw
     if {$login eq ""} { fail "the ~/.netrc entry for $host has no login" }
     set timeout $ttimeout
@@ -304,8 +435,10 @@ if {$mode eq "telnet"} {
     # let the post-login banner or prompt print before handing over; host specific (VMS, Linux, ...), so never fatal
     set timeout 5
     expect {
-        -re {(?i)welcome|last (interactive )?login|[$#>] ?$|incorrect|failure|invalid} { }
-        timeout { }
+        -re {(?i)welcome|last (interactive )?login|[$#>] ?$|incorrect|failure|invalid} {
+            if {![regexp -nocase {incorrect|failure|invalid} $expect_out(0,string)]} { offer_save_netrc }
+        }
+        timeout { offer_save_netrc }
         eof     { catch {wait}; exit 0 }
     }
     catch {
@@ -333,28 +466,6 @@ proc run_through {cmd} {
     exit 0
 }
 
-# Windows only: ask for a one-time code and check it against the seed in the vault (up to 3 tries)
-proc check_code {host user} {
-    global getcode me
-    for {set n 0} {$n < 3} {incr n} {
-        send_user "Verification code: "
-        flush stdout
-        set istty [expr {![catch {exec tty -s <@stdin}]}]
-        if {$istty} { catch {exec stty -echo <@stdin} }
-        set got [gets stdin code]
-        if {$istty} { catch {exec stty echo <@stdin} }
-        send_user "\n"
-        if {$got < 0} { fail "no code given (is there a terminal?)" }
-        set cmd [list $getcode --verify [string trim $code] $host]
-        if {$user ne ""} { lappend cmd $user }
-        if {![catch {exec {*}$cmd 2>/dev/null}]} { return }
-        set rc 1
-        if {[lindex $::errorCode 0] eq "CHILDSTATUS"} { set rc [lindex $::errorCode 2] }
-        if {$rc == 3} { fail "no code seed for $host/$user in the vault (make one: mfa-seed $host $user); MFA_NO_CODE=1 skips the check" }
-    }
-    fail "code rejected 3 times"
-}
-
 # does the sudo argument list contain a command to run (as opposed to only options such as -i or -u bob)?
 proc sudo_is_command {words} {
     set valopts {-u -g -h -p -C -U -r -t -T -D -R}
@@ -370,11 +481,6 @@ proc sudo_is_command {words} {
         return 1
     }
     return 0
-}
-
-proc this_host {} {
-    if {![catch {exec hostname -s} h] && $h ne ""} { return $h }
-    return [lindex [split [info hostname] .] 0]
 }
 
 # ---- ssh and sudo -----------------------------------------------------------------------------------------------------
@@ -417,7 +523,8 @@ for {set i 0} {$i < [llength $pre]} {incr i} {
     if {[lindex $pre $i] eq "-l" && $i + 1 < [llength $pre]} { set user [lindex $pre [expr {$i + 1}]] }
 }
 
-# Windows (Cygwin): no sudo; elevate with ssh localhost (terminal) or RunAsAdminClient.exe (GUI), after a soft code check
+# Windows (Cygwin): no sudo; elevate with ssh localhost (terminal) or RunAsAdminClient.exe (GUI), once the vault has given a code
+set winssh 0
 set platform [env_or MFA_PLATFORM [expr {[regexp {^(CYGWIN|MSYS|MINGW)} $::tcl_platform(os)] ? "windows" : "unix"}]]
 if {$mode eq "sudo" && $local && $platform eq "windows"} {
     set words $post
@@ -428,16 +535,20 @@ if {$mode eq "sudo" && $local && $platform eq "windows"} {
         if {[llength $words]} { run_through [list bash -c [join $words " "]] } else { run_through [list bash -l] }
     }
     if {$gui && ![llength $words]} { send_user "usage: $me --gui COMMAND \[ARGS\]\n"; exit 2 }
-    if {[env_or MFA_NO_CODE 0] ne "1"} { check_code $host $user }
+    # the gate: the vault must give a code for this machine (unlocking it / offering mfa-seed if someone is here to ask)
+    if {[env_or MFA_NO_CODE 0] ne "1"} {
+        if {[fetch_code $host $user] eq ""} {
+            fail "no one-time code available for $host/$user: the vault is locked or has no seed (mfa-seed $host $user; MFA_NO_CODE=1 skips this check)"
+        }
+    }
     if {$gui} {
         run_through [concat [env_or MFA_RUNAS_CLIENT /dos/RunAsAdminClient.exe] $words]
-    } else {
-        run_through [concat [env_or {MFA_SSH SSH_WWL_SSH} ssh] localhost $words]
     }
+    set winssh 1
 }
 
 # already root on this machine: nothing to answer, so run the command itself (no spawn, no netrc, no code)
-if {$mode eq "sudo" && $local} {
+if {$mode eq "sudo" && $local && !$winssh} {
     if {[catch {exec id -u} myuid]} { set myuid -1 }
     if {[env_or MFA_UID $myuid] eq "0"} {
         if {[llength $post] && ![string match -* [lindex $post 0]]} {
@@ -449,20 +560,31 @@ if {$mode eq "sudo" && $local} {
     }
 }
 
+set sudo_pw ""
+set pw_hosts [list $host]
 if {$mode eq "sudo"} {
     set sudoargs [expr {[llength $post] ? $post : {-i}}]
-    if {$local} {
-        set cmdline [concat [env_or MFA_SUDO sudo] $sudoargs]
+    if {$winssh} {
+        # Windows terminal elevation: ssh localhost COMMAND; its prompts (password, code), if any, are answered like the others
+        set cmdline [concat $ssh localhost $words]
+        set cmdmode [expr {[llength $words] > 0}]
+        set pw_prompt [env_or MFA_PASSWORD_PROMPT {[Pp]assword[^\r\n:]*: ?$}]
+        set pw_hosts [list localhost $host]
     } else {
-        set cmdline [concat $ssh -t $pre [list $hostspec sudo] $sudoargs]
+        if {$local} {
+            set cmdline [concat [env_or MFA_SUDO sudo] $sudoargs]
+        } else {
+            set cmdline [concat $ssh -t $pre [list $hostspec sudo] $sudoargs]
+        }
+        set cmdmode [sudo_is_command $post]
     }
-    set cmdmode [sudo_is_command $post]
-    # sudo prompts for the login of the account on the host; the netrc entry is looked up by host (and that login)
-    set cred [netrc_lookup $host $user]
-    if {$cred eq ""} { set cred [netrc_lookup $host] }
-    if {$cred eq ""} { fail "no entry for $host in [env_or {MFA_NETRC NETRC} ~/.netrc] (machine $host login USER password SECRET)" } ;# allowlist secret
-    set sudo_pw [lindex $cred 1]
-    if {$user eq ""} { set user [lindex $cred 0] }
+    # sudo prompts for the login of the account on the host; the netrc entry is looked up by host (and that login).  A missing
+    # entry is not an error yet: it is asked for if a password prompt actually comes.  allowlist secret
+    foreach h $pw_hosts {
+        set cred [netrc_lookup $h $user]
+        if {$cred eq ""} { set cred [netrc_lookup $h] }
+        if {$cred ne ""} { set sudo_pw [lindex $cred 1]; if {$user eq ""} { set user [lindex $cred 0] }; break }
+    }
 } else {
     set cmdline [concat $ssh $pre [list $hostspec] $post]
     set cmdmode [expr {[llength $post] > 0}]
@@ -490,7 +612,7 @@ set timeout   $login_timeout
 # the next code to send: never the one already spent
 proc next_code {} {
     global host user last_code
-    set code [get_code $host $user]
+    set code [fetch_code $host $user]
     if {$code ne "" && $code eq $last_code} {
         # the same code again: it is spent; wait for the next 30 s period
         set wait_s [expr {30 - [clock seconds] % 30 + 1}]
@@ -517,6 +639,7 @@ expect {
     -re $pw_prompt {
         if {$mode ne "sudo"} { exp_continue }
         if {$last_sent eq "pw"} { give_up "sudo password rejected" } ;# allowlist secret
+        if {$sudo_pw eq ""} { set sudo_pw [get_password $pw_hosts $user] }
         set last_sent pw
         send -- "$sudo_pw\r"
         if {$phase eq "login"} { set timeout $grace }
@@ -550,6 +673,9 @@ expect {
         set closed 1
     }
 }
+
+# the login worked: if a password was asked for, offer to keep it
+offer_save_netrc
 
 # keep the remote terminal size in step with this window (only when there is a terminal)
 catch {

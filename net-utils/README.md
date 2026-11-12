@@ -146,23 +146,38 @@ vault (needs the vault unlocked), not the service tier. `sudo-mfa` only helps if
 [sudo needs a code on cpbee](#sudo-needs-a-code-on-cpbee). Tests: `bash net-utils/test/test_net_login.sh` (a fake ssh
 and telnet; needs `expect`).
 
+### Doing it for you: password, code, vault
+
+In every mode and on every platform, `net-login` does the password, one-time-code and vault steps itself: the password comes
+from `~/.netrc`, the code from the vault (`get_mfa_code.py`). When someone is at the terminal and something is missing, it asks
+and fixes it instead of failing:
+
+| missing | what it does |
+|---|---|
+| the vault is locked | runs `ssh -t cpbee auth unlock` (you type the passphrase), then carries on |
+| no code seed for the host | offers `mfa-seed HOST USER` (makes the seed, shows it once for a phone app) |
+| no `~/.netrc` entry | asks for the password (not shown); once it has worked it offers to save it in `~/.netrc` (mode 600; the old file goes to `~/BAK`, 3 newest kept). `telnet-netrc` asks for the login too |
+
+`MFA_NO_PROMPT=1` (cron, scripts) turns all asking off: it then fails with a clear message.
+
 ### Windows (Cygwin): elevation instead of sudo
 
 Cygwin has no `sudo`, so on Windows `sudo-mfa --local` (and `sudo-local`, `sudo-gui`) elevate with what Windows offers. It
 replaces the two helpers that were in `~/.bashrc` (a `sudo` function and the `sudo2` alias):
 
-1. **Already an administrator** (`net session` succeeds): no code, the command just runs (`bash -c`, like the old `eval`).
-2. Otherwise it asks **Verification code:** (typed by you, not shown) and checks it against the seed for this machine in the vault
-   (`get_mfa_code.py --verify`); three tries.
-3. Then **terminal**: `ssh localhost COMMAND` (an elevated shell; no command gives you that shell), or **GUI**
-   (`sudo-gui`, `sudo-mfa --gui`): `RunAsAdminClient.exe COMMAND`.
+1. **Already an administrator** (`net session` succeeds): the command just runs (`bash -c`, like the old `eval`). Nothing is asked.
+2. Otherwise **the vault must give a code for this machine** (the gate; nothing is typed). A locked vault is unlocked, and a
+   missing seed is offered, as in the table above.
+3. Then **terminal**: `ssh localhost COMMAND` (an elevated shell; no command gives you that shell). Any password or code prompt
+   it shows is answered like in the other modes. Or **GUI** (`sudo-gui`, `sudo-mfa --gui`): `RunAsAdminClient.exe COMMAND`.
 
-Leading options (`-i`, `-u x`, ...) are dropped, as the old function did. Make the seed once with `mfa-seed cmlaptop` (vault
-unlocked; add the seed to a phone app and type the first code). `MFA_NO_CODE=1` skips the check for scripts.
+Leading options (`-i`, `-u x`, ...) are dropped, as the old function did. Make the seed once with `mfa-seed cmlaptop` (it
+is also offered the first time). `MFA_NO_CODE=1` skips the gate for scripts.
 
-**This code check is a speed bump, not a barrier.** Any process running as you can call `ssh localhost` or
-`RunAsAdminClient.exe` directly and be elevated without a code. It stops mistakes and shoulder-surfing, not malware. A real barrier
-would need the localhost ssh path and the RunAsAdmin server (whose named pipe is open to Everyone) to demand the code themselves.
+**The gate is a speed bump, not a barrier.** It needs the vault unlocked, which needs your passphrase within the last 6 hours, so
+a stranger at an idle session cannot elevate. But any process running as you can call `ssh localhost` or
+`RunAsAdminClient.exe` directly and be elevated without a code; it stops mistakes and casual use, not malware. A real barrier
+would need the localhost ssh path and the RunAsAdmin server (see `Windows/RunAsAdmin`) to demand the code themselves.
 
 ## sudo needs a code on cpbee
 

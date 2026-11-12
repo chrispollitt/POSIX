@@ -21,7 +21,8 @@ Options
 Environment: MFA_AUTH (the auth tool; default `auth` on PATH, else next to this script), MFA_TOKENS (token file),
 MFA_NO_VAULT.
 
-Output: the code and a newline on stdout.  Exit 0 on success, 1 if no secret is found, 2 on bad usage.  The secret is
+Output: the code and a newline on stdout.  Exit 0 on success, 1 if no secret is found, 2 on bad usage, 4 if the vault is
+locked (and no token file has the secret), so a caller can unlock it and ask again.  The secret is
 never printed, not even in an error.
 """
 import base64
@@ -36,6 +37,7 @@ import sys
 import time
 
 HERE = os.path.dirname(os.path.realpath(__file__))
+VAULT = {"rc": None}            # exit status of the last `auth totp` (4 = the vault is locked)
 
 
 def totp(secret, now=None, digits=6, step=30):
@@ -63,8 +65,10 @@ def from_vault(host, user, digits):
         r = subprocess.run(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                            timeout=15, universal_newlines=True)
     except (OSError, subprocess.TimeoutExpired):
+        VAULT["rc"] = None
         return None
     out = r.stdout.strip().splitlines()
+    VAULT["rc"] = r.returncode
     if r.returncode == 0 and out and re.fullmatch(r"\d{%d}" % digits, out[-1].strip()):
         return out[-1].strip()
     return None
@@ -176,6 +180,9 @@ def main(argv):
         return 0 if ok else 1
     if verify is not None and not sec:
         return 3
+    if not sec and VAULT["rc"] == 4:
+        print("get_mfa_code: the vault is locked (ssh -t cpbee auth unlock)", file=sys.stderr)
+        return 4
     if sec:
         try:
             print(totp(sec, digits=digits))
