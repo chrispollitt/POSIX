@@ -188,7 +188,9 @@ auth totp cpbee chris                # the current code (vault unlocked)
 `sudo-mfa` reads the password from `~/.netrc` (`machine cpbee login chris password ...`) and the code from
 `get_mfa_code.py` (vault first). Run **on cpbee** it needs both there: a `machine cpbee ...` line in cpbee's own
 `~/.netrc`, and the vault unlocked (`auth totp cpbee chris` works directly on cpbee). The local mode takes the host
-name from `hostname -s` and the login from `id -un`, and runs `sudo` itself (`MFA_SUDO` to name another). To run several root commands, use one shell or one `sh -c '...'`: a second
+name from `hostname -s` and the login from `id -un`, and runs `sudo` itself (`MFA_SUDO` to name another). If you are
+already root, there is nothing to answer: `sudo-mfa --local CMD ...` just runs the command (and `sudo-mfa --local -u bob CMD`
+or no arguments runs plain `sudo` with them), with no `~/.netrc` line and no code needed. To run several root commands, use one shell or one `sh -c '...'`: a second
 `sudo-mfa` within the same 30 seconds has to wait for the next code, because each code works once.
 
 **How long things last (cpbee, 6 hours on purpose, like the webhost's login state).**

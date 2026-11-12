@@ -27,6 +27,7 @@ EOF
 )
 eq "RFC 6238 vectors" "94287082 07081804
 287082" "$v"
+sec=$(( $(date +%s) % 30 )); [ $sec -ge 25 ] && sleep $(( 32 - sec ))     # keep the comparisons inside one 30 s code period
 c1=$(MFA_NO_VAULT=1 MFA_TOKENS="$T/tokens.json" python3 "$GET" boxhost alice); [[ $c1 =~ ^[0-9]{6}$ ]] && ok || bad "host+user shape gives 6 digits: $c1"
 c2=$(MFA_NO_VAULT=1 MFA_TOKENS="$T/tokens.json" python3 "$GET" boxhost chris); eq "host shape, other user" "$c1" "$c2"
 c3=$(MFA_NO_VAULT=1 MFA_TOKENS="$T/tokens.json" python3 "$GET" shared.example.org); eq "host-keyed string" "$c1" "$c3"
@@ -140,6 +141,21 @@ out=$(FAKE_LPW=other lenv "$T/bin/sudo-mfa" --local id </dev/null 2>&1); rc=$?
 has "sudo-mfa --local: wrong password stops" "sudo password rejected" "$out"; eq "sudo-mfa --local: wrong password status" 1 "$rc"   # allowlist secret
 out=$(MFA_NETRC="$T/lnetrc3" MFA_SUDO="$T/fakesudo" "$T/bin/sudo-mfa" --local id </dev/null 2>&1); rc=$?
 has "sudo-mfa --local: no netrc entry for this machine" "no entry for $LH" "$out"; eq "sudo-mfa --local: no entry status" 1 "$rc"
+
+# already root: no prompts, the command is simply run (fake MFA_UID=0; no netrc and no tokens needed)
+cat >"$T/rootsudo" <<'EOF'
+#!/bin/bash
+echo "root-direct-sudo: $*"; exit 6
+EOF
+chmod +x "$T/rootsudo"
+out=$(MFA_UID=0 MFA_NETRC="$T/missing" "$T/bin/sudo-mfa" --local echo hello root </dev/null 2>&1); rc=$?
+eq "root, local: command run directly" "hello root" "$out"; eq "root, local: status 0" 0 "$rc"
+out=$(MFA_UID=0 "$T/bin/sudo-mfa" --local sh -c 'exit 3' </dev/null 2>&1); rc=$?; eq "root, local: command's status passed on" 3 "$rc"
+out=$(MFA_UID=0 MFA_SUDO="$T/rootsudo" MFA_NETRC="$T/missing" "$T/bin/sudo-mfa" --local -u bob id </dev/null 2>&1); rc=$?
+has "root, local, sudo options: plain sudo, no expect" "root-direct-sudo: -u bob id" "$out"; eq "root, local, sudo options: status" 6 "$rc"
+out=$(MFA_UID=0 MFA_SUDO="$T/rootsudo" MFA_NETRC="$T/missing" "$T/bin/sudo-mfa" --local </dev/null 2>&1); has "root, local, no args: sudo -i" "root-direct-sudo: -i" "$out"
+out=$(MFA_UID=0 "$T/bin/sudo-mfa" --local no-such-command-xyz </dev/null 2>&1); rc=$?; eq "root, local: missing command is an error" 127 "$rc"
+out=$(MFA_UID=1000 MFA_NETRC="$T/missing" MFA_SUDO="$T/fakesudo" "$T/bin/sudo-mfa" --local echo hi </dev/null 2>&1); rc=$?; eq "not root, local: the netrc is needed again" 1 "$rc"
 
 # ---- telnet mode --------------------------------------------------------------------------------------------------------
 out=$( (sleep 5) | "$T/bin/telnet-netrc" vax.example.org 2323 2>&1 ); has "telnet-netrc: logged in with a quoted password" "logged-in-as system" "$out"

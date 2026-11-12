@@ -13,6 +13,8 @@ exec expect -f "$0" -- ${1+"$@"}
 #                                             or this machine's own name (or localhost) as the host:  sudo-mfa localhost systemctl ...
 #                                             The password comes from the ~/.netrc line for this machine's name, the code from
 #                                             get_mfa_code.py <this machine>.  Handy on cpbee itself, where `auth` is the vault.
+#                                             Already root here: no prompts to answer, so it just runs the command (or sudo
+#                                             with the same arguments if they start with an option) with no expect layer.
 #   telnet-netrc [HOST [PORT]]                telnet; answers "login:"/"Username:" and "Password:" from ~/.netrc
 #
 # Any name that starts with ssh-, sudo- or telnet- works.  A name that goes on with a label other than mfa or netrc is a
@@ -46,6 +48,7 @@ exec expect -f "$0" -- ${1+"$@"}
 #   MFA_MODE interactive|command   MFA_READY (regex)   MFA_USER (whose code, if not in the host or alias)
 #   MFA_PASSWORD_PROMPT (regex for the sudo prompt that asks for the password)   MFA_TELNET_TIMEOUT (120)
 #   MFA_SUDO (sudo; the local sudo to run)   MFA_LOCAL (1 = sudo mode runs sudo here, as --local)
+#   MFA_UID (the user id to treat as "already root" if it is 0; default: id -u)
 
 proc env_or {names default} {
     foreach n $names {
@@ -368,6 +371,24 @@ if {$local && $user eq ""} { catch {exec id -un} user }
 if {[regexp {^([^@]+)@(.+)$} $hostspec -> u h]} { set user $u; set host $h }
 for {set i 0} {$i < [llength $pre]} {incr i} {
     if {[lindex $pre $i] eq "-l" && $i + 1 < [llength $pre]} { set user [lindex $pre [expr {$i + 1}]] }
+}
+
+# already root on this machine: nothing to answer, so run the command itself (no spawn, no netrc, no code)
+if {$mode eq "sudo" && $local} {
+    if {[catch {exec id -u} myuid]} { set myuid -1 }
+    if {[env_or MFA_UID $myuid] eq "0"} {
+        if {[llength $post] && ![string match -* [lindex $post 0]]} {
+            set direct $post                                    ;# sudo-mfa --local systemctl status ssh
+        } else {
+            set direct [concat [env_or MFA_SUDO sudo] [expr {[llength $post] ? $post : {-i}}]]   ;# -i, -u bob ...: sudo needs no password for root
+        }
+        if {[catch {exec {*}$direct <@stdin >@stdout 2>@stderr} err]} {
+            if {[lindex $::errorCode 0] eq "CHILDSTATUS"} { exit [lindex $::errorCode 2] }
+            send_user "$me: $err\n"
+            exit 127
+        }
+        exit 0
+    }
 }
 
 if {$mode eq "sudo"} {
