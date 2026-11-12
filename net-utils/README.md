@@ -14,6 +14,7 @@ docstring at the top of the file. Python 3 and bash only; they run on Linux, mac
 | [lan-port](lan-port) | open, close and audit the LAN ports of cpbee |
 | [traceroute-plus.sh](traceroute-plus.sh) | traceroute that also asks each hop about itself |
 | [auth-on-cpbee.sh](auth-on-cpbee.sh) | install or update `auth` and `identity` on cpbee |
+| [cpbee-sudo-mfa-setup.sh](cpbee-sudo-mfa-setup.sh) | make `sudo` on cpbee ask for a one-time code, and turn direct root login off |
 | [USAGE.md](USAGE.md) | day-to-day use of `identity` and `auth`: unlocking, adding and changing passwords, how the tools get them |
 
 ## identity and auth together
@@ -138,9 +139,78 @@ the old `ssh-wwl`; `default-telnet cpvax` is what `telnet-netrc` uses with no ho
 `{"USER": "SECRET"}`). It needs no pip package.
 
 Secrets never go on a command line or into the output. A seed for a *second factor* belongs in the master tier of the
-vault (needs the vault unlocked), not the service tier. `sudo-mfa` only helps if the host's sudo asks for a code (PAM:
-`pam_google_authenticator`, with the seed in a root-owned file) and root ssh is off. Tests: `bash net-utils/test/test_net_login.sh`
-(a fake ssh and telnet; needs `expect`).
+vault (needs the vault unlocked), not the service tier. `sudo-mfa` only helps if the host's sudo asks for a code: see
+[sudo needs a code on cpbee](#sudo-needs-a-code-on-cpbee). Tests: `bash net-utils/test/test_net_login.sh` (a fake ssh
+and telnet; needs `expect`).
+
+## sudo needs a code on cpbee
+
+A stolen ssh key for `chris@cpbee` should not be enough to become root. So on cpbee `sudo` asks for a one-time code
+(TOTP, the kind an authenticator app shows) as well as your password, and direct root login over ssh is off. Logging in as
+`chris` is unchanged: key only, no code.
+
+**How it works.** The check is in PAM, not in a shell startup file, so it cannot be skipped by running `/usr/bin/sudo`,
+a non-interactive shell or another shell (the webhost has no PAM access, which is why it checks in `~/.bashrc`
+instead). One line in `/etc/pam.d/sudo`, after `@include common-auth`:
+
+`auth required pam_google_authenticator.so secret=/etc/google-authenticator/${USER} user=root` <!-- allowlist secret -->
+
+The seed is in `/etc/google-authenticator/chris`, owned by root, mode 400, so `chris` cannot read it. A copy is in the
+vault's **master** tier as `2fa@cpbee chris` (kind `totp`), which is what lets the laptop make the code; it is not in
+the service tier on purpose, so a job key cannot read it and the vault has to be unlocked first.
+
+**Setting it up (once).** From a terminal on the laptop, in a checkout with `net-login` and `get_mfa_code.py`:
+
+```bash
+net-utils/cpbee-sudo-mfa-setup.sh               # plan and checks only; changes nothing
+APPLY=1 net-utils/cpbee-sudo-mfa-setup.sh       # does it
+```
+
+It asks for what is missing (it unlocks the vault, asks for your sudo password and checks it before changing anything,
+and offers to save it in `~/.netrc`). Then: installs `libpam-google-authenticator`; makes the seed; backs up
+`/etc/pam.d/sudo` to `/etc/pam.d/BAK/sudo.STAMP` (3 newest kept) and adds the line; starts a root-owned 5-minute
+timer that puts the backup back **unless** step 3 confirms; runs `sudo-mfa cpbee` to prove password and code both
+work; and only then writes `PermitRootLogin no` to `/etc/ssh/sshd_config.d/20-no-root-login.conf` (`sshd -t`, reload,
+and a check that `ssh root@cpbee` is refused). Options: `KEEP_ROOT_SSH=1` stops before the root-login step,
+`DISABLE_ROOT_SSH=1` does only that step, `PHONE=1` prints an `otpauth://` line to add the seed to a phone app too.
+
+**Using it.**
+
+```bash
+sudo-mfa cpbee -i                    # a root shell; password and code are answered for you
+sudo-mfa cpbee systemctl status ssh  # one command (a new terminal each time, so a new code each time)
+ssh -t cpbee sudo ...                # by hand: type the password, then the code from the vault or an app
+auth totp cpbee chris                # the current code (vault unlocked)
+```
+
+`sudo-mfa` reads the password from `~/.netrc` (`machine cpbee login chris password ...`) and the code from
+`get_mfa_code.py` (vault first). To run several root commands, use one shell or one `sh -c '...'`: a second
+`sudo-mfa` within the same 30 seconds has to wait for the next code, because each code works once.
+
+**How long things last (cpbee, 6 hours on purpose, like the webhost's login state).**
+
+| | time | notes |
+|---|---|---|
+| the code | 30 s, and the previous and next code are accepted too; each works once; 3 tries per 30 s | `WINDOW_SIZE 3`, `DISALLOW_REUSE`, `RATE_LIMIT 3 30` in the seed file |
+| the sudo ticket | 360 min | `Defaults:chris timestamp_timeout=360` in `/etc/sudoers.d/90-timeout`; per terminal, renewed by each sudo run; this is the only place a good code is remembered |
+| the vault unlock | 6 h from the unlock | `default-cache-ttl` and `max-cache-ttl` 21600 in cpbee's `~/.gnupg/gpg-agent.conf`; after that, `ssh -t cpbee auth unlock`; needed only to make a code, not by a ticket you already hold |
+
+Reloading gpg-agent (`gpgconf --reload gpg-agent`) locks the vault; unlock it again afterwards.
+
+**Limits.** While the vault is unlocked, anything running as `chris` on cpbee can read the seed through `auth`, so the
+code is a real second factor only against someone who has the ssh key but not the vault passphrase. For full strength keep
+the seed only in a phone app (`PHONE=1`) and remove it from the vault (`auth remove 2fa@cpbee chris`); `sudo-mfa` then
+needs the code typed by hand. Keep an out-of-band way in (console, or another admin account with its own code): with root
+ssh off and a broken PAM line, sudo is gone.
+
+**Undo.** Each needs a working `sudo-mfa` / `sudo`, so do the PAM one first only if you can still get a code:
+
+```bash
+sudo-mfa cpbee cp -p /etc/pam.d/BAK/sudo.STAMP /etc/pam.d/sudo          # no code needed any more
+sudo-mfa cpbee rm /etc/ssh/sshd_config.d/20-no-root-login.conf         # root ssh allowed again (then: systemctl reload ssh)
+sudo-mfa cpbee rm -r /etc/google-authenticator                         # forget the seed (after the PAM line is gone)
+auth remove 2fa@cpbee chris                                            # forget it in the vault
+```
 
 `PREFIX`, `DESTDIR` and `TRAFFIC_DIR` can be overridden (`make install DESTDIR=/tmp/stage` is a dry run).
 
