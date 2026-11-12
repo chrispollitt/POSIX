@@ -256,6 +256,34 @@ class T(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertEqual(self.run_auth("get", "2fa", "pw.example", "me")[1].strip(), "a-password")
 
+    def test_lan_seed_one_per_user(self):
+        self.fresh()
+        rc, out, err = self.run_auth("seed", "lan", "me")
+        self.assertEqual(rc, 0, err)
+        seed, url = out.split(chr(10))[:2]
+        self.assertEqual(url, "otpauth://totp/cmnet:me?secret=%s&issuer=cmnet" % seed)  # allowlist secret
+        env = dict(self.env, AUTH_NOW="1111111109")
+        lan_code = self.run_auth("totp", "lan", "me", env=env)[1].strip()
+        self.assertEqual(len(lan_code), 6)
+        for host in ("cmlaptop", "cpbee.cmnet", "somewhere.else"):                   # every machine answers with the LAN seed
+            self.assertEqual(self.run_auth("totp", host, "me", env=env), (0, lan_code + chr(10), ""), host)
+        self.assertEqual(self.run_auth("totp", "cmdesktop", "me", "--verify", lan_code, env=env)[0], 0)
+        self.assertEqual(self.run_auth("totp", "cmdesktop", "me", "--verify", "000000", env=env)[0], 1)
+        self.assertEqual(self.run_auth("totp", "cmdesktop", "nobody", env=env)[0], 1)    # another login: no seed
+        self.assertEqual(self.run_auth("totp", "cmdesktop", env=env)[1].strip(), lan_code)   # one LAN seed, no login given
+        # a seed for a real host wins for that host only
+        self.run_auth("seed", "special", "me")
+        special = self.run_auth("totp", "special", "me", env=env)[1].strip()
+        self.assertNotEqual(special, lan_code)
+        self.assertEqual(self.run_auth("totp", "cmlaptop", "me", env=env)[1].strip(), lan_code)
+        # two LAN users and no login given: it asks which
+        self.run_auth("seed", "lan", "you")
+        rc, _, err = self.run_auth("totp", "cmdesktop", env=env)
+        self.assertEqual(rc, 1)
+        self.assertIn("which login", err)
+        self.assertEqual(self.run_auth("totp", "cmdesktop", "you", env=env)[0], 0)
+        self.assertNotEqual(self.run_auth("totp", "cmdesktop", "you", env=env)[1].strip(), lan_code)
+
     def test_render_tickets_replaces_older_lines_and_adds_bare_names(self):
         self.fresh()
         self.run_auth("set", "imaps@cpbee", "chris", "--stdin", stdin="new-pw\n")

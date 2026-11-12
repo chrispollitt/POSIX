@@ -10,7 +10,8 @@ docstring at the top of the file. Python 3 and bash only; they run on Linux, mac
 | [identity](identity) | who is who: the logins a person uses on each service (no secrets) |
 | [net-login](net-login) | one script for `ssh-mfa`, `sudo-mfa` and `telnet-netrc`: logs in and answers the password / one-time-code prompts (mode = the name it is called by) |
 | [get_mfa_code.py](get_mfa_code.py) | the current one-time code (TOTP) for a host, from the vault or a token file; used by `net-login` |
-| [mfa-seed](mfa-seed) | `auth seed` plus a check: makes a one-time-code seed in the vault, shows it once for a phone app, and verifies the first code |
+| [mfa-seed](mfa-seed) | `auth seed` plus a check: makes your one-time-code seed in the vault, shows it as a QR code for a phone app, and verifies the first code |
+| [qr-show](qr-show) | draw a QR code in the terminal (ANSI colours, or sixel); pure Python, no packages |
 | [netrc-to-tickets](netrc-to-tickets) | move logins from `~/.netrc` into `~/.mu-tickets` |
 | [lan-port](lan-port) | open, close and audit the LAN ports of cpbee |
 | [traceroute-plus.sh](traceroute-plus.sh) | traceroute that also asks each hop about itself |
@@ -38,7 +39,8 @@ auth get imaps cpbee              # the secret (the login comes from identity, o
 auth set imaps,smtp@cpbee chris   # store a secret; prompted without echo (--stdin for scripts)
 auth list                         # records, no secrets
 auth totp HOST                    # the current 6-digit code, from a record stored with --kind totp
-auth seed HOST LOGIN              # make, store and print (once) a new one-time-code seed; totp HOST LOGIN --verify CODE checks a code
+auth seed lan LOGIN              # make, store and print (once) your LAN-wide one-time-code seed; `seed HOST LOGIN` for one machine only
+auth totp HOST LOGIN --verify CODE   # check a code (the codes before and after count too)
 auth import netrc                 # take ~/.netrc into the vault (also: tickets, foo; -n plans only)
 auth render tickets               # write the passwords into ~/.mu-tickets (also: netrc) between BEGIN/END auth lines
 auth check                        # the vault against identity
@@ -161,18 +163,27 @@ and fixes it instead of failing:
 
 `MFA_NO_PROMPT=1` (cron, scripts) turns all asking off: it then fails with a clear message.
 
+### One seed per LAN user
+
+The one-time-code seed belongs to the *person*, not to a machine: `mfa-seed` (no arguments) makes yours, stores it in the vault as
+`2fa@lan YOU`, and draws a **QR code** to scan once. That one entry in your authenticator app is good for every machine.
+`auth totp HOST YOU` uses a seed for that exact host if there is one, otherwise the LAN one, so `sudo-mfa`, `get_mfa_code.py`
+and the cpbee `sudo` check all work from it. A machine that needs its own seed (a site that gave you one, or a reason to
+keep it apart) gets it with `mfa-seed HOST`, which then wins for that host. Scan with the phone steady; the terminal font must be
+small enough for the whole code to show (`MFA_QR=sixel` for a sixel terminal, `MFA_QR=none` to skip it; the seed is printed under it).
+
 ### Windows (Cygwin): elevation instead of sudo
 
 Cygwin has no `sudo`, so on Windows `sudo-mfa --local` (and `sudo-local`, `sudo-gui`) elevate with what Windows offers. It
 replaces the two helpers that were in `~/.bashrc` (a `sudo` function and the `sudo2` alias):
 
 1. **Already an administrator** (`net session` succeeds): the command just runs (`bash -c`, like the old `eval`). Nothing is asked.
-2. Otherwise **the vault must give a code for this machine** (the gate; nothing is typed). A locked vault is unlocked, and a
-   missing seed is offered, as in the table above.
+2. Otherwise **the vault must give a code for you** (the gate; nothing is typed): your LAN seed, or one for this machine. A locked
+   vault is unlocked, and a missing seed is offered, as in the table above.
 3. Then **terminal**: `ssh localhost COMMAND` (an elevated shell; no command gives you that shell). Any password or code prompt
    it shows is answered like in the other modes. Or **GUI** (`sudo-gui`, `sudo-mfa --gui`): `RunAsAdminClient.exe COMMAND`.
 
-Leading options (`-i`, `-u x`, ...) are dropped, as the old function did. Make the seed once with `mfa-seed cmlaptop` (it
+Leading options (`-i`, `-u x`, ...) are dropped, as the old function did. Make your seed once with `mfa-seed` (it
 is also offered the first time). `MFA_NO_CODE=1` skips the gate for scripts.
 
 **The gate is a speed bump, not a barrier.** It needs the vault unlocked, which needs your passphrase within the last 6 hours, so
@@ -192,9 +203,9 @@ instead). One line in `/etc/pam.d/sudo`, after `@include common-auth`:
 
 `auth required pam_google_authenticator.so secret=/etc/google-authenticator/${USER} user=root` <!-- allowlist secret -->
 
-The seed is in `/etc/google-authenticator/chris`, owned by root, mode 400, so `chris` cannot read it. A copy is in the
-vault's **master** tier as `2fa@cpbee chris` (kind `totp`), which is what lets the laptop make the code; it is not in
-the service tier on purpose, so a job key cannot read it and the vault has to be unlocked first.
+The seed is in `/etc/google-authenticator/chris`, owned by root, mode 400, so `chris` cannot read it. It is the same
+seed as your LAN one (`2fa@lan chris`, or `2fa@cpbee chris` if cpbee had its own first), kept in the vault's **master** tier, which is what
+lets the laptop make the code; it is not in the service tier on purpose, so a job key cannot read it and the vault has to be unlocked first.
 
 **Setting it up (once).** From a terminal on the laptop, in a checkout with `net-login` and `get_mfa_code.py`:
 
@@ -270,4 +281,5 @@ python3 net-utils/test/test_identity.py
 python3 net-utils/test/test_netrc_to_tickets.py
 bash net-utils/test/test_lan_port.sh
 bash net-utils/test/test_net_login.sh
+python3 net-utils/test/test_qr.py
 ```

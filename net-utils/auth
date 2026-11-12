@@ -59,6 +59,8 @@ COMMANDS (answers on stdout, exit 1 when there is none)
                                      auth set 2fa@HOST LOGIN --kind totp   (base32 text, as the site shows it)
   totp HOST [LOGIN] --verify CODE    no output; exit 0 if CODE is the current code or the one before or after it (clock
                                      slack), 1 if not (computed on the server, nothing but the exit status crosses)
+                                     One seed per LAN user: when HOST has no seed of its own for LOGIN, the LAN-wide one,
+                                     the record 2fa@lan LOGIN (made by `seed lan LOGIN`), answers for every machine.
   seed HOST LOGIN [--replace] [--note TEXT]
                                      make a NEW random one-time-code seed for HOST/LOGIN on the server, store it as the
                                      record 2fa@HOST LOGIN (kind totp), and print it once: line 1 the seed (base32), line 2
@@ -66,6 +68,8 @@ COMMANDS (answers on stdout, exit 1 when there is none)
                                      unless --replace.  The seed stays in the vault: `totp` gives codes, --verify checks one
                                      (master tier, or --service); the machine that needs the seed in a file (a PAM check
                                      on a host) reads it with `get 2fa HOST LOGIN`.  `mfa-seed` wraps this with a check.
+                                     HOST may be `lan`: one seed for LOGIN on every machine (one entry in the phone app);
+                                     a seed for a real host overrides it for that host.
   import foo [FILE] [--key KEYFILE] [--lan NAME]... [--skip LABEL]... [-n]
                                      take the entries of the old ~/.foo/bar password manager (decrypted with the  # allowlist secret
                                      old ssh key, default ~/.ssh-OLD/id_rsa) into the vault, kept out of every file
@@ -878,7 +882,13 @@ def main(argv=None, restricted=None):
             if len(args) not in (1, 2):
                 raise Err("totp HOST [LOGIN]", 2)
             h = host_of(args[0], dom)
-            hits = lookup(lambda recs: [r for r in recs if r.get("kind") == "totp" and r["host"] == h and (len(args) < 2 or r["login"] == args[1])])
+            lan = host_of("lan", dom)
+
+            def totp_of(hh):
+                return lambda recs: [r for r in recs if r.get("kind") == "totp" and r["host"] == hh and (len(args) < 2 or r["login"] == args[1])]
+            hits = lookup(totp_of(h))
+            if not hits and h != lan:
+                hits = lookup(totp_of(lan))                         # no seed of its own for this host: the user's LAN-wide one
             if len(hits) != 1:
                 if not hits:
                     return 1
@@ -917,7 +927,8 @@ def main(argv=None, restricted=None):
                 recs.append(rec)
             v.save(recs)
             print(seed)
-            print("otpauth://totp/%s:%s?secret=%s&issuer=%s" % (args[0], args[1], seed, args[0]))  # allowlist secret
+            issuer = a.domain if args[0] == "lan" else args[0]          # the LAN-wide seed is shown as the LAN's, not a machine's
+            print("otpauth://totp/%s:%s?secret=%s&issuer=%s" % (issuer, args[1], seed, issuer))  # allowlist secret
             return 0
 
         if cmd == "set":

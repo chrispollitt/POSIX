@@ -17,7 +17,7 @@ PREFIX      ?= /usr/local
 DESTDIR     ?=
 TRAFFIC_DIR ?= /opt/trafficgraph
 
-TOOLS     := auth auth-askpass auth-canary auth-ftp auth-telnet get_mfa_code.py git-credential-auth identity lan-port mfa-seed net-login netrc-to-tickets traceroute-plus.sh
+TOOLS     := auth auth-askpass auth-canary auth-ftp auth-telnet get_mfa_code.py git-credential-auth identity lan-port mfa-seed net-login netrc-to-tickets qr-show traceroute-plus.sh
 # net-login does ssh/sudo/telnet logins by the name it is called by; these symlinks to it are installed beside it.
 # Add more (ssh-wwl, sudo-cpbee, ...) with:  make install MFA_LINKS="ssh-mfa sudo-mfa telnet-netrc ssh-wwl"
 MFA_LINKS ?= ssh-mfa sudo-mfa telnet-netrc sudo-gui
@@ -55,9 +55,10 @@ uninstall-cpbee:
 
 check:
 	@for f in auth-askpass auth-canary auth-ftp auth-telnet git-credential-auth lan-port mfa-seed traceroute-plus.sh test/test_lan_port.sh test/test_net_login.sh $(CPR)/bin/setup-router.sh $(CPR)/bin/upnp-sync-cmrouter; do bash -n $$f || exit 1; done
-	@python3 -c "import ast,sys; [ast.parse(open(f).read(), f) for f in sys.argv[1:]]" $(CPR)/traffic/router.py auth identity netrc-to-tickets get_mfa_code.py
+	@python3 -c "import ast,sys; [ast.parse(open(f).read(), f) for f in sys.argv[1:]]" $(CPR)/traffic/router.py auth identity netrc-to-tickets get_mfa_code.py qr-show
 	@bash test/test_lan_port.sh | tail -1
 	@bash test/test_net_login.sh | tail -3
+	@python3 test/test_qr.py </dev/null 2>&1 | tail -3
 
 diff:
 	@for f in $(TOOLS); do diff -q $$f $(DESTDIR)$(PREFIX)/bin/$$f 2>&1 | sed 's/^/tools: /'; done; true

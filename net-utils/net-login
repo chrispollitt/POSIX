@@ -26,7 +26,7 @@ exec expect -f "$0" -- ${1+"$@"}
 # Doing it for you, in every mode: the password comes from ~/.netrc, the one-time code from the vault (get_mfa_code.py).  When
 # someone is at the terminal and something is missing it asks, and fixes it:
 #   - the vault is locked        -> runs  ssh -t cpbee auth unlock  (you type the passphrase), then carries on
-#   - no code seed for the host  -> offers to run  mfa-seed HOST USER  (makes the seed, shows it for a phone app)
+#   - no code seed               -> offers to run  mfa-seed  (makes your LAN-wide seed, shows a QR code for a phone app)
 #   - no ~/.netrc entry          -> asks for the password (not shown) and, once it has worked, offers to save it in ~/.netrc
 #                                   (mode 600, old file kept in ~/BAK, 3 newest)
 # MFA_NO_PROMPT=1 turns all of that off (cron, scripts): it then fails with a clear message instead.
@@ -230,9 +230,10 @@ proc fetch_code {host user} {
             set offered 1
             set seedtool [file join $real_dir mfa-seed]
             if {![file exists $seedtool]} { set seedtool mfa-seed }
-            set a [ask "There is no one-time-code seed for $host/$user.  Make one now with mfa-seed (you add it to a phone app)? \[Y/n\] "]
+            set who [expr {$user ne "" ? $user : [exec id -un]}]
+            set a [ask "There is no one-time-code seed for $who (nor for $host).  Make your LAN-wide one now with mfa-seed (it shows a QR code for your phone app)? \[Y/n\] "]
             if {[regexp {^[Nn]} $a]} { return "" }
-            if {![catch {exec $seedtool $host $user <@stdin >@stdout 2>@stderr}]} continue
+            if {![catch {exec $seedtool lan $who <@stdin >@stdout 2>@stderr}]} continue
             return ""
         }
         return ""

@@ -1,20 +1,23 @@
 #!/bin/bash
-# mfa-seed HOST [USER]: make a one-time-code seed for HOST/USER, keep it in the vault, show it once for an authenticator app.
+# mfa-seed [HOST] [USER]: make a one-time-code seed, keep it in the vault, show it as a QR code for an authenticator app.
 #
-#   mfa-seed cmlaptop            seed for this login on cmlaptop (USER defaults to you)
-#   REPLACE=1 mfa-seed cpbee chris    replace an existing seed (the app and anything else using the old one must be redone)
+#   mfa-seed                     the LAN-wide seed for you: ONE entry in the phone app that works on every machine (HOST = lan)
+#   mfa-seed lan alice           the same for another LAN user
+#   mfa-seed cmlaptop            a seed for this login on one machine only (it overrides the LAN seed there)
+#   REPLACE=1 mfa-seed ...       replace an existing seed (the app and anything else using the old one must be redone)
 #
-# The vault does the work (`auth seed`): it makes the random seed on the server, stores it in the master tier as  2fa@HOST USER
-# (kind totp) and prints it once.  This script shows the seed and an otpauth:// line for a phone app (type the seed in, or make a
-# QR code of the line), then asks you to type the code the app shows and checks it with `auth totp --verify`.  If the check fails
-# 3 times a NEW record is removed again.  Codes come from `auth totp HOST USER` (get_mfa_code.py wraps it), and
-# `sudo-mfa --local` on Windows offers to run this when there is no seed.  The seed is on your screen while this runs: clear it after.
+# The vault does the work (`auth seed`): it makes the random seed on the server, stores it in the master tier as 2fa@HOST USER
+# (kind totp) and prints it once.  This script draws it as a QR code (qr-show; MFA_QR=sixel for a sixel terminal, MFA_QR=none to
+# skip) and prints the seed and otpauth:// line for typing in, then asks you to type the code the app shows and checks it with
+# `auth totp --verify`.  If the check fails 3 times a NEW record is removed again.  Codes come from `auth totp HOST USER`
+# (get_mfa_code.py wraps it); a machine with no seed of its own uses the user's LAN one.  `sudo-mfa --local` on Windows offers to
+# run this when there is no seed.  The seed is on your screen while this runs: clear it after.
 set -u
 here=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
 AUTH=${MFA_AUTH:-auth}
 if ! command -v "$AUTH" >/dev/null 2>&1 && [[ -x $here/auth ]]; then AUTH=$here/auth; fi
-case ${1:-} in -h|--help|"") sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;; esac
-host=$1
+case ${1:-} in -h|--help) sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;; esac
+host=${1:-lan}
 user=${2:-$(id -un)}
 die() { echo "mfa-seed: $*" >&2; exit 1; }
 [[ -t 0 && -t 1 ]] || die "run this in a terminal"
@@ -25,8 +28,18 @@ seed=$(printf '%s\n' "$out" | sed -n 1p)
 url=$(printf '%s\n' "$out" | sed -n 2p)
 [[ -n $seed && -n $url ]] || die "unexpected answer from auth seed"
 
+qr=$here/qr-show
+[[ -x $qr ]] || qr=$(command -v qr-show || true)
 echo
-echo "Add this to your authenticator app (account \"$host $user\", time-based, 6 digits, 30 s):"
+if [[ ${MFA_QR:-ansi} != none && -n $qr ]]; then
+  echo "Scan this with your authenticator app (account \"$host $user\", time-based, 6 digits, 30 s):"
+  echo
+  "$qr" "$url" || echo "(could not draw the QR code; use the seed below)"
+  echo
+  echo "Or type it in:"
+else
+  echo "Add this to your authenticator app (account \"$host $user\", time-based, 6 digits, 30 s):"
+fi
 echo "    seed:     $seed"
 echo "    otpauth:  $url"
 unset seed url out

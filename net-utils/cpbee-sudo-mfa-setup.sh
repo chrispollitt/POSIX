@@ -149,14 +149,22 @@ echo "package: ok"
 if sudo test -s $D/$me; then
   echo "seed file $D/$me exists; kept"
 else
-  # the vault makes and keeps the seed (auth seed); this machine only needs it in a root-only file for PAM
-  seed=$(auth seed cpbee "$me" --note "sudo code for $me on cpbee (pam_google_authenticator)" | sed -n 1p)
-  [ -n "$seed" ] || { echo "FAILED: the vault did not make a seed (one already there? auth seed --replace)"; exit 1; }
+  # the vault makes and keeps the seed (auth seed): the user's LAN-wide one, or the one this host already had; this machine only
+  # needs a copy in a root-only file for PAM
+  seed=$(auth get 2fa lan "$me" 2>/dev/null || true)
+  [ -n "$seed" ] || seed=$(auth get 2fa cpbee "$me" 2>/dev/null || true)
+  url=""
+  if [ -z "$seed" ]; then
+    out=$(auth seed lan "$me" --note "one-time code seed for $me on the LAN (sudo on cpbee uses it too)") || { echo "FAILED: the vault did not make a seed"; exit 1; }
+    seed=$(printf '%s\n' "$out" | sed -n 1p); url=$(printf '%s\n' "$out" | sed -n 2p)
+  fi
+  [ -n "$seed" ] || { echo "FAILED: no seed"; exit 1; }
+  [ -n "$url" ] || url="otpauth://totp/cmnet:$me?secret=$seed&issuer=cmnet"
   sudo install -d -m 700 -o root -g root $D
   printf '%s\n" RATE_LIMIT 3 30\n" WINDOW_SIZE 3\n" DISALLOW_REUSE\n" TOTP_AUTH\n' "$seed" | sudo tee $D/$me >/dev/null
   sudo chown root:root $D/$me; sudo chmod 400 $D/$me
   echo "seed: made by the vault (master tier) and copied to $D/$me"
-  [ "$phone" = 1 ] && echo "phone app:  otpauth://totp/cpbee-sudo:$me?secret=$seed&issuer=cpbee"
+  [ "$phone" = 1 ] && echo "phone app:  $url"
   unset seed
 fi
 # the vault must give a code that matches what the file holds

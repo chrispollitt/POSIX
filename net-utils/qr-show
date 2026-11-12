@@ -1,0 +1,407 @@
+#!/usr/bin/env python3
+"""qr-show [--sixel|--plain] [--ecl L|M] [--scale N] [TEXT]: draw a QR code in the terminal.
+
+For an authenticator app to scan: `mfa-seed` shows the otpauth:// line of a new seed with it.  Pure Python 3, no packages, no
+network: the encoder is in this file (byte mode, versions 1-10, error correction L or M: room for about 270 bytes at L).
+
+  qr-show 'an otpauth:// line, or any text'
+  echo text | qr-show                      TEXT from standard input when none is given
+  --sixel          draw it as a sixel bitmap (a terminal that supports sixel graphics); --scale N is pixels per module (4)
+  --plain          two characters per module, no colours (white on a dark terminal: scanners prefer dark on light, so
+                   the default is better)
+  --ecl L|M        error correction: L (default, smallest) or M (a little more robust)
+default: ANSI colours with half-block characters, black modules on a white background with the quiet border a scanner needs.
+Hold the phone steady; if the code looks stretched or too small, make the terminal window larger or the font smaller.
+Environment: MFA_QR=sixel|plain|ansi picks the mode when no option is given.  Exit 0, 2 on bad usage, 1 if the text is too long.
+"""
+import os
+import sys
+
+# ---- tables (versions 1-10; the data capacities they give, 19 34 55 80 108 136 156 194 232 274 at L, are the standard ones) --------
+ECC_PER_BLOCK = {"L": [7, 10, 15, 20, 26, 18, 20, 24, 30, 18], "M": [10, 16, 26, 18, 24, 16, 18, 22, 22, 26]}
+NUM_BLOCKS = {"L": [1, 1, 1, 1, 1, 2, 2, 2, 2, 4], "M": [1, 1, 1, 2, 2, 4, 4, 4, 5, 5]}
+FORMAT_BITS = {"L": 1, "M": 0}
+MAX_VERSION = 10
+
+
+class TooLong(Exception):
+    pass
+
+
+# ---- Reed-Solomon over GF(256), polynomial 0x11D ------------------------------------------------------------------------
+def gf_mul(x, y):
+    z = 0
+    for i in range(7, -1, -1):
+        z = (z << 1) ^ ((z >> 7) * 0x11D)
+        z ^= ((y >> i) & 1) * x
+    return z
+
+
+def rs_divisor(degree):
+    result = [0] * (degree - 1) + [1]
+    root = 1
+    for _ in range(degree):
+        for j in range(degree):
+            result[j] = gf_mul(result[j], root)
+            if j + 1 < degree:
+                result[j] ^= result[j + 1]
+        root = gf_mul(root, 0x02)
+    return result
+
+
+def rs_remainder(data, divisor):
+    result = [0] * len(divisor)
+    for b in data:
+        factor = b ^ result.pop(0)
+        result.append(0)
+        for i, coef in enumerate(divisor):
+            result[i] ^= gf_mul(coef, factor)
+    return result
+
+
+# ---- sizes ---------------------------------------------------------------------------------------------------------------
+def raw_data_modules(ver):
+    result = (16 * ver + 128) * ver + 64
+    if ver >= 2:
+        n = ver // 7 + 2
+        result -= (25 * n - 10) * n - 55
+        if ver >= 7:
+            result -= 36
+    return result
+
+
+def data_codewords(ver, ecl):
+    return raw_data_modules(ver) // 8 - ECC_PER_BLOCK[ecl][ver - 1] * NUM_BLOCKS[ecl][ver - 1]
+
+
+def alignment_positions(ver):
+    if ver == 1:
+        return []
+    n = ver // 7 + 2
+    step = (ver * 4 + n * 2 + 1) // (n * 2 - 2) * 2
+    size = ver * 4 + 17
+    return sorted([size - 7 - i * step for i in range(n - 1)] + [6])
+
+
+# ---- the data: byte mode ------------------------------------------------------------------------------------------------
+def encode_data(text, ecl):
+    raw = text.encode("utf-8")
+    for ver in range(1, MAX_VERSION + 1):
+        count_bits = 8 if ver <= 9 else 16
+        cap = data_codewords(ver, ecl) * 8
+        if 4 + count_bits + 8 * len(raw) <= cap:
+            break
+    else:
+        raise TooLong("%d bytes do not fit in a version-%d symbol at level %s" % (len(raw), MAX_VERSION, ecl))
+    bits = "0100" + format(len(raw), "0%db" % count_bits) + "".join(format(b, "08b") for b in raw)
+    bits += "0" * min(4, cap - len(bits))
+    bits += "0" * (-len(bits) % 8)
+    words = [int(bits[i:i + 8], 2) for i in range(0, len(bits), 8)]
+    pad = 0xEC
+    while len(words) < cap // 8:
+        words.append(pad)
+        pad ^= 0xEC ^ 0x11
+    return ver, words
+
+
+def add_ecc_and_interleave(data, ver, ecl):
+    nblocks = NUM_BLOCKS[ecl][ver - 1]
+    ecc_len = ECC_PER_BLOCK[ecl][ver - 1]
+    raw_cw = raw_data_modules(ver) // 8
+    nshort = nblocks - raw_cw % nblocks
+    short_len = raw_cw // nblocks
+    blocks = []
+    div = rs_divisor(ecc_len)
+    k = 0
+    for i in range(nblocks):
+        dat = data[k:k + short_len - ecc_len + (0 if i < nshort else 1)]
+        k += len(dat)
+        ecc = rs_remainder(dat, div)
+        if i < nshort:
+            dat = dat + [0]                      # placeholder so every block has the same length; skipped when interleaving
+        blocks.append(dat + ecc)
+    out = []
+    for i in range(len(blocks[0])):
+        for j, blk in enumerate(blocks):
+            if i != short_len - ecc_len or j >= nshort:
+                out.append(blk[i])
+    return out
+
+
+# ---- the matrix ---------------------------------------------------------------------------------------------------------
+class Matrix:
+    def __init__(self, ver):
+        self.ver = ver
+        self.size = ver * 4 + 17
+        self.mod = [[False] * self.size for _ in range(self.size)]
+        self.func = [[False] * self.size for _ in range(self.size)]
+
+    def setf(self, x, y, dark):
+        self.mod[y][x] = bool(dark)
+        self.func[y][x] = True
+
+    def draw_function_patterns(self):
+        n = self.size
+        for i in range(n):
+            self.setf(6, i, i % 2 == 0)
+            self.setf(i, 6, i % 2 == 0)
+        for cx, cy in ((3, 3), (n - 4, 3), (3, n - 4)):
+            for dy in range(-4, 5):
+                for dx in range(-4, 5):
+                    x, y = cx + dx, cy + dy
+                    if 0 <= x < n and 0 <= y < n:
+                        self.setf(x, y, max(abs(dx), abs(dy)) not in (2, 4))
+        pos = alignment_positions(self.ver)
+        for i, cy in enumerate(pos):
+            for j, cx in enumerate(pos):
+                if (i == 0 and j == 0) or (i == 0 and j == len(pos) - 1) or (i == len(pos) - 1 and j == 0):
+                    continue
+                for dy in range(-2, 3):
+                    for dx in range(-2, 3):
+                        self.setf(cx + dx, cy + dy, max(abs(dx), abs(dy)) != 1)
+        self.draw_format(0, "L")                 # reserve the format areas
+        self.draw_version()
+
+    def draw_format(self, mask, ecl):
+        data = (FORMAT_BITS[ecl] << 3) | mask
+        rem = data
+        for _ in range(10):
+            rem = (rem << 1) ^ ((rem >> 9) * 0x537)
+        bits = ((data << 10) | rem) ^ 0x5412
+        n = self.size
+        for i in range(0, 6):
+            self.setf(8, i, (bits >> i) & 1)
+        self.setf(8, 7, (bits >> 6) & 1)
+        self.setf(8, 8, (bits >> 7) & 1)
+        self.setf(7, 8, (bits >> 8) & 1)
+        for i in range(9, 15):
+            self.setf(14 - i, 8, (bits >> i) & 1)
+        for i in range(0, 8):
+            self.setf(n - 1 - i, 8, (bits >> i) & 1)
+        for i in range(8, 15):
+            self.setf(8, n - 15 + i, (bits >> i) & 1)
+        self.setf(8, n - 8, True)                # the always-dark module
+
+    def draw_version(self):
+        if self.ver < 7:
+            return
+        rem = self.ver
+        for _ in range(12):
+            rem = (rem << 1) ^ ((rem >> 11) * 0x1F25)
+        bits = (self.ver << 12) | rem
+        for i in range(18):
+            a = self.size - 11 + i % 3
+            b = i // 3
+            self.setf(a, b, (bits >> i) & 1)
+            self.setf(b, a, (bits >> i) & 1)
+
+    def draw_codewords(self, data):
+        n = self.size
+        i = 0
+        right = n - 1
+        while right >= 1:
+            if right == 6:
+                right = 5
+            for vert in range(n):
+                for j in range(2):
+                    x = right - j
+                    upward = ((right + 1) & 2) == 0
+                    y = n - 1 - vert if upward else vert
+                    if not self.func[y][x] and i < len(data) * 8:
+                        self.mod[y][x] = bool((data[i >> 3] >> (7 - (i & 7))) & 1)
+                        i += 1
+            right -= 2
+
+    def apply_mask(self, mask):
+        for y in range(self.size):
+            for x in range(self.size):
+                if self.func[y][x]:
+                    continue
+                if mask == 0:
+                    inv = (x + y) % 2 == 0
+                elif mask == 1:
+                    inv = y % 2 == 0
+                elif mask == 2:
+                    inv = x % 3 == 0
+                elif mask == 3:
+                    inv = (x + y) % 3 == 0
+                elif mask == 4:
+                    inv = (x // 3 + y // 2) % 2 == 0
+                elif mask == 5:
+                    inv = x * y % 2 + x * y % 3 == 0
+                elif mask == 6:
+                    inv = (x * y % 2 + x * y % 3) % 2 == 0
+                else:
+                    inv = ((x + y) % 2 + x * y % 3) % 2 == 0
+                if inv:
+                    self.mod[y][x] = not self.mod[y][x]
+
+    def penalty(self):
+        n = self.size
+        rows = ["".join("1" if v else "0" for v in r) for r in self.mod]
+        cols = ["".join("1" if self.mod[y][x] else "0" for y in range(n)) for x in range(n)]
+        score = 0
+        for line in rows + cols:
+            run = 1
+            for i in range(1, n):
+                if line[i] == line[i - 1]:
+                    run += 1
+                else:
+                    if run >= 5:
+                        score += 3 + run - 5
+                    run = 1
+            if run >= 5:
+                score += 3 + run - 5
+            for pat in ("10111010000", "00001011101"):
+                start = 0
+                while True:
+                    k = line.find(pat, start)
+                    if k < 0:
+                        break
+                    score += 40
+                    start = k + 1
+        for y in range(n - 1):
+            for x in range(n - 1):
+                if self.mod[y][x] == self.mod[y][x + 1] == self.mod[y + 1][x] == self.mod[y + 1][x + 1]:
+                    score += 3
+        dark = sum(sum(r) for r in self.mod)
+        total = n * n
+        score += ((abs(dark * 20 - total * 10) + total - 1) // total - 1) * 10
+        return score
+
+
+def qr_matrix(text, ecl="L"):
+    """the QR symbol for TEXT as a list of rows of booleans (True = dark), without the quiet border."""
+    ver, data = encode_data(text, ecl)
+    codewords = add_ecc_and_interleave(data, ver, ecl)
+    base = Matrix(ver)
+    base.draw_function_patterns()
+    base.draw_codewords(codewords)
+    best = None
+    for mask in range(8):
+        m = Matrix(ver)
+        m.mod = [r[:] for r in base.mod]
+        m.func = [r[:] for r in base.func]
+        m.apply_mask(mask)
+        m.draw_format(mask, ecl)
+        p = m.penalty()
+        if best is None or p < best[0]:
+            best = (p, m)
+    return best[1].mod
+
+
+# ---- drawing ------------------------------------------------------------------------------------------------------------
+QUIET = 4
+
+
+def padded(mod):
+    n = len(mod)
+    w = n + 2 * QUIET
+    rows = [[False] * w for _ in range(QUIET)]
+    rows += [[False] * QUIET + list(r) + [False] * QUIET for r in mod]
+    rows += [[False] * w for _ in range(QUIET)]
+    return rows                                                    # True = dark
+
+
+def render_ansi(mod):
+    rows = padded(mod)
+    if len(rows) % 2:
+        rows.append([False] * len(rows[0]))
+    black, white = 16, 231
+    out = []
+    for y in range(0, len(rows), 2):
+        line = []
+        for x in range(len(rows[0])):
+            up = black if rows[y][x] else white
+            lo = black if rows[y + 1][x] else white
+            line.append("\x1b[38;5;%d;48;5;%dm▀" % (up, lo))
+        out.append("".join(line) + "\x1b[0m")
+    return "\n".join(out) + "\n"
+
+
+def render_plain(mod):
+    rows = padded(mod)
+    return "\n".join("".join("██" if v else "  " for v in r) for r in rows) + "\n"
+
+
+def render_sixel(mod, scale=4):
+    rows = padded(mod)
+    h = len(rows) * scale
+    w = len(rows[0]) * scale
+    px = []                                                       # one list of booleans (dark) per pixel row
+    for r in rows:
+        line = [v for v in r for _ in range(scale)]
+        px.extend([line] * scale)
+    out = ["\x1bPq\"1;1;%d;%d#0;2;0;0;0#1;2;100;100;100" % (w, h)]
+    for top in range(0, h, 6):
+        for color, want_dark in ((0, True), (1, False)):
+            chars = []
+            for x in range(w):
+                bits = 0
+                for k in range(6):
+                    y = top + k
+                    if y < h and px[y][x] == want_dark:
+                        bits |= 1 << k
+                chars.append(chr(63 + bits))
+            out.append("#%d%s$" % (color, "".join(chars)))
+        out.append("-")
+    out.append("\x1b\\")
+    return "".join(out) + "\n"
+
+
+def main(argv):
+    mode = os.environ.get("MFA_QR") or "ansi"
+    ecl = "L"
+    scale = 4
+    text = None
+    it = iter(argv)
+    for a in it:
+        if a in ("-h", "--help"):
+            print(__doc__.strip("\n"))
+            return 0
+        elif a == "--sixel":
+            mode = "sixel"
+        elif a == "--plain":
+            mode = "plain"
+        elif a == "--ecl":
+            ecl = (next(it, "") or "").upper()
+            if ecl not in ECC_PER_BLOCK:
+                print("qr-show: --ecl takes L or M", file=sys.stderr)
+                return 2
+        elif a == "--scale":
+            try:
+                scale = max(1, int(next(it, "")))
+            except ValueError:
+                print("qr-show: --scale takes a number", file=sys.stderr)
+                return 2
+        elif a.startswith("-") and a != "-":
+            print("qr-show: unknown option %s" % a, file=sys.stderr)
+            return 2
+        else:
+            text = a if text is None else text + " " + a
+    if text is None:
+        text = sys.stdin.read().rstrip("\r\n")
+    if not text:
+        print("usage: qr-show [--sixel|--plain] [--ecl L|M] [--scale N] [TEXT]", file=sys.stderr)
+        return 2
+    try:
+        mod = qr_matrix(text, ecl)
+    except TooLong as e:
+        print("qr-show: %s" % e, file=sys.stderr)
+        return 1
+    if mode == "sixel":
+        sys.stdout.write(render_sixel(mod, scale))
+    elif mode == "plain":
+        sys.stdout.write(render_plain(mod))
+    elif mode == "ansi":
+        sys.stdout.write(render_ansi(mod))
+    else:
+        print("qr-show: MFA_QR / mode must be ansi, sixel or plain", file=sys.stderr)
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+    sys.exit(main(sys.argv[1:]))
