@@ -17,6 +17,12 @@ THE LIST   $IDENTITY_FILE, else ~/.config/identities  (and /etc/identities, read
   (cmnet): cpbee is cpbee.cmnet.  `admin` marks a login that answers for the bots (Floyd's admins); `bot` a login
   that is a program.  One login per person per scheme and host.
   `@host NAME ALIAS...` says that other spellings are the same machine: `@host cpbee.cmnet 192.168.10.1`.
+  OPERATING-SYSTEM ADMINISTRATORS: a row with the scheme `sudo` says that this person's account on that machine is an
+  administrator there (a sudoer on Linux, a member of Administrators on Windows):
+    chris     sudo@cpbee.cmnet     chris                             # in sudoers
+    chris     sudo@cmlaptop.cmnet  chris                             # Administrators
+  (`admin` above is something else: a bot's admin.)  `@os NAME linux|windows` says what a machine runs; otherwise
+  `check-admin` asks it (uname).  `check-admin` compares these rows with what the machines say.
 
 COMMANDS (for scripts: the answer on stdout, exit 1 when there is none)
   list [PERSON]                      the whole list, or one person's lines
@@ -27,6 +33,13 @@ COMMANDS (for scripts: the answer on stdout, exit 1 when there is none)
   add  PERSON SCHEME@HOST LOGIN [admin] [bot] --why TEXT         exit 0 done or already there, 1 refused
   remove PERSON SCHEME@HOST [LOGIN]
   check                              compare the list with the configuration files (below); read-only
+  check-admin [HOST...] [--root]     compare the sudo@ rows (who is an OS administrator where) with the machines themselves:
+                                     Linux: the members of the sudo, admin and wheel groups (--root also reads sudoers,
+                                     through sudo-mfa, for `ALL` rules); Windows: net localgroup Administrators.  Default
+                                     hosts: every host with a sudo@ row or an @os line; this machine is read directly,
+                                     the others over ssh.  Reports MISSING (the list says admin, the machine does not),
+                                     EXTRA (an admin the list does not know), UNREACHABLE, a person-by-machine table, and
+                                     the commands that would reconcile; it changes nothing.  Exit 0 consistent, 3 findings
 `plan` exits 0 (nothing to do), 3 (something to change) or 1 (refused).  `add` refuses a login that is another
 person's on that scheme and host, and a second login for one person there (--also allows it: say why).  The
 list is backed up (FILE.bak-DATE) before any change.
@@ -46,12 +59,16 @@ Exit 0 when nothing but notes was found (--strict: notes count), 3 when there is
 
 --floyd-local HOST says that 127.0.0.1 / localhost in the --floyd-conf files means HOST (a copy of cpbee's floyd.conf:
 cpbee).
-Options: --file FILE (the list to change; default as above)  --domain DOMAIN  --no-domain  -v  -h
+Options: --file FILE (the list to change; default as above)  --domain DOMAIN  --no-domain  --root  -v  -h
+Environment: IDENTITY_SSH (ssh, how other machines are asked), IDENTITY_SUDO (sudo-mfa, for --root).
 """
 import argparse
 import configparser
 import os
 import re
+import shlex
+import socket
+import subprocess
 import sys
 import time
 from urllib.parse import unquote
@@ -89,6 +106,7 @@ class Reg:
         self.domain = domain
         self.rows = []
         self.alias = {}                  # other spelling of a machine -> its list name
+        self.os = {}                     # machine -> linux | windows (from @os lines)
 
     def host(self, h):
         h = host_of(h, self.domain)
@@ -98,6 +116,7 @@ class Reg:
         """Rows speak of a machine by its list name, whichever alias they were written with."""
         for r in self.rows:
             r["host"] = self.alias.get(r["host"], r["host"])
+        self.os = {self.alias.get(h, h): k for h, k in self.os.items()}
 
     def load(self, path, source):
         try:
@@ -115,6 +134,11 @@ class Reg:
                     raise Err("%s:%d: want @host NAME ALIAS..." % (path, n))
                 for other in f[2:]:
                     self.alias[host_of(other, self.domain)] = host_of(f[1], self.domain)
+                continue
+            if f[0] == "@os":
+                if len(f) != 3 or f[2].lower() not in ("linux", "windows"):
+                    raise Err("%s:%d: want @os NAME linux|windows" % (path, n))
+                self.os[host_of(f[1], self.domain)] = f[2].lower()
                 continue
             if len(f) < 3 or "@" not in f[1]:
                 raise Err("%s:%d: want PERSON SCHEME@HOST LOGIN [admin] [bot]  # why" % (path, n))
@@ -382,6 +406,193 @@ def rewrite(path, text):
     os.replace(tmp, path)
 
 
+# ------------------------------------------------------- OS administrators ---
+BUILTIN = {"linux": {"root"}, "windows": {"administrator", "domain admins", "enterprise admins", "system", "cyg_server"}}   # cyg_server: Cygwin's sshd service account
+ADMIN_GROUPS = ("sudo", "admin", "wheel")
+
+
+def short(h):
+    return h.split(".")[0]
+
+
+def is_local(h):
+    me = socket.gethostname().lower()
+    return short(h).lower() in (me, short(me), "localhost")
+
+
+def run_on(host, cmd, local):
+    """(status, stdout) of a shell command on HOST: this machine directly, others over ssh (BatchMode, short name)."""
+    if local:
+        argv = ["bash", "-c", cmd]
+    else:
+        argv = shlex.split(os.environ.get("IDENTITY_SSH", "ssh")) + ["-o", "BatchMode=yes", "-o", "ConnectTimeout=8", short(host), cmd]
+    try:
+        p = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                           universal_newlines=True, timeout=90)
+    except (OSError, subprocess.TimeoutExpired):
+        return 255, ""
+    return p.returncode, p.stdout
+
+
+def linux_admins(host, local):
+    """accounts in the sudo / admin / wheel groups (members and primary-group users), plus uid 0."""
+    rc, out = run_on(host, "getent group %s; getent passwd" % " ".join(ADMIN_GROUPS), local)
+    if rc != 0 and not out:
+        raise Err("cannot read the groups")
+    gids, names, passwd = set(), set(), []
+    for ln in out.splitlines():
+        f = ln.split(":")
+        if len(f) == 4 and f[0] in ADMIN_GROUPS:
+            gids.add(f[2])
+            names.update(x for x in f[3].split(",") if x)
+        elif len(f) >= 7:
+            passwd.append(f)
+    for f in passwd:
+        if f[3] in gids or f[2] == "0":
+            names.add(f[0])
+    return names
+
+
+def sudoers_admins(host, local, groups_known):
+    """accounts the sudoers files give `ALL` (needs root: read through sudo-mfa).  Returns (names, notes)."""
+    tool = shlex.split(os.environ.get("IDENTITY_SUDO", "sudo-mfa"))
+    inner = "sh -c 'cat /etc/sudoers /etc/sudoers.d/*'"
+    argv = tool + (["--local"] if local else [short(host)]) + [inner]
+    try:
+        p = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                           universal_newlines=True, timeout=120)
+    except (OSError, subprocess.TimeoutExpired):
+        raise Err("could not read sudoers (sudo-mfa failed)")
+    text = p.stdout.replace("\r", "")
+    names, notes, who = set(), [], []
+    text = re.sub(r"\\\n", " ", text)
+    for ln in text.splitlines():
+        ln = ln.split("#")[0].strip() if not ln.strip().startswith("#include") else ""
+        if not ln:
+            continue
+        if re.match(r"(User_Alias|Runas_Alias|Host_Alias|Cmnd_Alias)\b", ln):
+            if ln.startswith(("User_Alias", "Runas_Alias")):
+                notes.append("sudoers has aliases (%s): not expanded" % ln.split()[0])
+            continue
+        if ln.startswith("Defaults"):
+            continue
+        m = re.match(r"^(\S+)\s+\S+\s*=\s*(?:\([^)]*\)\s*)?(?:[A-Z_]+:\s*)*ALL\s*$", ln)
+        if m:
+            who.append(m.group(1))
+    for w in who:
+        if w == "ALL":
+            notes.append("sudoers gives ALL to everybody")
+        elif w.startswith("%"):
+            g = w[1:]
+            if g in groups_known:
+                names.update(groups_known[g])
+            else:
+                rc, out = run_on(host, "getent group %s" % g, local)
+                for ln in out.splitlines():
+                    f = ln.split(":")
+                    if len(f) == 4:
+                        names.update(x for x in f[3].split(",") if x)
+        elif not w.startswith("+"):
+            names.add(w)
+    return names, notes
+
+
+def windows_admins(host, local):
+    """members of the local Administrators group (names without DOMAIN\\)."""
+    rc, out = run_on(host, "net localgroup Administrators", local)
+    if rc != 0 and "----" not in out:
+        raise Err("cannot read the Administrators group")
+    names, on = set(), False
+    for ln in out.replace("\r", "").splitlines():
+        if ln.startswith("----"):
+            on = True
+            continue
+        if on:
+            if not ln.strip() or ln.lower().startswith("the command completed"):
+                break
+            n = ln.strip()
+            if "\\" in n:
+                dom, _, n = n.partition("\\")
+                if dom.upper() in ("NT AUTHORITY", "NT SERVICE", "BUILTIN"):
+                    continue
+            names.add(n)
+    return names
+
+
+def check_admin(reg, a, hosts):
+    """compare the sudo@ rows with the machines.  Returns (findings, notes, lines to print)."""
+    findings, notes, lines = [], [], []
+    claims = {}                                                     # host -> {login: person}
+    for r in reg.rows:
+        if r["scheme"] == "sudo":
+            claims.setdefault(r["host"], {})[r["login"]] = r["person"]
+    todo = [reg.host(h) for h in hosts] if hosts else sorted(set(claims) | set(reg.os))
+    if not todo:
+        return [], [], ["nothing to check: no sudo@HOST rows and no @os lines in the list (identity --help)"]
+    table = {}                                                      # person -> host -> (listed, actual)
+    for host in todo:
+        local = is_local(host)
+        kind = reg.os.get(host)
+        if kind is None:
+            rc, out = run_on(host, "uname -s", local)
+            if rc != 0 and not out.strip():
+                findings.append("UNREACHABLE  %s: could not ask the machine (ssh failed?)" % host)
+                continue
+            u = out.strip().split()[0].upper() if out.strip() else ""
+            kind = "windows" if u.startswith(("CYGWIN", "MINGW", "MSYS")) else "linux" if u == "LINUX" else None
+            if kind is None:
+                notes.append("note UNSUPPORTED %s: %r is neither Linux nor Windows" % (host, out.strip()))
+                continue
+        sudoers_notes = []
+        try:
+            actual = windows_admins(host, local) if kind == "windows" else linux_admins(host, local)
+            if kind == "linux" and a.root:
+                more, sudoers_notes = sudoers_admins(host, local, {})
+                actual = actual | more
+        except Err as e:
+            findings.append("UNREACHABLE  %s: %s" % (host, e))
+            continue
+        notes += ["note SUDOERS  %s: %s" % (host, x) for x in sudoers_notes]
+        fold = (lambda s: s.lower()) if kind == "windows" else (lambda s: s)
+        listed = claims.get(host, {})
+        lset = {fold(k): k for k in listed}
+        aset = {fold(k): k for k in actual}
+        lines.append("%s (%s%s): administrators %s" % (host, kind, ", this machine" if local else "", ", ".join(sorted(actual)) or "none found"))
+        for k, login in sorted(lset.items()):
+            person = listed[login]
+            table.setdefault(person, {})[host] = [True, k in aset]
+            if k not in aset:
+                findings.append("MISSING      %s: the list says %s (%s) is an administrator on %s, the machine says not" % (host, person, login, host))
+                lines.append("   fix: either make %s an administrator on %s (%s) or: identity remove %s sudo@%s %s" % (
+                    login, host, "net localgroup Administrators %s /add" % login if kind == "windows" else "sudo usermod -aG sudo %s" % login,
+                    person, host, login))
+        for k, login in sorted(aset.items()):
+            if k in lset:
+                continue
+            person = reg.who("sudo", host, login)
+            if person:
+                table.setdefault(person, {})[host] = [False, True]
+            if login.lower() in BUILTIN[kind] or fold(login) in BUILTIN[kind]:
+                notes.append("note BUILTIN   %s: %s is a built-in or service administrator the list does not mention (ignored)" % (host, login))
+                continue
+            findings.append("EXTRA        %s: %s is an administrator on %s%s but the list has no sudo@%s row for it" % (
+                host, login, host, " (the list knows it as %s)" % person if person else "", host))
+            lines.append("   fix: %s    or take the rights away on %s" % (
+                "identity add %s sudo@%s %s --why \"administrator on %s\"" % (person, host, login, short(host)) if person
+                else "identity add PERSON sudo@%s %s --why \"administrator on %s\"" % (host, login, short(host)), short(host)))
+    if table:
+        cols = [h for h in todo if any(h in v for v in table.values())]
+        lines.append("")
+        lines.append("%-12s %s" % ("person", "  ".join("%-16s" % short(h) for h in cols)) + "     (list/machine: yes or no)")
+        for person in sorted(table):
+            cells = []
+            for h in cols:
+                lm = table[person].get(h)
+                cells.append("%-16s" % ("-" if lm is None else "%s/%s" % ("yes" if lm[0] else "no", "yes" if lm[1] else "no")))
+            lines.append("%-12s %s" % (person, "  ".join(cells)))
+    return findings, notes, lines
+
+
 # ------------------------------------------------------------------- main ---
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="identity", add_help=False)
@@ -393,6 +604,7 @@ def main(argv=None):
     ap.add_argument("--why")
     ap.add_argument("--floyd-local")
     ap.add_argument("--also", action="store_true")
+    ap.add_argument("--root", action="store_true")
     ap.add_argument("--strict", action="store_true")
     ap.add_argument("--no-default-files", action="store_true")
     for n in ("tickets", "netrc", "tvchat-conf", "tvmail-conf", "tvcal-conf", "floyd-conf", "mail-conf"):
@@ -493,6 +705,14 @@ def main(argv=None):
                         out.append(r["login"])
             print("\n".join(out)) if out else None
             return 0 if out else 1
+        if cmd == "check-admin":
+            findings, notes, lines = check_admin(reg, a, args)
+            for ln in lines:
+                print(ln)
+            for x in findings + notes:
+                print(x)
+            print("%d finding%s, %d note%s" % (len(findings), "" if len(findings) == 1 else "s", len(notes), "" if len(notes) == 1 else "s"))
+            return 3 if findings else 0
         if cmd == "check":
             findings, notes, read = check(reg, a)
             print("list: %d line%s (%s)" % (len(reg.rows), "" if len(reg.rows) == 1 else "s", user_file))

@@ -65,6 +65,24 @@ identity check                         # compare the list with the apps' configu
 `check` reads `~/.netrc`, `~/.mu-tickets` and the tvmail, tvchat, tvcal and Floyd configurations, and reports
 unregistered logins, conflicts, duplicates and admin names that are not registered.
 
+### Who is an administrator, and where
+
+Three places say who may administer a machine: the sudoers files on a Linux box (cpbee), the Administrators group on a Windows
+machine, and the list here. A row with the scheme `sudo` is the list's claim, one per person and machine:
+
+```
+chris   sudo@cpbee.cmnet      chris      # in sudoers
+chris   sudo@cmlaptop.cmnet   chris      # Administrators
+```
+
+`identity check-admin [HOST...]` asks each machine (this one directly, the others over ssh; Linux: the `sudo`, `admin` and
+`wheel` groups, and with `--root` the `ALL` rules in sudoers through `sudo-mfa`; Windows: `net localgroup Administrators`) and
+reports **MISSING** (the list says administrator, the machine says not), **EXTRA** (an administrator the list does not know),
+**UNREACHABLE**, a person-by-machine table, and the command that would reconcile each finding. It changes nothing, so you decide
+which side is right. Built-in accounts (`root`, `Administrator`, Cygwin's `cyg_server`) are noted, not reported. `@os HOST linux|windows`
+in the list skips asking the machine what it runs. Exit 3 on a finding, so a cron job can mail it. (`admin`, the flag on other rows, is
+a different thing: a login that answers for the bots.)
+
 ## netrc-to-tickets
 
 `~/.netrc` does not say which protocol a login is for; `~/.mu-tickets` does (`imaps://user:...@host`).  <!-- allowlist secret -->

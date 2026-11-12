@@ -172,6 +172,108 @@ class T(unittest.TestCase):
         self.assertIn("note UNSEEN   chris irc@x.example login chris2", out)
         self.assertNotIn("UNSEEN   chris imap", out)
 
+    def fake_machines(self):
+        """a fake ssh (IDENTITY_SSH) that answers for cpbee (linux), winbox and windesk (windows), nohost (down)."""
+        script = os.path.join(self.d, "fakessh")
+        self.put(script, """#!/bin/bash
+# fake ssh: ... HOST COMMAND
+host=${@: -2:1}; cmd=${@: -1}
+case $host in
+  nohost) exit 255 ;;
+  cpbee)
+    case $cmd in
+      "uname -s") echo Linux ;;
+      "getent group sudo admin wheel; getent passwd")
+        echo "sudo:x:27:chris,ann"; echo "admin:x:115:"
+        echo "root:x:0:0:root:/root:/bin/bash"; echo "chris:x:1000:1000::/home/chris:/bin/bash"; echo "bob:x:1002:115::/home/bob:/bin/bash"
+        echo "ann:x:1001:1001::/home/ann:/bin/bash" ;;
+      "getent group staff") echo "staff:x:50:carl" ;;
+    esac ;;
+  winbox|windesk)
+    case $cmd in
+      "uname -s") echo CYGWIN_NT-10.0-19045 ;;
+      "net localgroup Administrators")
+        printf 'Alias name     Administrators\\r\\nComment        Administrators have complete access\\r\\n\\r\\nMembers\\r\\n\\r\\n-------------------------------------------------------------------------------\\r\\n'
+        if [ $host = winbox ]; then printf 'Administrator\\r\\nWINBOX\\\\chris\\r\\nNT AUTHORITY\\\\Authenticated Users\\r\\n'; else printf 'Administrator\\r\\nDESK\\\\someone\\r\\n'; fi
+        printf 'The command completed successfully.\\r\\n' ;;
+    esac ;;
+esac
+""")
+        os.chmod(script, 0o755)
+        self.env["IDENTITY_SSH"] = script
+        sudo = os.path.join(self.d, "fakesudo")
+        self.put(sudo, """#!/bin/bash
+echo "[sudo] password for chris: "; echo "Verification code: "
+cat <<'EOS'
+Defaults	env_reset
+root	ALL=(ALL:ALL) ALL
+%sudo	ALL=(ALL:ALL) ALL
+carl	ALL=(ALL) NOPASSWD: ALL
+%staff	ALL=(ALL) ALL
+dave	ALL=(root) /usr/bin/systemctl
+EOS
+""")
+        os.chmod(sudo, 0o755)
+        self.env["IDENTITY_SUDO"] = sudo
+
+    def test_check_admin_reports_missing_and_extra(self):
+        self.fake_machines()
+        self.put(self.f, LIST + """sudo_hosts_follow
+""".replace("sudo_hosts_follow", "") + """
+@os cpbee.cmnet linux
+chris   sudo@cpbee.cmnet     chris      # in sudoers
+ann     sudo@cpbee.cmnet     ann        # in sudoers
+carl    sudo@cpbee.cmnet     carl       # claimed, but not in the groups
+chris   sudo@winbox.cmnet  chris      # Administrators
+chris   sudo@windesk.cmnet chris      # Administrators
+""")
+        rc, out = self.run_tool("check-admin")
+        self.assertEqual(rc, 3, out)
+        self.assertIn("cpbee.cmnet (linux", out)
+        self.assertIn("MISSING      cpbee.cmnet: the list says carl (carl) is an administrator", out)   # claimed, not a member
+        self.assertIn("EXTRA        cpbee.cmnet: bob is an administrator", out)                         # in group admin by primary gid
+        self.assertNotIn("EXTRA        cpbee.cmnet: chris", out)
+        self.assertNotIn("EXTRA        cpbee.cmnet: ann", out)
+        self.assertIn("note BUILTIN   cpbee.cmnet: root", out)
+        self.assertIn("MISSING      windesk.cmnet: the list says chris (chris)", out)                 # Windows: only 'someone' there
+        self.assertIn("EXTRA        windesk.cmnet: someone is an administrator", out)
+        self.assertNotIn("MISSING      winbox", out)                                                  # chris matches case-insensitively
+        self.assertNotIn("EXTRA        winbox", out)
+        self.assertNotIn("Authenticated Users", out)                                                    # NT AUTHORITY entries are skipped
+        self.assertIn("identity add PERSON sudo@windesk.cmnet someone", out)                          # unknown person: a template
+        self.assertIn("fix:", out)
+        self.assertRegex(out, r"chris\s+yes/yes\s+yes/yes\s+yes/no")                                    # the table: cpbee, winbox, windesk
+        # a clean machine is exit 0
+        rc, out = self.run_tool("check-admin", "winbox")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("0 findings", out)
+
+    def test_check_admin_unreachable_and_root_sudoers(self):
+        self.fake_machines()
+        self.put(self.f, LIST + "chris sudo@cpbee.cmnet chris\ncarl sudo@cpbee.cmnet carl\nann sudo@nohost.cmnet ann\n")
+        rc, out = self.run_tool("check-admin", "nohost")
+        self.assertEqual(rc, 3)
+        self.assertIn("UNREACHABLE  nohost.cmnet", out)
+        # --root reads sudoers: carl (ALL via NOPASSWD) and the %staff group (carl again) count; dave (one command) does not
+        rc, out = self.run_tool("check-admin", "cpbee", "--root")
+        self.assertNotIn("MISSING", out)
+        self.assertNotIn("EXTRA        cpbee.cmnet: dave", out)
+        self.assertIn("EXTRA        cpbee.cmnet: ann is an administrator", out)
+        self.assertEqual(self.run_tool("check-admin")[0], 3)
+        # no sudo rows and no @os: nothing to do, not an error
+        self.put(self.f, LIST)
+        rc, out = self.run_tool("check-admin")
+        self.assertEqual(rc, 0)
+        self.assertIn("nothing to check", out)
+
+    def test_os_line_is_checked(self):
+        self.put(self.f, "@os cpbee linux\n" + LIST)
+        self.assertEqual(self.run_tool("list")[0], 0)
+        self.put(self.f, "@os cpbee plan9\n" + LIST)
+        rc, out = self.run_tool("list")
+        self.assertEqual(rc, 1)
+        self.assertIn("@os NAME linux|windows", out)
+
     def test_no_password_ever_reaches_the_output(self):
         self.fixtures()
         for cmd in (("check", "--floyd-conf", self.floyd, "-v"), ("list",), ("check", "--strict")):
