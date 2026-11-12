@@ -55,8 +55,17 @@ COMMANDS (answers on stdout, exit 1 when there is none)
   serve NAME                         the forced command behind an enrolled key (not run by hand)
   totp HOST [LOGIN] [--digits N]     the current 6-digit code (RFC 6238, 30 s) from the record of kind totp for that
                                      host; computed on the server, only the code crosses; the last stdout line is
-                                     the code (what ssh-wwl wants from get2fa_code.py).  Store a seed:
+                                     the code (what ssh-wwl wants from get2fa_code.py).  A seed a site gave you:
                                      auth set 2fa@HOST LOGIN --kind totp   (base32 text, as the site shows it)
+  totp HOST [LOGIN] --verify CODE    no output; exit 0 if CODE is the current code or the one before or after it (clock
+                                     slack), 1 if not (computed on the server, nothing but the exit status crosses)
+  seed HOST LOGIN [--replace] [--note TEXT]
+                                     make a NEW random one-time-code seed for HOST/LOGIN on the server, store it as the
+                                     record 2fa@HOST LOGIN (kind totp), and print it once: line 1 the seed (base32), line 2
+                                     an otpauth:// URL for an authenticator app.  Refuses to replace an existing record
+                                     unless --replace.  The seed stays in the vault: `totp` gives codes, --verify checks one
+                                     (master tier, or --service); the machine that needs the seed in a file (a PAM check
+                                     on a host) reads it with `get 2fa HOST LOGIN`.  `mfa-seed` wraps this with a check.
   import foo [FILE] [--key KEYFILE] [--lan NAME]... [--skip LABEL]... [-n]
                                      take the entries of the old ~/.foo/bar password manager (decrypted with the  # allowlist secret
                                      old ssh key, default ~/.ssh-OLD/id_rsa) into the vault, kept out of every file
@@ -627,6 +636,8 @@ def main(argv=None, restricted=None):
     ap.add_argument("--smtp", action="store_true")
     ap.add_argument("--key")
     ap.add_argument("--digits", type=int, default=6)
+    ap.add_argument("--verify")
+    ap.add_argument("--replace", action="store_true")
     ap.add_argument("--lan", action="append")
     ap.add_argument("--skip", action="append")
     ap.add_argument("--all", action="store_true")
@@ -777,8 +788,11 @@ def main(argv=None, restricted=None):
             return 0 if r.returncode == 0 else 4
 
         # ---- forwarded as they are
-        if cmd in ("get", "list", "totp", "foo") and not is_server():
-            rc, out = ssh([cmd] + args + (["--service"] if a.service and cmd == "list" else []) + (["--with-login"] if a.with_login and cmd == "get" else []) +(["--no-domain"] if a.no_domain else ["--domain", a.domain]))
+        if cmd in ("get", "list", "totp", "foo", "seed") and not is_server():
+            rc, out = ssh([cmd] + args + (["--service"] if a.service and cmd in ("list", "seed") else []) + (["--with-login"] if a.with_login and cmd == "get" else [])
+                          + (["--digits", str(a.digits)] if a.digits != 6 else []) + (["--verify", a.verify] if a.verify is not None else [])
+                          + (["--replace"] if a.replace else []) + (["--note", a.note] if a.note else [])
+                          + (["--no-domain"] if a.no_domain else ["--domain", a.domain]))
             sys.stdout.write(out.decode("utf-8", errors="replace"))
             return rc
 
@@ -872,11 +886,38 @@ def main(argv=None, restricted=None):
             try:
                 now = float(os.environ.get("AUTH_NOW") or time.time())
                 code = totp_code(hits[0]["secret"], now, a.digits)
+                if a.verify is not None:
+                    import hmac
+                    return 0 if any(hmac.compare_digest(totp_code(hits[0]["secret"], now + d * 30, a.digits), a.verify.strip())
+                                    for d in (-1, 0, 1)) else 1
             except ValueError:
                 raise Err("the stored secret for %s %s is not a base32 TOTP seed" % (h, hits[0]["login"]))
             print(code)
             if sys.stderr.isatty():
                 print("(valid for %d more seconds)" % (30 - int(now) % 30), file=sys.stderr)
+            return 0
+
+        if cmd == "seed":
+            if len(args) != 2:
+                raise Err("seed HOST LOGIN [--replace] [--note TEXT] [--service]", 2)
+            import base64
+            import secrets
+            h = host_of(args[0], dom)
+            recs = v.load()
+            r = exact(recs, "2fa", h, args[1])
+            if r and not a.replace:
+                raise Err("there is already a %s record 2fa@%s %s: --replace makes a new seed (every app or machine using the old one must be redone)"
+                          % (r.get("kind"), h, args[1]))
+            seed = base64.b32encode(secrets.token_bytes(20)).decode()
+            rec = {"scheme": "2fa", "host": h, "hostspec": h, "login": args[1], "kind": "totp", "secret": seed,
+                   "note": a.note or (r or {}).get("note", "") or "one-time-code seed (auth seed)"}  # allowlist secret
+            if r:
+                recs[recs.index(r)] = rec
+            else:
+                recs.append(rec)
+            v.save(recs)
+            print(seed)
+            print("otpauth://totp/%s:%s?secret=%s&issuer=%s" % (args[0], args[1], seed, args[0]))  # allowlist secret
             return 0
 
         if cmd == "set":

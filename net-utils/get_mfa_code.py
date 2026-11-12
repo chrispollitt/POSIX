@@ -15,8 +15,8 @@ Where the secret comes from, first hit wins
 
 Options
   --no-vault      skip step 1 (also: MFA_NO_VAULT=1)       --digits N   code length (default 6)
-  --verify CODE   print nothing; exit 0 if CODE is the current code for HOST [USER], 1 if not, 3 if there is no seed.
-                  (With a token file the previous and next code count too; the vault answers with the current one only.)
+  --verify CODE   print nothing; exit 0 if CODE is the current code for HOST [USER] (or the one before or after it), 1 if
+                  not, 3 if there is no seed.  With the vault this is `auth totp HOST USER --verify CODE`.
   --file PATH     use this token file only                 -h, --help
 Environment: MFA_AUTH (the auth tool; default `auth` on PATH, else next to this script), MFA_TOKENS (token file),
 MFA_NO_VAULT.
@@ -72,6 +72,19 @@ def from_vault(host, user, digits):
     if r.returncode == 0 and out and re.fullmatch(r"\d{%d}" % digits, out[-1].strip()):
         return out[-1].strip()
     return None
+
+
+def vault_verify(host, user, digits, code):
+    auth = os.environ.get("MFA_AUTH") or "auth"
+    if auth == "auth" and not any(os.access(os.path.join(d, "auth"), os.X_OK) for d in os.environ.get("PATH", "").split(os.pathsep) if d) \
+            and os.access(os.path.join(HERE, "auth"), os.X_OK):
+        auth = os.path.join(HERE, "auth")
+    cmd = [auth, "totp", host] + ([user] if user else []) + ["--digits", str(digits), "--verify", code]
+    try:
+        r = subprocess.run(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
+    except (OSError, subprocess.TimeoutExpired):
+        return 1
+    return 0 if r.returncode == 0 else 1
 
 
 def token_files(explicit):
@@ -167,7 +180,7 @@ def main(argv):
         code = from_vault(host, user, digits)
         if code:
             if verify is not None:
-                return 0 if hmac.compare_digest(code, verify.strip()) else 1
+                return vault_verify(host, user, digits, verify.strip())
             print(code)
             return 0
     sec = from_file(host, user, explicit)

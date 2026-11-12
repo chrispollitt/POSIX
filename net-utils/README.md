@@ -10,7 +10,7 @@ docstring at the top of the file. Python 3 and bash only; they run on Linux, mac
 | [identity](identity) | who is who: the logins a person uses on each service (no secrets) |
 | [net-login](net-login) | one script for `ssh-mfa`, `sudo-mfa` and `telnet-netrc`: logs in and answers the password / one-time-code prompts (mode = the name it is called by) |
 | [get_mfa_code.py](get_mfa_code.py) | the current one-time code (TOTP) for a host, from the vault or a token file; used by `net-login` |
-| [mfa-seed](mfa-seed) | make a one-time-code seed for a host, keep it in the vault, show it once for a phone app, and check the first code |
+| [mfa-seed](mfa-seed) | `auth seed` plus a check: makes a one-time-code seed in the vault, shows it once for a phone app, and verifies the first code |
 | [netrc-to-tickets](netrc-to-tickets) | move logins from `~/.netrc` into `~/.mu-tickets` |
 | [lan-port](lan-port) | open, close and audit the LAN ports of cpbee |
 | [traceroute-plus.sh](traceroute-plus.sh) | traceroute that also asks each hop about itself |
@@ -38,6 +38,7 @@ auth get imaps cpbee              # the secret (the login comes from identity, o
 auth set imaps,smtp@cpbee chris   # store a secret; prompted without echo (--stdin for scripts)
 auth list                         # records, no secrets
 auth totp HOST                    # the current 6-digit code, from a record stored with --kind totp
+auth seed HOST LOGIN              # make, store and print (once) a new one-time-code seed; totp HOST LOGIN --verify CODE checks a code
 auth import netrc                 # take ~/.netrc into the vault (also: tickets, foo; -n plans only)
 auth render tickets               # write the passwords into ~/.mu-tickets (also: netrc) between BEGIN/END auth lines
 auth check                        # the vault against identity

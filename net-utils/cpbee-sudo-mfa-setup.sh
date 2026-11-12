@@ -149,12 +149,13 @@ echo "package: ok"
 if sudo test -s $D/$me; then
   echo "seed file $D/$me exists; kept"
 else
-  seed=$(python3 -c 'import base64,secrets;print(base64.b32encode(secrets.token_bytes(20)).decode())') || exit 1
-  printf '%s\n' "$seed" | auth set 2fa@cpbee "$me" --kind totp --note "sudo code for $me on cpbee (pam_google_authenticator)" --stdin >/dev/null || { echo "FAILED: could not store the seed in the vault"; exit 1; }
+  # the vault makes and keeps the seed (auth seed); this machine only needs it in a root-only file for PAM
+  seed=$(auth seed cpbee "$me" --note "sudo code for $me on cpbee (pam_google_authenticator)" | sed -n 1p)
+  [ -n "$seed" ] || { echo "FAILED: the vault did not make a seed (one already there? auth seed --replace)"; exit 1; }
   sudo install -d -m 700 -o root -g root $D
   printf '%s\n" RATE_LIMIT 3 30\n" WINDOW_SIZE 3\n" DISALLOW_REUSE\n" TOTP_AUTH\n' "$seed" | sudo tee $D/$me >/dev/null
   sudo chown root:root $D/$me; sudo chmod 400 $D/$me
-  echo "seed: stored in the vault (master tier) and in $D/$me"
+  echo "seed: made by the vault (master tier) and copied to $D/$me"
   [ "$phone" = 1 ] && echo "phone app:  otpauth://totp/cpbee-sudo:$me?secret=$seed&issuer=cpbee"
   unset seed
 fi

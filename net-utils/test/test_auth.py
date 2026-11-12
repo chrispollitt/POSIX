@@ -220,6 +220,42 @@ class T(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn("which login", err)
 
+    def test_seed_and_verify(self):
+        self.fresh()
+        rc, out, err = self.run_auth("seed", "box.example", "me", "--note", "for the test")
+        self.assertEqual(rc, 0, err)
+        lines = out.split(chr(10))
+        seed = lines[0]
+        self.assertRegex(seed, r"^[A-Z2-7]{32}$")                              # 160 bits, base32, no padding
+        self.assertEqual(lines[1], "otpauth://totp/box.example:me?secret=%s&issuer=box.example" % seed)  # allowlist secret
+        rc, code, _ = self.run_auth("totp", "box.example", "me")               # the stored seed gives codes
+        self.assertEqual((rc, len(code.strip())), (0, 6))
+        self.assertEqual(self.run_auth("get", "2fa", "box.example", "me")[1].strip(), seed)    # and can be read back for a root-only file
+        rc, _, err = self.run_auth("seed", "box.example", "me")                # no silent replacement
+        self.assertEqual(rc, 1)
+        self.assertIn("--replace", err)
+        self.assertNotIn(seed, err)
+        self.assertEqual(self.run_auth("get", "2fa", "box.example", "me")[1].strip(), seed)
+        rc, out2, _ = self.run_auth("seed", "box.example", "me", "--replace")
+        self.assertEqual(rc, 0)
+        self.assertNotEqual(out2.split(chr(10))[0], seed)
+        # --verify: the code before, now and after are accepted, others are not; nothing is printed
+        now = 1111111109
+        env = dict(self.env, AUTH_NOW=str(now))
+        self.run_auth("set", "2fa@rfc.example", "me", "--kind", "totp", "--stdin", stdin="GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ" + chr(10))
+        for t, want_ok in ((now, True), (now - 30, True), (now + 30, True), (now - 90, False), (now + 90, False)):
+            code = self.run_auth("totp", "rfc.example", "me", env=dict(self.env, AUTH_NOW=str(t)))[1].strip()
+            rc, out, _ = self.run_auth("totp", "rfc.example", "me", "--verify", code, env=env)
+            self.assertEqual((rc, out), (0 if want_ok else 1, ""), (t, code))
+        self.assertEqual(self.run_auth("totp", "rfc.example", "me", "--verify", "000000", env=env)[0], 1)
+        self.assertEqual(self.run_auth("totp", "nobody.example", "me", "--verify", "000000")[0], 1)
+        self.assertEqual(self.run_auth("seed", "onlyhost")[0], 2)               # usage
+        # a record of another kind under the same name is not overwritten by a seed
+        self.run_auth("set", "2fa@pw.example", "me", "--stdin", stdin="a-password" + chr(10))
+        rc, _, err = self.run_auth("seed", "pw.example", "me")
+        self.assertEqual(rc, 1)
+        self.assertEqual(self.run_auth("get", "2fa", "pw.example", "me")[1].strip(), "a-password")
+
     def test_render_tickets_replaces_older_lines_and_adds_bare_names(self):
         self.fresh()
         self.run_auth("set", "imaps@cpbee", "chris", "--stdin", stdin="new-pw\n")

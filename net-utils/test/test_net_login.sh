@@ -36,6 +36,21 @@ c5=$(MFA_NO_VAULT=1 MFA_TOKENS="$T/tokens.json" python3 "$GET" otherhost oldlogi
 out=$(MFA_NO_VAULT=1 MFA_TOKENS="$T/tokens.json" python3 "$GET" nosuchhost 2>&1); rc=$?
 eq "unknown host exits 1" 1 "$rc"; case "$out" in *"$SECRET"*) bad "secret leaked in error";; *) ok;; esac
 python3 "$GET" >/dev/null 2>&1; eq "no args exits 2" 2 $?
+# --verify: a token file accepts the code now (and the neighbours), refuses others, exit 3 for no seed; with the vault it asks `auth totp --verify`
+MFA_NO_VAULT=1 MFA_TOKENS="$T/tokens.json" python3 "$GET" --verify "$c1" boxhost alice; eq "--verify: the current code" 0 $?
+MFA_NO_VAULT=1 MFA_TOKENS="$T/tokens.json" python3 "$GET" --verify 000000 boxhost alice; eq "--verify: a wrong code" 1 $?
+MFA_NO_VAULT=1 MFA_TOKENS="$T/tokens.json" python3 "$GET" --verify "$c1" nosuchhost; eq "--verify: no seed" 3 $?
+cat >"$T/vaultauth" <<'EOF'
+#!/bin/bash
+# fake vault front end: totp HOST [USER] [--digits N] [--verify CODE]
+v=""; while [ $# -gt 0 ]; do [ "$1" = "--verify" ] && v=$2; shift; done
+if [ -z "$v" ]; then echo 123456; exit 0; fi
+[ "$v" = 123456 ] && exit 0 || exit 1
+EOF
+chmod +x "$T/vaultauth"
+MFA_AUTH="$T/vaultauth" python3 "$GET" --verify 123456 h u; eq "--verify through the vault: accepted" 0 $?
+MFA_AUTH="$T/vaultauth" python3 "$GET" --verify 654321 h u; eq "--verify through the vault: refused" 1 $?
+
 
 # ---- fakes --------------------------------------------------------------------------------------------------------------
 cat >"$T/fakessh" <<'EOF'

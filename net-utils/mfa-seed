@@ -2,49 +2,46 @@
 # mfa-seed HOST [USER]: make a one-time-code seed for HOST/USER, keep it in the vault, show it once for an authenticator app.
 #
 #   mfa-seed cmlaptop            seed for this login on cmlaptop (USER defaults to you)
-#   mfa-seed cpbee chris         seed for chris on cpbee (REPLACE=1 to replace an existing one)
+#   REPLACE=1 mfa-seed cpbee chris    replace an existing seed (the app and anything else using the old one must be redone)
 #
-# What it does: makes a random 160-bit seed; stores it in the vault's MASTER tier as  2fa@HOST USER  (kind totp; the vault must be
-# unlocked: ssh -t cpbee auth unlock); prints the seed and an otpauth:// line ONCE so you can add it to a phone app (type the seed in,
-# or make a QR code of the line); then asks you to type the code the app shows, and checks it.  If the check fails 3 times the record
-# is removed again.  `get_mfa_code.py HOST USER` then gives the same code, and `get_mfa_code.py --verify CODE HOST USER` checks one.
-# On Windows (Cygwin) `sudo-mfa --local` needs the vault to give this code before it elevates (it offers to run this).  The seed is on
-# your screen while this runs: clear it after.
+# The vault does the work (`auth seed`): it makes the random seed on the server, stores it in the master tier as  2fa@HOST USER
+# (kind totp) and prints it once.  This script shows the seed and an otpauth:// line for a phone app (type the seed in, or make a
+# QR code of the line), then asks you to type the code the app shows and checks it with `auth totp --verify`.  If the check fails
+# 3 times a NEW record is removed again.  Codes come from `auth totp HOST USER` (get_mfa_code.py wraps it), and
+# `sudo-mfa --local` on Windows offers to run this when there is no seed.  The seed is on your screen while this runs: clear it after.
 set -u
 here=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
-GET=${MFA_GETCODE:-$here/get_mfa_code.py}
 AUTH=${MFA_AUTH:-auth}
 if ! command -v "$AUTH" >/dev/null 2>&1 && [[ -x $here/auth ]]; then AUTH=$here/auth; fi
-case ${1:-} in -h|--help|"") sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;; esac
+case ${1:-} in -h|--help|"") sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;; esac
 host=$1
 user=${2:-$(id -un)}
 die() { echo "mfa-seed: $*" >&2; exit 1; }
 [[ -t 0 && -t 1 ]] || die "run this in a terminal"
-[[ -f $GET ]] || die "$GET not found"
-
-if MFA_NO_VAULT= python3 "$GET" "$host" "$user" >/dev/null 2>&1; then
-  [[ ${REPLACE:-0} == 1 ]] || die "there is already a seed for $host/$user (REPLACE=1 to replace it)"
-fi
 "$AUTH" list >/dev/null 2>&1 || die "the vault is locked or unreachable: ssh -t cpbee auth unlock"
 
-seed=$(python3 -c 'import base64,secrets;print(base64.b32encode(secrets.token_bytes(20)).decode())') || die "no random seed"
-printf '%s\n' "$seed" | "$AUTH" set "2fa@$host" "$user" --kind totp --note "one-time code seed for $user on $host (mfa-seed)" --stdin >/dev/null \
-  || die "could not store the seed in the vault"
+out=$("$AUTH" seed "$host" "$user" ${REPLACE:+--replace} --note "one-time code seed for $user on $host (mfa-seed)") || die "the vault would not make the seed (an existing one? REPLACE=1)"
+seed=$(printf '%s\n' "$out" | sed -n 1p)
+url=$(printf '%s\n' "$out" | sed -n 2p)
+[[ -n $seed && -n $url ]] || die "unexpected answer from auth seed"
 
 echo
 echo "Add this to your authenticator app (account \"$host $user\", time-based, 6 digits, 30 s):"
 echo "    seed:     $seed"
-echo "    otpauth:  otpauth://totp/$host:$user?secret=$seed&issuer=$host"
-unset seed
+echo "    otpauth:  $url"
+unset seed url out
 echo
 n=0
 while [[ $n -lt 3 ]]; do
   read -r -p "Type the code the app shows now: " code
-  if python3 "$GET" --verify "$code" "$host" "$user"; then
+  if "$AUTH" totp "$host" "$user" --verify "$code" >/dev/null 2>&1; then
     echo "ok: the app and the vault agree.  Clear this screen (the seed is above)."
     exit 0
   fi
   n=$((n+1)); echo "   not the same code ($n/3)"
 done
+if [[ -n ${REPLACE:-} ]]; then
+  die "the code never matched; the NEW seed is stored in the vault anyway (REPLACE was set): redo the app or run again"
+fi
 "$AUTH" remove "2fa@$host" "$user" >/dev/null 2>&1
 die "the code never matched; the new record was removed again (nothing is changed)"
