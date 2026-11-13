@@ -23,6 +23,8 @@ THE LIST   $IDENTITY_FILE, else ~/.config/identities  (and /etc/identities, read
     chris     sudo@cmlaptop.cmnet  chris                             # Administrators
   (`admin` above is something else: a bot's admin.)  `@os NAME linux|windows` says what a machine runs; otherwise
   `check-admin` asks it (uname).  `check-admin` compares these rows with what the machines say.
+  A WSL distro is its own machine, named HOST-wsl (its hostname is the Windows machine's name): `chris sudo@cmlaptop-wsl.cmnet chris`,
+  `@os cmlaptop-wsl.cmnet linux`; it can only be audited from inside that WSL (nothing ssh's into it).
 
 COMMANDS (for scripts: the answer on stdout, exit 1 when there is none)
   list [PERSON]                      the whole list, or one person's lines
@@ -415,9 +417,24 @@ def short(h):
     return h.split(".")[0]
 
 
+def in_wsl():
+    """Linux under Windows?  IDENTITY_WSL=1|0 overrides."""
+    if os.environ.get("IDENTITY_WSL") in ("0", "1"):
+        return os.environ["IDENTITY_WSL"] == "1"
+    try:
+        with open("/proc/version") as fh:
+            return "microsoft" in fh.read().lower()
+    except OSError:
+        return False
+
+
 def is_local(h):
-    me = socket.gethostname().lower()
-    return short(h).lower() in (me, short(me), "localhost")
+    """is HOST this machine?  In WSL the hostname is the Windows machine's, so there HOST-wsl is this machine and HOST is not."""
+    me = (os.environ.get("IDENTITY_HOSTNAME") or socket.gethostname()).lower()
+    s = short(h).lower()
+    if in_wsl():
+        return s in (short(me) + "-wsl", "localhost")
+    return s in (me, short(me), "localhost")
 
 
 def run_on(host, cmd, local):

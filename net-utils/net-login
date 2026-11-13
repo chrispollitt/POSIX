@@ -23,6 +23,11 @@ exec expect -f "$0" -- ${1+"$@"}
 #                                               GUI:       RunAsAdminClient.exe COMMAND  (--gui, or the name sudo-gui)
 #                                             Leading options (-i, -u ...) are dropped, as the old function did.  MFA_NO_CODE=1 skips the gate.
 #
+# In WSL (Windows Subsystem for Linux) `sudo-mfa --local` is the distro's own sudo, like any Linux machine.  Windows administrator
+# rights are asked for with --gui / sudo-gui: the vault gate as on Windows, then C:\dos\RunAsAdminClient.exe through WSL's interop
+# (started from a Windows directory).  WSL answers to HOSTNAME-wsl here (its hostname is the Windows machine's name): the name of
+# the machine itself, e.g. `sudo-mfa cmlaptop ...`, is the Windows host, so that is ssh, not local.
+#
 # Doing it for you, in every mode: the password comes from ~/.netrc, the one-time code from the vault (get_mfa_code.py).  When
 # someone is at the terminal and something is missing it asks, and fixes it:
 #   - the vault is locked        -> runs  ssh -t cpbee auth unlock  (you type the passphrase), then carries on
@@ -64,7 +69,7 @@ exec expect -f "$0" -- ${1+"$@"}
 #   MFA_PASSWORD_PROMPT (regex for the sudo prompt that asks for the password)   MFA_TELNET_TIMEOUT (120)
 #   MFA_SUDO (sudo; the local sudo to run)   MFA_LOCAL (1 = sudo mode runs sudo here, as --local)
 #   MFA_UID (the user id to treat as "already root" if it is 0; default: id -u)   MFA_NO_PROMPT (1: never ask)   AUTH_HOST (cpbee)
-#   Windows: MFA_PLATFORM (windows|unix, to override detection)   MFA_ADMIN_CMD (net session: succeeds when elevated)
+#   Windows/WSL: MFA_PLATFORM (windows|wsl|unix, to override detection)   MFA_WIN_CWD (/mnt/c: where WSL starts the Windows client)   MFA_ADMIN_CMD (net session: succeeds when elevated)
 #            MFA_RUNAS_CLIENT (/dos/RunAsAdminClient.exe)   MFA_NO_CODE (1: no code check)
 
 proc env_or {names default} {
@@ -182,9 +187,33 @@ proc get_code {host user} {
     return ""
 }
 
+# windows (Cygwin/MSYS), wsl (Linux under Windows) or unix
+set platform_cache ""
+proc detect_platform {} {
+    global platform_cache
+    if {$platform_cache ne ""} { return $platform_cache }
+    set p [env_or MFA_PLATFORM ""]
+    if {$p eq ""} {
+        if {[regexp {^(CYGWIN|MSYS|MINGW)} $::tcl_platform(os)]} {
+            set p windows
+        } elseif {[info exists ::env(WSL_DISTRO_NAME)] || [info exists ::env(WSL_INTEROP)]} {
+            set p wsl
+        } elseif {![catch {open /proc/version r} fh]} {
+            set v [read $fh]; close $fh
+            set p [expr {[string match -nocase *microsoft* $v] ? "wsl" : "unix"}]
+        } else {
+            set p unix
+        }
+    }
+    set platform_cache $p
+    return $p
+}
+
+# this machine's name; in WSL it is HOSTNAME-wsl, because WSL's hostname is the Windows machine's
 proc this_host {} {
-    if {![catch {exec hostname -s} h] && $h ne ""} { return $h }
-    return [lindex [split [info hostname] .] 0]
+    if {[catch {exec hostname -s} h] || $h eq ""} { set h [lindex [split [info hostname] .] 0] }
+    if {[detect_platform] eq "wsl" && ![string match *-wsl $h]} { append h -wsl }
+    return $h
 }
 
 # is a person at the terminal who can be asked things?
@@ -497,7 +526,9 @@ set hidx [first_word_index $argv]
 if {$mode eq "sudo" && !$local && $alias_host eq "" && $hidx >= 0} {
     # this machine's own name (or localhost) as the host means sudo here, without ssh
     set w [string trim [lindex $argv $hidx]]
-    if {[lsearch -exact [list localhost 127.0.0.1 ::1 [this_host] [info hostname]] $w] >= 0} {
+    set own [list localhost 127.0.0.1 ::1 [this_host]]
+    if {[detect_platform] ne "wsl"} { lappend own [info hostname] }          ;# in WSL that name is the Windows host
+    if {[lsearch -exact $own $w] >= 0} {
         set local 1
         set argv [lrange $argv [expr {$hidx + 1}] end]
     }
@@ -526,7 +557,7 @@ for {set i 0} {$i < [llength $pre]} {incr i} {
 
 # Windows (Cygwin): no sudo; elevate with ssh localhost (terminal) or RunAsAdminClient.exe (GUI), once the vault has given a code
 set winssh 0
-set platform [env_or MFA_PLATFORM [expr {[regexp {^(CYGWIN|MSYS|MINGW)} $::tcl_platform(os)] ? "windows" : "unix"}]]
+set platform [detect_platform]
 if {$mode eq "sudo" && $local && $platform eq "windows"} {
     set words $post
     while {[llength $words] && [string match -* [lindex $words 0]]} { set words [lrange $words 1 end] }
@@ -546,6 +577,20 @@ if {$mode eq "sudo" && $local && $platform eq "windows"} {
         run_through [concat [env_or MFA_RUNAS_CLIENT /dos/RunAsAdminClient.exe] $words]
     }
     set winssh 1
+}
+
+# WSL: Windows administrator rights for a program (--gui / sudo-gui): the vault gate, then the Windows client through interop
+if {$mode eq "sudo" && $local && $platform eq "wsl" && $gui} {
+    set words $post
+    while {[llength $words] && [string match -* [lindex $words 0]]} { set words [lrange $words 1 end] }
+    if {![llength $words]} { send_user "usage: $me --gui COMMAND \[ARGS\]\n"; exit 2 }
+    if {[env_or MFA_NO_CODE 0] ne "1"} {
+        if {[fetch_code $host $user] eq ""} {
+            fail "no one-time code available for $host/$user: the vault is locked or has no seed (mfa-seed; MFA_NO_CODE=1 skips this check)"
+        }
+    }
+    # the client sends its working directory to the server: start it from a Windows directory, not a \\wsl$ path
+    run_through [list bash -c {cd "$1" && shift && exec "$@"} _ [env_or MFA_WIN_CWD /mnt/c] [env_or MFA_RUNAS_CLIENT /mnt/c/dos/RunAsAdminClient.exe] {*}$words]
 }
 
 # already root on this machine: nothing to answer, so run the command itself (no spawn, no netrc, no code)

@@ -266,6 +266,29 @@ chris   sudo@windesk.cmnet chris      # Administrators
         self.assertEqual(rc, 0)
         self.assertIn("nothing to check", out)
 
+    def test_wsl_is_its_own_machine(self):
+        import importlib.machinery
+        import importlib.util
+        ld = importlib.machinery.SourceFileLoader("identity_mod", TOOL)
+        sp = importlib.util.spec_from_loader("identity_mod", ld)
+        mod = importlib.util.module_from_spec(sp)
+        ld.exec_module(mod)
+        saved = {k: os.environ.get(k) for k in ("IDENTITY_WSL", "IDENTITY_HOSTNAME")}
+        try:
+            os.environ["IDENTITY_HOSTNAME"] = "Box"
+            os.environ["IDENTITY_WSL"] = "0"
+            self.assertTrue(mod.is_local("box.cmnet") and mod.is_local("box") and mod.is_local("localhost"))
+            self.assertFalse(mod.is_local("box-wsl.cmnet"))
+            os.environ["IDENTITY_WSL"] = "1"                         # in WSL the hostname is the Windows machine's
+            self.assertTrue(mod.is_local("box-wsl.cmnet") and mod.is_local("localhost"))
+            self.assertFalse(mod.is_local("box.cmnet") or mod.is_local("box"))
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
     def test_os_line_is_checked(self):
         self.put(self.f, "@os cpbee linux\n" + LIST)
         self.assertEqual(self.run_tool("list")[0], 0)

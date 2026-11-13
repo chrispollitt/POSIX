@@ -239,6 +239,30 @@ case $(cat "$T/emptynetrc") in *"machine $LH login $LU password "*) ok;; *) bad 
 [[ $(stat -c %a "$T/emptynetrc") =~ ^[67]00$ ]] && ok || bad "saved netrc is private (no group/other access)"
 ls "$T"/BAK/emptynetrc.* >/dev/null 2>&1 && ok || bad "the old netrc was backed up"
 
+# ---- WSL: the distro's own sudo, Windows admin through the interop client, and WSL's own host name ------------------------------
+cat >"$T/wslrunas" <<'EOF'
+#!/bin/bash
+echo "elevated-gui: $* (from $PWD)"; exit 9
+EOF
+chmod +x "$T/wslrunas"
+mkdir "$T/wincwd"
+printf '{"%s-wsl": {"%s": "%s"}, "%s": {"%s": "%s"}}\n' "$LH" "$LU" "$SECRET" "$LH" "$LU" "$SECRET" >"$T/wtokens.json"     # the fake sudo asks for the real hostname, net-login for HOST-wsl
+printf 'machine %s-wsl login %s password localpw\n' "$LH" "$LU" >"$T/wnetrc"; chmod 600 "$T/wnetrc"      # allowlist secret
+wslenv() { MFA_PLATFORM=wsl MFA_RUNAS_CLIENT="$T/wslrunas" MFA_WIN_CWD="$T/wincwd" MFA_NO_VAULT=1 MFA_TOKENS="$T/wtokens.json" MFA_NETRC="$T/wnetrc" MFA_SUDO="$T/fakesudo" MFA_SSH="$T/winssh" FAKE_TOKENS="$T/wtokens.json" "$@"; }
+sec=$(( $(date +%s) % 30 )); [ $sec -ge 25 ] && sleep $(( 32 - sec ))
+out=$(cd /tmp && wslenv "$T/bin/sudo-gui" notepad.exe C:/x.txt </dev/null 2>&1); rc=$?
+has "wsl, sudo-gui: the Windows client runs after the vault gate" "elevated-gui: notepad.exe C:/x.txt" "$out"; eq "wsl, sudo-gui: status" 9 "$rc"
+has "wsl, sudo-gui: started from a Windows directory, not the WSL one" "(from $T/wincwd)" "$out"
+out=$(cd /tmp && wslenv "$T/bin/sudo-mfa" --gui regedit </dev/null 2>&1); has "wsl, --gui flag" "elevated-gui: regedit" "$out"
+out=$(wslenv env MFA_TOKENS="$T/tokens.json" "$T/bin/sudo-gui" regedit </dev/null 2>&1); rc=$?
+has "wsl, sudo-gui with no seed: nothing runs, says how to make one" "mfa-seed" "$out"; eq "wsl, no seed: status 1" 1 "$rc"
+out=$(MFA_NO_CODE=1 wslenv "$T/bin/sudo-gui" </dev/null 2>&1); rc=$?; eq "wsl, sudo-gui with no command is a usage error" 2 "$rc"
+out=$(wslenv "$T/bin/sudo-mfa" --local id </dev/null 2>&1); rc=$?
+has "wsl, plain sudo-mfa --local is the distro's own sudo" "local-sudo-ok: id" "$out"; eq "wsl, own sudo: status" 4 "$rc"
+out=$(wslenv "$T/bin/sudo-mfa" "${LH}-wsl" id </dev/null 2>&1); has "wsl, HOSTNAME-wsl as the host is this machine (local sudo)" "local-sudo-ok: id" "$out"
+out=$(wslenv "$T/bin/sudo-mfa" "$LH" id </dev/null 2>&1)
+has "wsl, the plain machine name is the Windows host: ssh, not local" "elevated-ssh: -t $LH sudo id" "$out"
+
 # ---- telnet mode --------------------------------------------------------------------------------------------------------
 out=$( (sleep 5) | "$T/bin/telnet-netrc" vax.example.org 2323 2>&1 ); has "telnet-netrc: logged in with a quoted password" "logged-in-as system" "$out"
 has "telnet-netrc: port passed" "Welcome to vax.example.org:2323" "$out"

@@ -209,6 +209,28 @@ a stranger at an idle session cannot elevate. But any process running as you can
 `RunAsAdminClient.exe` directly and be elevated without a code; it stops mistakes and casual use, not malware. A real barrier
 would need the localhost ssh path and the RunAsAdmin server (see `Windows/RunAsAdmin`) to demand the code themselves.
 
+### WSL (Windows Subsystem for Linux) and virtual machines
+
+**WSL** is a Linux machine for `net-login`: it needs `expect`, python3 and ssh (`apt install expect`), and `make install` or the
+copies of `auth`, `identity`, `net-login`, `get_mfa_code.py`, `mfa-seed` and `qr-show` in `/usr/local/bin` with the four links. Then:
+
+* `sudo-mfa --local`, `ssh-mfa`, `telnet-netrc` work as on Linux (the distro's own `sudo`; password from the distro's `~/.netrc`; code
+  from the vault over ssh).
+* **Windows administrator rights** from inside WSL: `sudo-gui COMMAND` (or `sudo-mfa --gui`): the same vault gate as on Windows, then
+  `/mnt/c/dos/RunAsAdminClient.exe` through WSL's interop, started from `/mnt/c` (the client sends its working directory to the server,
+  and a `\\wsl$` path would not do). The elevated program is a Windows program.
+* **Names:** WSL's hostname is the Windows machine's. So in WSL `net-login` calls itself `HOSTNAME-wsl` (`cmlaptop-wsl`), and the plain
+  machine name means the Windows host: `sudo-mfa cmlaptop ...` there is ssh, not local. `identity check-admin` does the same; give the
+  distro its own rows (`chris sudo@cmlaptop-wsl.cmnet chris`, `@os cmlaptop-wsl.cmnet linux`). Only a `check-admin` run inside that
+  WSL can audit it (nothing ssh's into it).
+* **PATH:** WSL puts the Windows and Cygwin `PATH` entries after its own. Keep `/usr/local/bin` first (a login shell does), or the
+  Cygwin copy of `sudo-gui` is found and runs with Windows' idea of the machine.
+* Detection: `/proc/version` mentions Microsoft, or `WSL_DISTRO_NAME` is set; `MFA_PLATFORM=wsl|windows|unix` overrides.
+
+**Virtual machines** need nothing special. A Linux guest is a Linux machine and a Windows guest a Windows one (Cygwin, `expect`; RunAsAdmin for
+GUI elevation). The guest must reach cpbee over ssh (NAT often hides the LAN name), and a cloned image carries its `~/.netrc`, ssh keys and
+any local seed with it. One LAN seed serves them all; list each guest in `identity` if you want its administrators audited.
+
 ## sudo needs a code on cpbee
 
 A stolen ssh key for `chris@cpbee` should not be enough to become root. So on cpbee `sudo` asks for a one-time code
