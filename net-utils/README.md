@@ -209,6 +209,33 @@ a stranger at an idle session cannot elevate. But any process running as you can
 `RunAsAdminClient.exe` directly and be elevated without a code; it stops mistakes and casual use, not malware. A real barrier
 would need the localhost ssh path and the RunAsAdmin server (see `Windows/RunAsAdmin`) to demand the code themselves.
 
+### Remote GUI: X11 and Remote Desktop
+
+`ssh-mfa --gui HOST [command]` (or the name `ssh-gui`) opens a graphical session, whatever the host is:
+
+| the host is | what happens |
+|---|---|
+| Linux, macOS, BSD (`ssh HOST uname -s` says so) | `ssh -X` (`--trusted`: `-Y`), after starting the local X server if there is none |
+| Windows (`uname` says CYGWIN, or port 3389 answers) | Remote Desktop, after the vault gate (the code check that stands in for a prompt) |
+
+`--x11` or `--rdp` forces the choice. A command after the host is the program to run: over ssh for X11, the session's shell for RDP.
+
+**X11.** The local X server: Cygwin starts `XWin :0 -multiwindow -clipboard` (`MFA_XSERVER` names another command); macOS opens
+XQuartz; Linux and WSLg already have a `DISPLAY` and it is used as it is. WSL without WSLg has no X display and cannot start one
+safely (WSL2 reaches Windows over the network, so the X server would have to listen on it): `ssh-mfa --gui` says so and stops;
+use `--rdp`, update WSL for WSLg, or run an X server on Windows and set `DISPLAY`. Forwarding is untrusted (`-X`) when the local
+server can restrict remote programs; Cygwin's XWin has no SECURITY extension, so there it is trusted (`-Y`) and says why; ssh
+then prints "No xauth data; using fake authentication data", which is expected with XWin. The server (cpbee has `xauth` and
+`X11Forwarding yes`) needs both; the remote side needs the program you want, for example `x11-apps` for `xeyes`.
+
+**Remote Desktop.** On Windows and in WSL it writes a temporary `.rdp` file and opens `mstsc` on it; the Windows password for
+`HOST\USER` comes from `~/.netrc` (or is asked for, and offered for saving) and is given to mstsc through a short-lived Windows
+stored credential (`cmdkey /generate:TERMSRV/HOST`, deleted when mstsc ends; a credential for that host that already exists is
+left alone). Elsewhere it uses `xfreerdp` with the password on stdin (macOS: the `rdp://` URL, which asks for it). `MFA_DRY=1`
+shows what would run, the password hidden. Things to know: the target must run RDP (Windows Pro or Enterprise; Home cannot, <!-- allowlist secret -->
+like cmlaptop) and have it switched on, and a client edition of Windows allows one session, so signing in over RDP locks the
+console of that machine.
+
 ### WSL (Windows Subsystem for Linux) and virtual machines
 
 **WSL** is a Linux machine for `net-login`: it needs `expect`, python3 and ssh (`apt install expect`), and `make install` or the

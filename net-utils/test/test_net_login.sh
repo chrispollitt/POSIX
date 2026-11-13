@@ -263,6 +263,91 @@ out=$(wslenv "$T/bin/sudo-mfa" "${LH}-wsl" id </dev/null 2>&1); has "wsl, HOSTNA
 out=$(wslenv "$T/bin/sudo-mfa" "$LH" id </dev/null 2>&1)
 has "wsl, the plain machine name is the Windows host: ssh, not local" "elevated-ssh: -t $LH sudo id" "$out"
 
+# ---- remote GUI: ssh -X for Unix hosts (starting the X server), Remote Desktop for Windows hosts ---------------------------------
+cat >"$T/guissh" <<'EOF'
+#!/bin/bash
+# fake ssh for the GUI tests: "uname -s" answers $FAKE_UNAME (nothing and status 255 when it is empty); anything else shows what it got
+if [ "${*: -2}" = "uname -s" ]; then [ -n "${FAKE_UNAME:-}" ] && { echo "$FAKE_UNAME"; exit 0; }; exit 255; fi
+echo "x11-ssh: $* (DISPLAY=${DISPLAY:-})"; exit 6
+EOF
+cat >"$T/fakexserver" <<'EOF'
+#!/bin/bash
+# a fake X server: listens on a unix socket for 40 s
+rm -f "$FAKE_XSOCK"
+exec python3 -c '
+import socket, sys, time
+s = socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); s.listen(5); s.settimeout(1)
+end = time.time() + 40
+while time.time() < end:
+    try:
+        s.accept()[0].close()
+    except socket.timeout:
+        pass
+' "$FAKE_XSOCK"
+EOF
+cat >"$T/fakemstsc" <<'EOF'
+#!/bin/bash
+f=$1; command -v cygpath >/dev/null && f=$(cygpath -u "$f")
+echo "mstsc ran with an rdp file:"; tr -d '\r' < "$f"
+EOF
+cat >"$T/fakecmdkey" <<'EOF'
+#!/bin/bash
+echo "cmdkey $*" >> "$FAKE_LOG"
+case $1 in /list:*) [ -n "${FAKE_HAVE:-}" ] && echo "    Target: ${1#/list:}";; esac
+exit 0
+EOF
+chmod +x "$T/guissh" "$T/fakexserver" "$T/fakemstsc" "$T/fakecmdkey"
+ln -s "$here/net-login" "$T/bin/ssh-gui"
+printf '{"rdphost": {"winuser": "%s"}}\n' "$SECRET" >"$T/rtokens.json"
+printf 'machine rdphost login winuser password rdppw\n' >"$T/rnetrc"; chmod 600 "$T/rnetrc"      # allowlist secret
+export FAKE_LOG="$T/cmdkey.log" FAKE_XSOCK="$T/Xsock"
+genv() { MFA_SSH="$T/guissh" MFA_XSERVER="$T/fakexserver" MFA_XSOCKET="$T/Xsock" MFA_MSTSC="$T/fakemstsc" MFA_CMDKEY="$T/fakecmdkey" \
+         MFA_X11=untrusted MFA_NO_VAULT=1 MFA_TOKENS="$T/rtokens.json" MFA_NETRC="$T/rnetrc" "$@"; }
+sec=$(( $(date +%s) % 30 )); [ $sec -ge 25 ] && sleep $(( 32 - sec ))
+# Windows host -> Remote Desktop.  First a dry run: what would be done, the password never shown
+out=$(FAKE_UNAME=CYGWIN_NT-10.0 MFA_DRY=1 MFA_PLATFORM=windows genv "$T/bin/ssh-mfa" --gui rdphost </dev/null 2>&1); rc=$?
+has "gui, windows host: Remote Desktop is chosen (uname says Cygwin)" "full address:s:rdphost" "$out"
+has "gui, rdp: the stored credential is made for TERMSRV/host and the account" "/generate:TERMSRV/rdphost /user:rdphost\\winuser /pass:<hidden>" "$out"
+has "gui, rdp: and removed afterwards" "/delete:TERMSRV/rdphost" "$out"
+case "$out" in *rdppw*) bad "gui, rdp dry run showed the password" "$out";; *) ok;; esac
+eq "gui, rdp dry run: status 0" 0 "$rc"
+: >"$FAKE_LOG"
+out=$(FAKE_UNAME=CYGWIN_NT-10.0 MFA_PLATFORM=windows genv "$T/bin/ssh-gui" rdphost notepad.exe </dev/null 2>&1); rc=$?
+has "gui, rdp (by the name ssh-gui): mstsc gets an rdp file with the account" "username:s:rdphost\\winuser" "$out"
+has "gui, rdp: a command becomes the session's shell" "alternate shell:s:notepad.exe" "$out"
+has "gui, rdp: the credential was generated with the password from ~/.netrc" "/generate:TERMSRV/rdphost /user:rdphost\\winuser /pass:rdppw" "$(cat "$FAKE_LOG")"      # allowlist secret
+has "gui, rdp: and deleted when mstsc ended" "/delete:TERMSRV/rdphost" "$(cat "$FAKE_LOG")"
+: >"$FAKE_LOG"
+out=$(FAKE_HAVE=1 FAKE_UNAME=CYGWIN_NT-10.0 MFA_PLATFORM=windows genv "$T/bin/ssh-mfa" --gui rdphost </dev/null 2>&1)
+case "$(cat "$FAKE_LOG")" in *generate*|*delete*) bad "gui, rdp: an existing stored credential was touched" "$(cat "$FAKE_LOG")";; *) ok;; esac
+out=$(FAKE_UNAME=CYGWIN_NT-10.0 MFA_PLATFORM=windows genv env MFA_TOKENS="$T/tokens.json" "$T/bin/ssh-mfa" --gui rdphost </dev/null 2>&1); rc=$?
+has "gui, rdp without a code seed: refuses, says how to make one" "mfa-seed" "$out"; eq "gui, rdp gate: status 1" 1 "$rc"
+out=$(FAKE_UNAME= MFA_PLATFORM=windows genv "$T/bin/ssh-mfa" --gui nowhere.example </dev/null 2>&1); rc=$?
+has "gui: a host that answers neither uname nor port 3389 is asked to be named" "--x11 or --rdp" "$out"; eq "gui, undecided: status 1" 1 "$rc"
+out=$(MFA_DRY=1 MFA_PLATFORM=windows genv "$T/bin/ssh-mfa" --rdp rdphost </dev/null 2>&1); has "gui, --rdp forces Remote Desktop" "full address:s:rdphost" "$out"
+# Unix host -> ssh -X; the X server is started when there is none (Windows/Cygwin), left alone when there is a DISPLAY (Linux, WSLg)
+rm -f "$T/Xsock"
+out=$(FAKE_UNAME=Linux DISPLAY= MFA_PLATFORM=windows genv "$T/bin/ssh-mfa" --gui boxy ls </dev/null 2>&1); rc=$?
+has "gui, unix host: ssh -X" "x11-ssh: -X boxy ls" "$out"; eq "gui, x11: the remote status" 6 "$rc"
+[ -S "$T/Xsock" ] && ok || bad "gui, x11 on Windows: the X server was started"
+has "gui, x11 on Windows: DISPLAY is set for ssh" "(DISPLAY=:0)" "$out"
+out=$(FAKE_UNAME=Linux DISPLAY=:7 MFA_PLATFORM=unix genv "$T/bin/ssh-mfa" --gui --trusted boxy xterm </dev/null 2>&1)
+has "gui, --trusted: ssh -Y" "x11-ssh: -Y boxy xterm" "$out"
+has "gui, x11 on a desktop: the DISPLAY there is kept" "(DISPLAY=:7)" "$out"
+rm -f "$T/Xsock"
+out=$(FAKE_UNAME=Linux DISPLAY=:7 MFA_PLATFORM=unix genv "$T/bin/ssh-mfa" --gui boxy </dev/null 2>&1); [ -e "$T/Xsock" ] && bad "gui, x11 with a DISPLAY: an X server was started anyway" || ok
+out=$(FAKE_UNAME=Linux DISPLAY= MFA_PLATFORM=unix genv "$T/bin/ssh-mfa" --gui boxy </dev/null 2>&1); rc=$?
+has "gui, x11 with no X session at all" "no X session here" "$out"; eq "gui, no X session: status 1" 1 "$rc"
+out=$(FAKE_UNAME=Linux DISPLAY= MFA_PLATFORM=wsl genv "$T/bin/ssh-mfa" --x11 boxy </dev/null 2>&1); rc=$?
+has "gui, WSL without WSLg: says what to do instead" "no X display in WSL" "$out"; eq "gui, wsl no display: status 1" 1 "$rc"
+out=$(FAKE_UNAME=Linux DISPLAY=:0 MFA_PLATFORM=wsl genv "$T/bin/ssh-mfa" --gui boxy </dev/null 2>&1); has "gui, WSL with WSLg (a DISPLAY): ssh -X" "x11-ssh: -X boxy" "$out"
+# the local X server decides: no untrusted cookie (Cygwin's XWin) means -Y, said out loud; one that can means -X
+printf '#!/bin/bash\nexit 1\n' >"$T/xauth-no"; printf '#!/bin/bash\nexit 0\n' >"$T/xauth-yes"; chmod +x "$T/xauth-no" "$T/xauth-yes"
+out=$(FAKE_UNAME=Linux DISPLAY=:7 MFA_PLATFORM=unix genv env MFA_X11= MFA_QUIET=0 MFA_XAUTH="$T/xauth-no" "$T/bin/ssh-mfa" --gui boxy </dev/null 2>&1)
+has "gui, auto: an X server with no SECURITY extension gets -Y" "x11-ssh: -Y boxy" "$out"; has "gui, auto: and says why" "cannot restrict a remote program" "$out"
+out=$(FAKE_UNAME=Linux DISPLAY=:7 MFA_PLATFORM=unix genv env MFA_X11= MFA_XAUTH="$T/xauth-yes" "$T/bin/ssh-mfa" --gui boxy </dev/null 2>&1)
+has "gui, auto: an X server that can restrict gets -X" "x11-ssh: -X boxy" "$out"
+
 # ---- telnet mode --------------------------------------------------------------------------------------------------------
 out=$( (sleep 5) | "$T/bin/telnet-netrc" vax.example.org 2323 2>&1 ); has "telnet-netrc: logged in with a quoted password" "logged-in-as system" "$out"
 has "telnet-netrc: port passed" "Welcome to vax.example.org:2323" "$out"

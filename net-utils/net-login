@@ -37,6 +37,15 @@ exec expect -f "$0" -- ${1+"$@"}
 # MFA_NO_PROMPT=1 turns all of that off (cron, scripts): it then fails with a clear message instead.
 #   telnet-netrc [HOST [PORT]]                telnet; answers "login:"/"Username:" and "Password:" from ~/.netrc
 #
+#   ssh-mfa    --gui HOST [command]           remote GUI.  A Linux/Unix host: ssh -X (--trusted: -Y; -Y too when the local X server cannot do
+#                                             untrusted forwarding, as Cygwin's XWin cannot), starting the local X server first if
+#   (or the name ssh-gui)                     it is not running (Cygwin: XWin; macOS: XQuartz; Linux/WSLg: the DISPLAY you have).  A Windows
+#                                             host: Remote Desktop (mstsc on Windows and in WSL, xfreerdp on Linux), logging in with the
+#                                             password from ~/.netrc through a short-lived Windows stored credential, after the vault gate.
+#                                             The kind is found with `ssh HOST uname -s` (Cygwin = Windows), then by port 3389; --x11 or
+#                                             --rdp forces it.  A command after the host is the remote program: X: run over ssh; RDP: the
+#                                             session's shell.  MFA_DRY=1 shows the Windows commands instead of running them.
+#
 # Any name that starts with ssh-, sudo- or telnet- works.  A name that goes on with a label other than mfa or netrc is a
 # shortcut taken from ~/.config/mfa/aliases ($MFA_ALIASES), so  ssh-wwl  is "ssh-mfa" to a fixed host.  Without a
 # recognised name, give the mode first:  net-login ssh|sudo|telnet ...      net-login --help
@@ -69,6 +78,8 @@ exec expect -f "$0" -- ${1+"$@"}
 #   MFA_PASSWORD_PROMPT (regex for the sudo prompt that asks for the password)   MFA_TELNET_TIMEOUT (120)
 #   MFA_SUDO (sudo; the local sudo to run)   MFA_LOCAL (1 = sudo mode runs sudo here, as --local)
 #   MFA_UID (the user id to treat as "already root" if it is 0; default: id -u)   MFA_NO_PROMPT (1: never ask)   AUTH_HOST (cpbee)
+#   GUI: MFA_XSERVER (the X server command; XWin :0 -multiwindow ...)  MFA_XSOCKET (/tmp/.X11-unix/X0)  MFA_MSTSC (mstsc.exe)  MFA_CMDKEY (cmdkey.exe)
+#        MFA_XFREERDP (xfreerdp)  MFA_DRY (1: show, do not run, the RDP commands)  MFA_X11 (auto|untrusted|trusted)  MFA_XAUTH (xauth)
 #   Windows/WSL: MFA_PLATFORM (windows|wsl|unix, to override detection)   MFA_WIN_CWD (/mnt/c: where WSL starts the Windows client)   MFA_ADMIN_CMD (net session: succeeds when elevated)
 #            MFA_RUNAS_CLIENT (/dos/RunAsAdminClient.exe)   MFA_NO_CODE (1: no code check)
 
@@ -127,6 +138,21 @@ if {$mode eq "sudo" && $tag eq "gui"} { set local 1; set gui 1 }
 if {$mode eq "sudo" && [lindex $argv 0] eq "--local"} { set local 1; set argv [lrange $argv 1 end] }
 if {$mode eq "sudo" && [lindex $argv 0] eq "--gui"} { set local 1; set gui 1; set argv [lrange $argv 1 end] }
 if {$mode eq "sudo" && [env_or MFA_LOCAL 0] eq "1"} { set local 1 }
+set guikind ""                     ;# x11 | rdp ("" = decide from the target); ssh mode with --gui / the name ssh-gui
+set trusted 0                      ;# ssh -Y instead of -X
+if {$mode eq "ssh" && $tag eq "gui"} { set gui 1 }
+if {$mode eq "ssh"} {
+    while {1} {
+        switch -- [lindex $argv 0] {
+            --gui     { set gui 1 }
+            --x11     { set gui 1; set guikind x11 }
+            --rdp     { set gui 1; set guikind rdp }
+            --trusted { set trusted 1 }
+            default   { break }
+        }
+        set argv [lrange $argv 1 end]
+    }
+}
 if {[lsearch -exact {mfa netrc login local gui} $tag] >= 0} { set tag "" }
 
 set alias_host ""; set alias_user ""; set alias_ready ""
@@ -496,6 +522,132 @@ proc run_through {cmd} {
     exit 0
 }
 
+# ---- remote GUI: X11 over ssh, Remote Desktop to Windows -------------------------------------------------------------------
+# is HOST a Windows machine (rdp) or a Unix one (x11)?  uname over ssh first (Cygwin answers CYGWIN_NT), then is port 3389 open?
+proc gui_kind {hostspec host} {
+    set cmd [concat [env_or {MFA_SSH SSH_WWL_SSH} ssh] -o BatchMode=yes -o ConnectTimeout=6 [list $hostspec uname -s]]
+    if {![catch {exec {*}$cmd 2>/dev/null} out]} {
+        set u [string toupper [string trim [lindex [split $out "\n"] 0]]]
+        if {[regexp {^(CYGWIN|MINGW|MSYS)} $u]} { return rdp }
+        if {[lsearch -exact {LINUX DARWIN FREEBSD OPENBSD NETBSD SUNOS} $u] >= 0} { return x11 }
+    }
+    if {![catch {exec timeout 4 bash -c {exec 3<>/dev/tcp/$0/3389} $host 2>/dev/null}]} { return rdp }
+    return ""
+}
+
+# does something answer on the X server's unix socket?  (a leftover socket file from an X server that died does not)
+proc x_ready {sock} {
+    if {![file exists $sock]} { return 0 }
+    return [expr {![catch {exec python3 -c {import socket, sys; s = socket.socket(socket.AF_UNIX); s.settimeout(3); s.connect(sys.argv[1])} $sock 2>/dev/null}]}]
+}
+
+# a local X server for ssh -X: the DISPLAY already there, or start one (Cygwin: XWin; macOS: XQuartz)
+proc ensure_x_server {} {
+    set platform [detect_platform]
+    if {$platform ne "windows" && [info exists ::env(DISPLAY)] && $::env(DISPLAY) ne ""} { return }      ;# a desktop, WSLg, or a chosen DISPLAY
+    switch -- $platform {
+        windows {
+            set sock [env_or MFA_XSOCKET /tmp/.X11-unix/X0]
+            if {![x_ready $sock]} {
+                info_line "starting the X server"
+                set cmd [env_or MFA_XSERVER {XWin :0 -multiwindow -clipboard -silent-dup-error -nolisten tcp}]
+                if {[catch {exec {*}$cmd </dev/null >/dev/null 2>/dev/null &} err]} { fail "could not start the X server ($cmd): $err" }
+                for {set i 0} {$i < 30 && ![x_ready $sock]} {incr i} { after 500 }
+                if {![x_ready $sock]} { fail "the X server did not come up (nothing answers on $sock; MFA_XSERVER names the command)" }
+            }
+            if {![info exists ::env(DISPLAY)] || $::env(DISPLAY) eq ""} { set ::env(DISPLAY) [env_or MFA_DISPLAY :0] }
+        }
+        wsl {
+            fail "no X display in WSL (DISPLAY is empty and there is no WSLg).  Use ssh-mfa --rdp, update WSL for WSLg, or start an X server on Windows that WSL can reach and set DISPLAY (README: WSL)"
+        }
+        default {
+            if {$::tcl_platform(os) eq "Darwin"} {
+                catch {exec open -a XQuartz}
+                for {set i 0} {$i < 30} {incr i} {
+                    if {![catch {exec launchctl getenv DISPLAY} d] && $d ne ""} { set ::env(DISPLAY) $d; return }
+                    after 500
+                }
+                fail "XQuartz did not start (install it, or set DISPLAY)"
+            }
+            fail "no X session here (DISPLAY is empty): run this from a desktop, or set DISPLAY"
+        }
+    }
+}
+
+# can the local X server give an untrusted (restricted) cookie?  Cygwin's XWin cannot: it has no SECURITY extension.
+proc x_untrusted_ok {} {
+    set f [file tempfile tmp]
+    close $f
+    set rc [catch {exec [env_or MFA_XAUTH xauth] -f $tmp generate $::env(DISPLAY) . untrusted 2>/dev/null}]
+    file delete $tmp
+    return [expr {!$rc}]
+}
+
+# Remote Desktop to a Windows host.  Windows and WSL: mstsc through a temporary .rdp file and a short-lived Windows stored credential
+# (cmdkey) made from the password in ~/.netrc; elsewhere xfreerdp (the password goes to it on stdin); macOS: the rdp:// URL.  Exits.
+proc rdp_launch {host user words} {
+    global me
+    set platform [detect_platform]
+    set short [lindex [split $host .] 0]
+    set dry [expr {[env_or MFA_DRY 0] eq "1"}]
+    if {$user eq ""} {
+        set cred [netrc_lookup $host]
+        set user [expr {$cred ne "" ? [lindex $cred 0] : [expr {[catch {exec id -un} u] ? "" : $u}]}]
+    }
+    set pw [get_password [list $host] $user]
+    set acct [expr {[regexp {[\\@]} $user] ? $user : "$short\\$user"}]
+    if {$platform eq "windows" || $platform eq "wsl"} {
+        set mstsc [env_or MFA_MSTSC mstsc.exe]
+        set cmdkey [env_or MFA_CMDKEY cmdkey.exe]
+        set target "TERMSRV/$host"
+        set have [expr {![catch {exec $cmdkey /list:$target 2>@1} out] && [string match "*Target:*" $out]}]
+        set rdp [file tempfile rdpfile .rdp]
+        close $rdp
+        set body "full address:s:$host\r\nusername:s:$acct\r\nprompt for credentials:i:0\r\nauthentication level:i:2\r\nscreen mode id:i:2\r\n"
+        if {[llength $words]} { append body "alternate shell:s:[join $words { }]\r\n" }
+        set fh [open $rdpfile w]; fconfigure $fh -translation binary; puts -nonewline $fh $body; close $fh
+        set winpath $rdpfile
+        catch {set winpath [string trim [exec [expr {$platform eq "wsl" ? "wslpath" : "cygpath"}] -w $rdpfile]]}
+        if {$dry} {
+            send_user "$cmdkey /list:$target   (exists: [expr {$have ? "yes, left alone" : "no"}])\n"
+            if {!$have} { send_user "$cmdkey /generate:$target /user:$acct /pass:<hidden>\n" }
+            send_user "$mstsc $winpath\n--- .rdp:\n$body"
+            if {!$have} { send_user "$cmdkey /delete:$target\n" }
+            file delete $rdpfile
+            exit 0
+        }
+        if {!$have && [catch {exec $cmdkey /generate:$target /user:$acct /pass:$pw} err]} {
+            file delete $rdpfile
+            fail "could not store the credential for $target: $err"
+        }
+        info_line "Remote Desktop to $host as $acct"
+        set rc [catch {exec $mstsc $winpath <@stdin >@stdout 2>@stderr} err]
+        if {!$have} { catch {exec $cmdkey /delete:$target} }
+        file delete $rdpfile
+        if {!$rc} { offer_save_netrc }
+        exit 0
+    }
+    if {$::tcl_platform(os) eq "Darwin"} {
+        send_user "$me: opening rdp:// in the Remote Desktop app; it asks for the password (macOS: no automatic login)\n" ;# allowlist secret
+        exec open "rdp://full%20address=s:$host&username=s:$acct"
+        exit 0
+    }
+    set fx [env_or MFA_XFREERDP xfreerdp]
+    if {$dry} { send_user "$fx /v:$host /u:$acct /from-stdin /cert:tofu +clipboard /dynamic-resolution\n(the password is sent on stdin)\n"; exit 0 }
+    if {[auto_execok $fx] eq ""} { fail "no RDP client: install freerdp (xfreerdp) or run this where mstsc exists" }
+    spawn -noecho $fx /v:$host /u:$acct /from-stdin /cert:tofu +clipboard /dynamic-resolution
+    set timeout 30
+    expect {
+        -re {[Pp]assword: ?$} { send -- "$pw\r" }
+        timeout {}
+        eof { catch {wait}; exit 1 }
+    }
+    offer_save_netrc
+    interact
+    catch {wait} result
+    exit [expr {[llength $result] >= 4 ? [lindex $result 3] : 0}]
+}
+
 # does the sudo argument list contain a command to run (as opposed to only options such as -i or -u bob)?
 proc sudo_is_command {words} {
     set valopts {-u -g -h -p -C -U -r -t -T -D -R}
@@ -553,6 +705,33 @@ if {$local && $user eq ""} { catch {exec id -un} user }
 if {[regexp {^([^@]+)@(.+)$} $hostspec -> u h]} { set user $u; set host $h }
 for {set i 0} {$i < [llength $pre]} {incr i} {
     if {[lindex $pre $i] eq "-l" && $i + 1 < [llength $pre]} { set user [lindex $pre [expr {$i + 1}]] }
+}
+
+# remote GUI (ssh-mfa --gui / ssh-gui): X11 for a Unix host, Remote Desktop for a Windows one
+if {$mode eq "ssh" && $gui} {
+    if {$guikind eq ""} { set guikind [gui_kind $hostspec $host] }
+    if {$guikind eq ""} { fail "cannot tell whether $host takes X11 (Unix) or Remote Desktop (Windows): say --x11 or --rdp" }
+    if {$guikind eq "rdp"} {
+        # no prompt of its own to answer, so the vault gate stands in for the code (as for sudo-gui)
+        if {[env_or MFA_NO_CODE 0] ne "1"} {
+            if {[fetch_code $host $user] eq ""} {
+                fail "no one-time code available for $user: the vault is locked or has no seed (mfa-seed; MFA_NO_CODE=1 skips this check)"
+            }
+        }
+        rdp_launch $host $user $post
+    }
+    ensure_x_server
+    switch -- [env_or MFA_X11 auto] {
+        trusted   { set trusted 1 }
+        untrusted { }
+        default {
+            if {!$trusted && ![x_untrusted_ok]} {
+                set trusted 1
+                info_line "this X server cannot restrict a remote program (no SECURITY extension): forwarding with -Y (trusted); --trusted says so quietly"
+            }
+        }
+    }
+    set pre [concat [list [expr {$trusted ? "-Y" : "-X"}]] $pre]
 }
 
 # Windows (Cygwin): no sudo; elevate with ssh localhost (terminal) or RunAsAdminClient.exe (GUI), once the vault has given a code
