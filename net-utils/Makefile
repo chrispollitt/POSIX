@@ -20,7 +20,7 @@ TRAFFIC_DIR ?= /opt/trafficgraph
 TOOLS     := auth auth-askpass auth-canary auth-ftp auth-telnet get_mfa_code.py git-credential-auth identity lan-port mfa-seed net-login netrc-to-tickets qr-show traceroute-plus.sh
 # net-login does ssh/sudo/telnet logins by the name it is called by; these symlinks to it are installed beside it.
 # Add more (ssh-wwl, sudo-cpbee, ...) with:  make install MFA_LINKS="ssh-mfa sudo-mfa telnet-netrc ssh-wwl"
-MFA_LINKS ?= ssh-mfa sudo-mfa telnet-netrc sudo-gui
+MFA_LINKS ?= ssh-mfa ssh-gui sudo-mfa telnet-netrc sudo-gui
 CPR       := ../cmpi-router
 INSTALL   := install
 

@@ -211,7 +211,7 @@ would need the localhost ssh path and the RunAsAdmin server (see `Windows/RunAsA
 
 ### Remote GUI: X11 and Remote Desktop
 
-`ssh-mfa --gui HOST [command]` (or the name `ssh-gui`) opens a graphical session, whatever the host is:
+`ssh-mfa --gui HOST [command]` (or the name `ssh-gui`, a link `make install` makes) opens a graphical session, whatever the host is:
 
 | the host is | what happens |
 |---|---|
