@@ -6,6 +6,7 @@ Portable shell/Python tooling for Unix-like systems (Linux, macOS, the BSDs, Cyg
 |---|---|
 | [mail-setup](mail-setup/) | set up GNU Mailutils, Postfix, Dovecot, and pop-pull or getmail on a master host, or a sendmail shim on thin clients, with unit + end-to-end tests |
 | [chat-setup](chat-setup/) | run an Ergo IRC server for the LAN (TLS, NickServ accounts, systemd, firewall), e.g. to test tvmail's chat, and set tvmail up to use it |
+| [news-setup](news-setup/) | run a Usenet server (INN2) for the LAN, no peers: an archive of old articles imported with `news-import` (control messages stripped), local groups to post to, and a script to point tvmail's Usenet service at it |
 | [web-ttyd](web-ttyd/) | serve console apps (maze4, bidet) in a browser tab through ttyd and nginx, in a desktop-style window frame, with SIXEL |
 | [net-utils/lan-port](net-utils/lan-port) | open, close and audit the LAN ports of a cmpi-router box (cpbee) through its port lists: one call for every project (chat-setup, mail-setup and web-ttyd use it; tests: `net-utils/test/test_lan_port.sh`) |
 | [net-utils/netrc-to-tickets](net-utils/netrc-to-tickets) | move logins from ~/.netrc to ~/.mu-tickets, which names the protocol (imaps, smtp, irc, https ...) and is the file tvmail, tvchat and tvcal read first: a known port names the protocol, portless entries and existing `*://` tickets ask (several names allowed: imaps,smtp), bare hosts get .cmnet, backs both files up, never prints a password (tests: `net-utils/test/test_netrc_to_tickets.py`) |  <!-- allowlist secret -->

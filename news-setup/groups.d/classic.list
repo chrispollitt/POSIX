@@ -1,0 +1,79 @@
+# classic.list - a starting set of the old, well-known groups: one per line, the name and a
+# description.  Used by create-groups.sh (makes them, read-only) and news-import --groups (keeps
+# only articles posted to one of them).  Edit freely; what the archive you import does not have
+# just stays empty.  "net.*" is the hierarchy before the Great Renaming of 1986-87.
+#
+# before the renaming
+net.general         General discussion (the pre-1987 catch-all)
+net.news            About Usenet itself
+net.news.group      Discussion of creating and merging groups
+net.jokes           Humor
+net.unix            Unix
+net.unix-wizards    Unix internals and bugs
+net.lang.c          The C language
+net.lang.lisp       Lisp
+net.sources         Source code
+net.micro           Microcomputers
+net.micro.pc        The IBM PC
+net.micro.mac       The Apple Macintosh
+net.sf-lovers       Science fiction
+net.music           Music
+net.followup        Followups to older articles
+net.wanted          Requests
+net.misc            Miscellaneous
+net.politics        Politics
+net.religion        Religion
+net.cooks           Cooking
+net.games           Games
+net.nlang           Natural languages
+net.space           Space
+# computing, after the renaming
+comp.lang.c         The C programming language
+comp.lang.c++       C++
+comp.lang.lisp      Lisp
+comp.lang.perl      Perl
+comp.lang.pascal    Pascal
+comp.lang.misc      Other programming languages
+comp.unix.questions Unix questions
+comp.unix.wizards   Unix internals
+comp.unix.internals Unix internals
+comp.os.minix       Minix
+comp.os.linux       Linux
+comp.sys.mac        The Macintosh
+comp.sys.ibm.pc     The IBM PC
+comp.sys.amiga      The Amiga
+comp.sys.atari.st   The Atari ST
+comp.sys.apple2     The Apple II
+comp.compilers      Compilers (moderated)
+comp.risks          The Risks Digest (moderated)
+comp.arch           Computer architecture
+comp.sources.unix   Unix sources (moderated)
+comp.sources.misc   Sources
+comp.text.tex       TeX
+comp.protocols.tcp-ip  TCP/IP
+comp.graphics       Graphics
+comp.ai             Artificial intelligence
+comp.society        Computers and society
+# the rest of the old days
+news.announce.newusers  Explanations for new users (moderated)
+news.groups         Group creation
+news.admin          News administration
+rec.humor           Humor
+rec.humor.funny     The funniest jokes (moderated)
+rec.arts.sf-lovers  Science fiction
+rec.arts.startrek   Star Trek
+rec.music.misc      Music
+rec.games.chess     Chess
+rec.games.hack      Hack and NetHack
+rec.food.cooks      Cooking
+sci.space           Space
+sci.physics         Physics
+sci.math            Mathematics
+sci.misc            Science
+talk.bizarre        The bizarre
+talk.politics.misc  Politics
+alt.folklore.computers  Computing history and tales
+alt.sources         Source code
+misc.misc           Miscellany
+misc.jobs.offered   Jobs
+soc.culture.misc    Cultures

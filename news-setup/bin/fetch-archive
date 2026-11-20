@@ -1,0 +1,135 @@
+#!/usr/bin/env python3
+"""fetch-archive - list and download the files of an Internet Archive item (for news-import).
+
+    fetch-archive --item usenethistorical --list [--match REGEX]
+    fetch-archive --item usenethistorical --match 'comp\\.lang\\.c' --to ~/usenet [--yes]
+
+Uses archive.org's metadata API (https://archive.org/metadata/ITEM) for the names, sizes and checksums,
+so nothing is guessed: --list shows what is really there.  Downloading shows the total first and asks;
+every file is checked against the archive's md5 and a file already there (same size and md5) is left.
+Interrupted?  Run it again: finished files are skipped.
+
+The Usenet collections on archive.org change, and some have been taken down (the UTZOO archive of
+1981-1991 was, in 2020).  --list is how you find out what is there today.  The articles are other
+people's; this is for a LAN-only archive for yourself.
+
+Options
+    --item ID      the archive.org item (default: usenethistorical)
+    --match RE     only files whose name matches this regular expression (search, not full match)
+    --list         list matching files (name, size) and stop
+    --to DIR       where to put the files (default: ./usenet-archive)
+    --yes          do not ask before downloading
+    --base URL     another server than https://archive.org (for tests)
+"""
+import argparse
+import hashlib
+import json
+import os
+import re
+import sys
+import urllib.parse
+import urllib.request
+
+
+def human(n):
+    n = float(n)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1024 or unit == "TB":
+            return ("%d %s" % (n, unit)) if unit == "B" else ("%.1f %s" % (n, unit))
+        n /= 1024.0
+
+
+def get(url, timeout=60):
+    req = urllib.request.Request(url, headers={"User-Agent": "news-setup fetch-archive"})
+    return urllib.request.urlopen(req, timeout=timeout)
+
+
+def listing(base, item, pattern):
+    with get("%s/metadata/%s" % (base, urllib.parse.quote(item))) as r:
+        meta = json.loads(r.read().decode("utf-8"))
+    files = meta.get("files") or []
+    if not files:
+        raise SystemExit("fetch-archive: %s has no files (wrong item name, or it was taken down?)" % item)
+    rx = re.compile(pattern) if pattern else None
+    out = []
+    for f in files:
+        name = f.get("name", "")
+        if not name or name.endswith("_meta.xml") or name.endswith("_files.xml") or name.endswith("_meta.sqlite"):
+            continue
+        if rx and not rx.search(name):
+            continue
+        out.append({"name": name, "size": int(f.get("size") or 0), "md5": f.get("md5", "")})
+    return out
+
+
+def md5_of(path):
+    h = hashlib.md5()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def download(base, item, f, dest_dir, out):
+    dest = os.path.join(dest_dir, f["name"])
+    if os.path.dirname(dest):
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+    if os.path.exists(dest) and os.path.getsize(dest) == f["size"] and (not f["md5"] or md5_of(dest) == f["md5"]):
+        out.write("  have  %s\n" % f["name"])
+        return True
+    url = "%s/download/%s/%s" % (base, urllib.parse.quote(item), urllib.parse.quote(f["name"]))
+    part = dest + ".part"
+    h = hashlib.md5()
+    with get(url) as r, open(part, "wb") as fh:
+        for chunk in iter(lambda: r.read(1 << 20), b""):
+            fh.write(chunk)
+            h.update(chunk)
+    if f["md5"] and h.hexdigest() != f["md5"]:
+        os.remove(part)
+        out.write("  BAD   %s (the checksum is not the archive's)\n" % f["name"])
+        return False
+    os.replace(part, dest)
+    out.write("  got   %s (%s)\n" % (f["name"], human(f["size"])))
+    return True
+
+
+def main(argv=None, out=sys.stdout, inp=sys.stdin):
+    ap = argparse.ArgumentParser(prog="fetch-archive", description=__doc__.split("\n\n")[0])
+    ap.add_argument("--item", default="usenethistorical")
+    ap.add_argument("--match")
+    ap.add_argument("--list", action="store_true")
+    ap.add_argument("--to", default="usenet-archive")
+    ap.add_argument("--yes", action="store_true")
+    ap.add_argument("--base", default="https://archive.org")
+    a = ap.parse_args(argv)
+    try:
+        files = listing(a.base.rstrip("/"), a.item, a.match)
+    except OSError as e:
+        sys.stderr.write("fetch-archive: cannot reach %s: %s\n" % (a.base, e))
+        return 2
+    total = sum(f["size"] for f in files)
+    if a.list or not files:
+        for f in files:
+            out.write("%10s  %s\n" % (human(f["size"]), f["name"]))
+        out.write("%d file(s), %s\n" % (len(files), human(total)))
+        return 0
+    out.write("%d file(s), %s, from %s/details/%s into %s\n" % (len(files), human(total), a.base, a.item, a.to))
+    if not a.yes:
+        out.write("Download them? [y/N] ")
+        out.flush()
+        if inp.readline().strip().lower() not in ("y", "yes"):
+            out.write("nothing downloaded\n")
+            return 1
+    bad = 0
+    for f in files:
+        try:
+            if not download(a.base.rstrip("/"), a.item, f, a.to, out):
+                bad += 1
+        except OSError as e:
+            out.write("  FAIL  %s: %s\n" % (f["name"], e))
+            bad += 1
+    return 1 if bad else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

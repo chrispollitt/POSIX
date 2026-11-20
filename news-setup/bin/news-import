@@ -1,0 +1,481 @@
+#!/usr/bin/env python3
+"""news-import - feed old Usenet articles into a news server (INN2) with IHAVE.
+
+    news-import [options] SOURCE...
+
+A SOURCE is any of
+    an mbox file (.gz or .zip too)          a Maildir (cur/ and new/), or a directory of article files
+    a .tar / .tar.gz / .tgz of article files (a member named *.mbox is read as an mbox)
+    an rnews batch ("#! rnews SIZE" ...) from a file or from - (standard input)
+
+Each article is made fit for a server that has never heard of it, then offered with IHAVE to the
+server on --host / --port (the box's own innd, which lists 127.0.0.1 as a peer in incoming.conf):
+
+    Message-ID   made up (a hash of the article, so a re-run makes the same one) if missing or bad
+    Path         "archive!not-for-mail" if missing (the server puts its own name in front)
+    Date         rewritten to a form the server accepts; the old one is kept as X-Original-Date
+    Newsgroups   cut down to the --groups you keep (the original is kept as X-Original-Newsgroups)
+    Control:, Supersedes:, Xref:, Approved:
+                 removed (kept as X-Original-...): an old `newgroup`, `rmgroup` or `cancel` must not
+                 do anything to your server, and the server numbers the article itself
+
+Re-runs are cheap: --state FILE remembers what was accepted, and the server refuses a Message-ID
+it has (435), which is counted as a duplicate and not an error.
+
+Options
+    --groups FILE   keep only articles posted to a group listed in FILE (one per line, the first
+                    word; "comp.*" style patterns allowed; # starts a comment); default: all
+    --host H --port N   the news server (127.0.0.1 119)
+    --state FILE    resume file (default ~/.local/state/news-import/done-HOST-PORT; --no-state: none)
+    --limit N       stop after N articles have been offered
+    --dry-run       read and repair, count, send nothing (also: no connection)
+    --keep-control  do not strip Control: and friends (do not use on a server you care about)
+    -v              say what happens to each rejected article
+    -h, --help
+
+Exit status: 0 if every article was accepted, a duplicate or not wanted; 1 if the server rejected or
+could not take some; 2 for a bad command line or a server that could not be reached.
+"""
+import argparse
+import bz2
+import calendar
+import datetime
+import email.utils
+import fnmatch
+import gzip
+import hashlib
+import os
+import re
+import socket
+import sys
+import tarfile
+import time
+import zipfile
+
+MSGID_RE = re.compile(rb"^<[^<>\s@]+@[^<>\s@]+>$")
+FALLBACK_DATE = "Tue, 01 Jan 1980 00:00:00 +0000"
+STRIP = (b"control", b"supersedes", b"xref", b"approved", b"also-control")
+
+
+# ------------------------------------------------------------------ sources ---
+def _open_maybe_compressed(path):
+    if path.endswith(".gz"):
+        return gzip.open(path, "rb")
+    if path.endswith(".bz2"):
+        return bz2.open(path, "rb")
+    return open(path, "rb")
+
+
+def split_mbox(data):
+    """The messages of an mbox (bytes), without their "From " lines.  A line starting "From " after a blank
+    line (or at the start) begins a message; the rest is left as it is (">From " stays quoted)."""
+    out, cur, prev_blank, started = [], [], True, False
+    for line in data.splitlines(True):
+        if prev_blank and line.startswith(b"From ") and re.match(rb"From \S+", line):
+            if started and cur:
+                out.append(b"".join(cur))
+            started = True
+            # the "From sender date" line becomes a header of its own (only its date is ever used, when the
+            # article has none of its own); the article's headers follow
+            cur = [b"X-Mbox-From: " + line[5:].strip() + b"\n"]
+            prev_blank = False
+            continue
+        prev_blank = line.strip() == b""
+        cur.append(line)
+    if started and cur:
+        out.append(b"".join(cur))
+    return out
+
+
+def split_rnews(data):
+    """The articles of an rnews batch: "#! rnews SIZE" and SIZE bytes, over and over."""
+    out, pos = [], 0
+    while pos < len(data):
+        nl = data.find(b"\n", pos)
+        if nl < 0:
+            break
+        m = re.match(rb"#! rnews (\d+)", data[pos:nl])
+        if not m:
+            break
+        size = int(m.group(1))
+        out.append(data[nl + 1:nl + 1 + size])
+        pos = nl + 1 + size
+        while pos < len(data) and data[pos:pos + 1] in (b"\n", b"\r"):
+            pos += 1
+    return out
+
+
+def looks_like_mbox(data):
+    return data[:5] == b"From " and re.match(rb"From \S+ ", data) is not None
+
+
+def articles_of_bytes(data, name=""):
+    """The articles in one blob of bytes: an rnews batch, an mbox (or the one article it is)."""
+    if data.startswith(b"#! rnews"):
+        return split_rnews(data)
+    if looks_like_mbox(data) or name.endswith((".mbox", ".mbx")):
+        parts = split_mbox(data)
+        if parts:
+            return parts
+    return [data]
+
+
+def iter_sources(paths, stdin=None):
+    """Yield (name, bytes) for every article-sized blob in the sources."""
+    for p in paths:
+        if p == "-":
+            for a in articles_of_bytes((stdin or sys.stdin.buffer).read(), "-"):
+                yield "-", a
+            continue
+        if os.path.isdir(p):
+            for root, dirs, files in os.walk(p):
+                dirs.sort()
+                for f in sorted(files):
+                    fp = os.path.join(root, f)
+                    with _open_maybe_compressed(fp) as fh:
+                        data = fh.read()
+                    for a in articles_of_bytes(data, fp):
+                        yield fp, a
+            continue
+        if tarfile.is_tarfile(p):
+            with tarfile.open(p, "r:*") as tf:
+                for m in tf:
+                    if not m.isfile():
+                        continue
+                    fh = tf.extractfile(m)
+                    if fh is None:
+                        continue
+                    for a in articles_of_bytes(fh.read(), m.name):
+                        yield "%s:%s" % (p, m.name), a
+            continue
+        if zipfile.is_zipfile(p):
+            with zipfile.ZipFile(p) as zf:
+                for n in sorted(zf.namelist()):
+                    if n.endswith("/"):
+                        continue
+                    for a in articles_of_bytes(zf.read(n), n):
+                        yield "%s:%s" % (p, n), a
+            continue
+        with _open_maybe_compressed(p) as fh:
+            data = fh.read()
+        for a in articles_of_bytes(data, p):
+            yield p, a
+
+
+# ------------------------------------------------------------------- repair ---
+def split_article(raw):
+    """(headers, body) of an article: headers as a list of (name_bytes, full_header_bytes_with_continuations)."""
+    raw = raw.replace(b"\r\n", b"\n")
+    if raw.startswith(b"\n"):
+        raw = raw.lstrip(b"\n")
+    head, sep, body = raw.partition(b"\n\n")
+    if not sep and b":" not in head[:200]:
+        return [], raw
+    hdrs = []
+    for line in head.split(b"\n"):
+        if line[:1] in (b" ", b"\t") and hdrs:
+            hdrs[-1][1] += b"\n" + line
+        elif b":" in line:
+            hdrs.append([line.split(b":", 1)[0].strip(), line])
+        # a line that is no header at all is dropped
+    return hdrs, body
+
+
+def header_value(hdrs, name):
+    for n, full in hdrs:
+        if n.lower() == name:
+            return full.split(b":", 1)[1].strip().replace(b"\n", b" ")
+    return None
+
+
+# a Date: the server takes as it is: four-digit year, numeric zone (or GMT / UT)
+_RFC_DATE = re.compile(r"^((Mon|Tue|Wed|Thu|Fri|Sat|Sun), )?\d{1,2} (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) "
+                       r"\d{4} \d\d:\d\d(:\d\d)? ([+-]\d{4}|GMT|UT)( \(.*\))?$")
+
+
+def _date_text(raw_value):
+    """The Date: to send for a Date: value: the value itself when it is already in a form the server takes, else
+    the same moment as RFC 5322 (a zone name such as PST read, no zone taken as UTC, two-digit years widened);
+    None if it cannot be read, or is not 1970-2100."""
+    try:
+        s = raw_value.decode("latin-1").strip()
+        dt = email.utils.parsedate_to_datetime(s)
+        if dt is None or dt.year < 1970 or dt.year > 2100:
+            return None
+        if _RFC_DATE.match(s):
+            return s
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=datetime.timezone.utc)
+        return email.utils.format_datetime(dt)
+    except Exception:
+        return None
+
+
+def _mbox_date(hdrs):
+    v = header_value(hdrs, b"x-mbox-from")
+    if not v:
+        return None
+    parts = v.decode("latin-1").split(None, 1)
+    if len(parts) < 2:
+        return None
+    try:
+        t = time.strptime(" ".join(parts[1].split()[:5]), "%a %b %d %H:%M:%S %Y")
+        return email.utils.formatdate(calendar.timegm(t), usegmt=False)
+    except Exception:
+        return None
+
+
+def wanted_groups(spec):
+    """Matcher for a --groups file's contents: a function(name) -> bool."""
+    pats = []
+    for line in spec.splitlines():
+        line = line.split("#", 1)[0].strip()
+        if line:
+            pats.append(line.split()[0])
+    return lambda g: any(fnmatch.fnmatchcase(g, p) for p in pats)
+
+
+def repair(raw, keep=None, keep_control=False):
+    """(wire_bytes, message_id, notes) for an article ready to offer, or (None, None, reason) when it is not
+    to be sent.  `keep` is wanted_groups()'s function, or None for every group."""
+    hdrs, body = split_article(raw)
+    notes = []
+    if not hdrs:
+        return None, None, "no headers"
+    ng = header_value(hdrs, b"newsgroups")
+    if not ng:
+        return None, None, "no Newsgroups header"
+    groups = [g.strip() for g in ng.decode("latin-1").split(",") if g.strip()]
+    if keep is not None:
+        kept = [g for g in groups if keep(g)]
+        if not kept:
+            return None, None, "not wanted"
+    else:
+        kept = groups
+    if any(not re.match(r"^[A-Za-z0-9+_.-]+$", g) for g in kept):
+        return None, None, "bad group name"
+    new = []
+    original = {}
+    for n, full in hdrs:
+        ln = n.lower()
+        if ln in (b"x-mbox-from",):
+            continue
+        if ln in STRIP and not keep_control:
+            original[ln] = full
+            continue
+        new.append([ln, full])
+    hdrs = new
+    # Newsgroups
+    if kept != groups:
+        hdrs = [[n, f] for n, f in hdrs if n != b"newsgroups"]
+        original[b"newsgroups"] = b"Newsgroups: " + ",".join(groups).encode("latin-1")
+        hdrs.append([b"newsgroups", b"Newsgroups: " + ",".join(kept).encode("latin-1")])
+        notes.append("groups")
+    # Message-ID
+    mid = header_value(hdrs, b"message-id")
+    if mid is None or not MSGID_RE.match(mid):
+        h = hashlib.sha1(raw.replace(b"\r\n", b"\n")).hexdigest()
+        mid = ("<%s@archive.invalid>" % h).encode("ascii")
+        hdrs = [[n, f] for n, f in hdrs if n != b"message-id"]
+        hdrs.append([b"message-id", b"Message-ID: " + mid])
+        notes.append("message-id")
+    # Path
+    if header_value(hdrs, b"path") is None:
+        hdrs.append([b"path", b"Path: archive!not-for-mail"])
+        notes.append("path")
+    # From, Subject
+    if header_value(hdrs, b"from") is None:
+        hdrs.append([b"from", b"From: unknown@archive.invalid"])
+        notes.append("from")
+    if header_value(hdrs, b"subject") is None:
+        hdrs.append([b"subject", b"Subject: (none)"])
+        notes.append("subject")
+    # Date
+    dv = header_value(hdrs, b"date")
+    good = _date_text(dv) if dv is not None else None
+    if good is None:
+        fallback = _mbox_date(split_article(raw)[0]) or FALLBACK_DATE
+        if dv is not None:
+            original[b"date"] = b"Date: " + dv
+        hdrs = [[n, f] for n, f in hdrs if n != b"date"]
+        hdrs.append([b"date", b"Date: " + fallback.encode("ascii")])
+        notes.append("date")
+    elif dv.decode("latin-1").strip() != good:
+        original[b"date"] = b"Date: " + dv
+        hdrs = [[n, f] for n, f in hdrs if n != b"date"]
+        hdrs.append([b"date", b"Date: " + good.encode("ascii")])
+        notes.append("date-format")
+    for ln, full in sorted(original.items()):
+        value = full.split(b":", 1)[1].strip().replace(b"\n", b" ")
+        hdrs.append([b"x-original-" + ln, b"X-Original-" + ln.title() + b": " + value])
+    head = b"\n".join(f for _, f in hdrs)
+    body = body.rstrip(b"\n") + b"\n" if body.strip() else b"\n"
+    return head + b"\n\n" + body, mid, notes
+
+
+# ----------------------------------------------------------------- the wire ---
+class Server(object):
+    def __init__(self, host, port, timeout=60):
+        self.host, self.port, self.timeout = host, port, timeout
+        self.sock = self.f = None
+        self.connect()
+
+    def connect(self):
+        self.close()
+        self.sock = socket.create_connection((self.host, self.port), self.timeout)
+        self.f = self.sock.makefile("rb")
+        code, text = self.reply()
+        if code not in (200, 201):
+            raise OSError("the news server said: %d %s" % (code, text))
+
+    def close(self):
+        for o in (self.f, self.sock):
+            try:
+                if o:
+                    o.close()
+            except Exception:
+                pass
+        self.f = self.sock = None
+
+    def reply(self):
+        line = self.f.readline(65536)
+        if not line:
+            raise OSError("connection closed")
+        line = line.decode("utf-8", "replace").rstrip("\r\n")
+        try:
+            return int(line[:3]), line[4:]
+        except ValueError:
+            raise OSError("bad reply: %r" % line)
+
+    def ihave(self, mid, wire):
+        """The server's verdict on one article: (code, text) -- 235 taken, 435 not wanted (have it), 436 try again,
+        437 rejected."""
+        self.sock.sendall(b"IHAVE " + mid + b"\r\n")
+        code, text = self.reply()
+        if code != 335:
+            return code, text
+        lines = wire.split(b"\n")
+        if lines and lines[-1] == b"":
+            lines.pop()
+        out = b"".join((b"." + ln if ln.startswith(b".") else ln) + b"\r\n" for ln in lines)
+        self.sock.sendall(out + b".\r\n")
+        return self.reply()
+
+
+# --------------------------------------------------------------------- main ---
+def run(args, out=sys.stdout, err=sys.stderr, stdin=None):
+    keep = None
+    if args.groups:
+        with open(args.groups, encoding="utf-8", errors="replace") as fh:
+            keep = wanted_groups(fh.read())
+    state_path = None
+    done = set()
+    if not args.no_state and not args.dry_run:
+        state_path = args.state or os.path.join(os.path.expanduser("~/.local/state/news-import"),
+                                                "done-%s-%s" % (args.host, args.port))
+        if os.path.exists(state_path):
+            with open(state_path, "rb") as fh:
+                done = set(fh.read().split())
+        os.makedirs(os.path.dirname(state_path) or ".", exist_ok=True)
+    state = open(state_path, "ab") if state_path else None
+    c = dict(read=0, skipped=0, repaired=0, sent=0, accepted=0, duplicate=0, rejected=0, deferred=0, resumed=0)
+    reasons = {}
+    srv = None
+    status = 0
+    try:
+        if not args.dry_run:
+            try:
+                srv = Server(args.host, args.port)
+            except OSError as e:
+                err.write("news-import: cannot reach %s:%s: %s\n" % (args.host, args.port, e))
+                return 2
+        for name, raw in iter_sources(args.sources, stdin):
+            c["read"] += 1
+            wire, mid, notes = repair(raw, keep, args.keep_control)
+            if wire is None:
+                c["skipped"] += 1
+                reasons[notes] = reasons.get(notes, 0) + 1
+                continue
+            if notes:
+                c["repaired"] += 1
+            if mid in done:
+                c["resumed"] += 1
+                continue
+            if args.limit and c["sent"] >= args.limit:
+                break
+            c["sent"] += 1
+            if args.dry_run:
+                continue
+            for attempt in range(4):
+                try:
+                    code, text = srv.ihave(mid, wire)
+                except OSError:
+                    if attempt == 3:
+                        raise
+                    time.sleep(1 + attempt)
+                    srv.connect()
+                    continue
+                if code == 436 and attempt < 3:
+                    time.sleep(1 + attempt)
+                    continue
+                break
+            if code == 235:
+                c["accepted"] += 1
+            elif code == 435 or (code == 437 and "duplicate" in text.lower()):
+                c["duplicate"] += 1
+            elif code == 436 or code == 400:
+                c["deferred"] += 1
+                reasons["server busy: " + text] = reasons.get("server busy: " + text, 0) + 1
+                status = 1
+            else:
+                c["rejected"] += 1
+                r = "%d %s" % (code, text)
+                reasons[r] = reasons.get(r, 0) + 1
+                status = 1
+                if args.verbose:
+                    err.write("rejected %s (%s): %s\n" % (mid.decode("latin-1"), name, r))
+            if state and (code in (235, 435) or (code == 437 and "duplicate" in text.lower())):
+                state.write(mid + b"\n")
+                state.flush()
+    except OSError as e:
+        err.write("news-import: lost the news server: %s\n" % e)
+        status = 2
+    finally:
+        if state:
+            state.close()
+        if srv:
+            try:
+                srv.sock.sendall(b"QUIT\r\n")
+            except Exception:
+                pass
+            srv.close()
+    out.write("read %d: " % c["read"])
+    if args.dry_run:
+        out.write("would offer %d (%d repaired), skipped %d, already done %d\n" % (c["sent"], c["repaired"], c["skipped"], c["resumed"]))
+    else:
+        out.write("offered %d (%d repaired): accepted %d, already there %d, rejected %d, deferred %d; skipped %d, done before %d\n"
+                  % (c["sent"], c["repaired"], c["accepted"], c["duplicate"], c["rejected"], c["deferred"], c["skipped"], c["resumed"]))
+    for r, n in sorted(reasons.items(), key=lambda kv: -kv[1])[:8]:
+        out.write("  %6d  %s\n" % (n, r))
+    return status
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(prog="news-import", description=__doc__.split("\n\n")[0],
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("sources", nargs="+", metavar="SOURCE")
+    ap.add_argument("--groups", metavar="FILE")
+    ap.add_argument("--host", default="127.0.0.1")
+    ap.add_argument("--port", type=int, default=119)
+    ap.add_argument("--state", metavar="FILE")
+    ap.add_argument("--no-state", action="store_true")
+    ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--keep-control", action="store_true")
+    ap.add_argument("-v", "--verbose", action="store_true")
+    args = ap.parse_args(argv)
+    return run(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
