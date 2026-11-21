@@ -10,9 +10,10 @@
 #   1. checks what it builds on: Postfix, Dovecot and mail-setup's Sieve step (mail delivered through dovecot-lda) -
 #      it stops with the script to run first if one is missing;
 #   2. installs the mlmmj package and its user (mlmmj, who owns the lists and runs the Postfix pipes), unless --no-install;
-#   3. installs listserv and listctl (/usr/local/bin) and writes /etc/lists-setup/lists.conf;
+#   3. installs listserv, listctl and list-import (/usr/local/bin) and writes /etc/lists-setup/lists.conf;
 #   4. Postfix, as mlmmj's README.postfix says: tables /var/spool/mlmmj/virtual and transport (listctl writes them),
-#      added to virtual_alias_maps / transport_maps, recipient_delimiter +, and two pipe services in master.cf: `mlmmj`
+#      added to virtual_alias_maps / transport_maps (and virtual to local_recipient_maps, so the SMTP server accepts list
+#      addresses in a local domain), recipient_delimiter +, and two pipe services in master.cf: `mlmmj`
 #      (a list address -> mlmmj-receive) and `listserv` (listserv@HOST -> the command handler).  main.cf and master.cf
 #      are backed up first (BAK/ beside them, the 3 newest kept); `postfix check` must pass or the old files are put back;
 #   5. Dovecot: ONE global Sieve script that files mail with a List-Id of NAME.DOMAIN into Lists/NAME (and stops, so the
@@ -133,6 +134,7 @@ recipient_delimiter = +
 propagate_unmatched_extensions = (must include virtual; today's value plus virtual)
 virtual_alias_maps = (today's value), hash:$SPOOL/virtual
 transport_maps = (today's value), hash:$SPOOL/transport
+local_recipient_maps = (today's value, if it is not empty), hash:$SPOOL/virtual
 mlmmj_destination_recipient_limit = 1
 listserv_destination_recipient_limit = 1
 EOF
@@ -279,6 +281,7 @@ $SUDO install -d -m 750 -o "$MLMMJ_USER" -g "$MLMMJ_USER" "$SPOOL" 2>/dev/null |
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 put_file "$BINDIR/listserv" 755 "$L/bin/listserv" || true
 put_file "$BINDIR/listctl" 755 "$L/bin/listctl" || true
+put_file "$BINDIR/list-import" 755 "$L/bin/list-import" || true
 put_file "$LIBDIR/listlib.py" 644 "$L/bin/listlib.py" || true
 print_lists_conf > "$tmp/lists.conf"
 # the generated date makes every run "differ": compare without the second line
@@ -320,6 +323,11 @@ add_map() {   # add_map PARAM hash:FILE: append to a map list unless it is there
 }
 add_map virtual_alias_maps "hash:$SPOOL/virtual"
 add_map transport_maps "hash:$SPOOL/transport"
+# Postfix's SMTP server checks a recipient in a LOCAL domain (cpbee.cmnet is one) against local_recipient_maps, before any
+# virtual alias is looked at: without this a mail to a list address - from tvmail, or mlmmj's own bounces - is refused
+# "User unknown".  The virtual table's left-hand side is every list address (and listserv@); an empty
+# local_recipient_maps means "accept everything" and is left alone.
+[ -z "$($PC -h local_recipient_maps 2>/dev/null)" ] || add_map local_recipient_maps "hash:$SPOOL/virtual"
 $SUDO $PC -e "mlmmj_destination_recipient_limit=1" "listserv_destination_recipient_limit=1"
 set_service() {   # set_service SERVICE/TYPE "the whole master.cf line"
   local cur; cur=$($PC -M "$1" 2>/dev/null | tr -s ' \t' ' ' || true)

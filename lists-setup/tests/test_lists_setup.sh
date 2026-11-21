@@ -33,7 +33,7 @@ t "syntax"
 for s in configure-lists.sh configure-tvmail-lists.sh; do
   check "bash -n $s" 'bash -n "$N/scripts/$s"'
 done
-check "listserv, listctl and listlib compile" '"$PY" -c "import sys; [compile(open(p).read(), p, \"exec\") for p in sys.argv[1:]]" "$N/bin/listserv" "$N/bin/listctl" "$N/bin/listlib.py"'
+check "listserv, listctl, list-import and listlib compile" '"$PY" -c "import sys; [compile(open(p).read(), p, \"exec\") for p in sys.argv[1:]]" "$N/bin/listserv" "$N/bin/listctl" "$N/bin/list-import" "$N/bin/listlib.py"'
 check "-h prints the usage" 'bash "$CFG" -h | grep -q "^Usage:"'
 
 # --------------------------------------------------------------------------
@@ -81,6 +81,7 @@ myhostname=cpbee.cmnet
 mail_version=3.9.1
 virtual_alias_maps=\$virtual_maps
 transport_maps=
+local_recipient_maps=proxy:unix:passwd.byname \$alias_maps
 config_directory=$BOX/postfix
 EOF
 cat > "$FB/postconf" <<EOF
@@ -152,10 +153,11 @@ run() { bash "$CFG" --domain cpbee.cmnet --no-install --no-reload "$@"; }
 run --list "alpha:The first list" --list beta --owner chris@cpbee.cmnet > "$OUT" 2>&1; rc=$?
 check "exit 0" '[ $rc = 0 ] || { cat "$OUT"; false; }'
 PCS="$BOX/pc.state"
-check "listserv, listctl and listlib are installed" '[ -f "$BOX/bin/listserv" ] && [ -f "$BOX/bin/listctl" ] && [ -f "$BOX/lib/listlib.py" ]'
+check "listserv, listctl, list-import and listlib are installed" '[ -f "$BOX/bin/listserv" ] && [ -f "$BOX/bin/listctl" ] && [ -f "$BOX/bin/list-import" ] && [ -f "$BOX/lib/listlib.py" ]'
 check "lists.conf written" 'has "$BOX/etc/lists.conf" "DOMAIN = cpbee.cmnet" && has "$BOX/etc/lists.conf" "MLMMJ_BIN = $FB"'
 check "virtual_alias_maps keeps its old value and gains the table" 'has "$PCS" "virtual_alias_maps=\$virtual_maps, hash:$BOX/spool/virtual"'
 check "transport_maps (was empty) is just the table" 'has "$PCS" "transport_maps=hash:$BOX/spool/transport"'
+check "local_recipient_maps gains the virtual table, so list addresses are not 'User unknown'" 'has "$PCS" "local_recipient_maps=proxy:unix:passwd.byname \$alias_maps, hash:$BOX/spool/virtual"'
 check "recipient_delimiter and propagate stay as they were" 'has "$PCS" "recipient_delimiter=+" && has "$PCS" "propagate_unmatched_extensions=canonical, virtual"'
 check "the per-service limits" 'has "$PCS" "mlmmj_destination_recipient_limit=1" && has "$PCS" "listserv_destination_recipient_limit=1"'
 check "master.cf services set" 'has "$PCS" "master:mlmmj/unix=mlmmj unix - n n - - pipe flags=ORhu user=mlmmj argv=$FB/mlmmj-receive -F -L $BOX/spool/\$nexthop" && has "$PCS" "master:listserv/unix=listserv unix - n n - - pipe flags=R user=mlmmj argv=$BOX/bin/listserv --sender=\${sender}"'
@@ -237,6 +239,9 @@ for v in $(env | sed -n 's/^\(LISTS_SETUP_[A-Z_]*\)=.*/\1/p') FAKE_PC_STATE FAKE
 PATH=${PATH#"$FB:"}
 "$PY" "$here/test_lists.py" > "$OUT" 2>&1
 check "test_lists.py (listlib, listserv, listctl)" 'tail -3 "$OUT" | grep -q "^OK"'
+[ -s "$OUT" ] && ! tail -3 "$OUT" | grep -q "^OK" && cat "$OUT"
+"$PY" "$here/test_list_import.py" > "$OUT" 2>&1
+check "test_list_import.py (the converter)" 'tail -3 "$OUT" | grep -q "^OK"'
 [ -s "$OUT" ] && ! tail -3 "$OUT" | grep -q "^OK" && cat "$OUT"
 
 echo

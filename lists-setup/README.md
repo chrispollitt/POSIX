@@ -14,6 +14,7 @@ half of tvmail's
 | [bin/listserv](bin/listserv) | the command handler Postfix feeds `listserv@HOST` to: reads the commands, does them, answers by mail |
 | [bin/listctl](bin/listctl) | make, remove and configure lists, manage members, rewrite the Postfix tables |
 | [bin/listlib.py](bin/listlib.py) | what the two share: configuration, the list directory layout, members, the Postfix tables |
+| [bin/list-import](bin/list-import) | turn old mailing-list material (an ARPANET-style archive, an rmail file of digests, one long document) into list mail and deliver it to members' folders |
 | [scripts/configure-tvmail-lists.sh](scripts/configure-tvmail-lists.sh) | on a client: point tvmail at it (`[lists]` in `tvmail.conf`) |
 | [tests/](tests/) | `test_lists_setup.sh` (runs the other too), `test_lists.py` |
 
@@ -34,7 +35,9 @@ every option. No port is opened: list mail uses the SMTP the box already accepts
 2. installs `listserv` and `listctl` in `/usr/local/bin` and writes `/etc/lists-setup/lists.conf` (the domain, the spool
    `/var/spool/mlmmj`, where mlmmj's tools are);
 3. Postfix, as mlmmj's own README.postfix has it: the tables `/var/spool/mlmmj/virtual` and `transport` (kept by
-   `listctl`) are added to `virtual_alias_maps` and `transport_maps`, `recipient_delimiter` must be `+`, and master.cf gets
+   `listctl`) are added to `virtual_alias_maps` and `transport_maps` (and `virtual` to `local_recipient_maps`: the SMTP
+   server checks a recipient in a local domain against that before any alias, and would refuse a list address as "User
+   unknown" otherwise), `recipient_delimiter` must be `+`, and master.cf gets
    two pipe services run as the `mlmmj` user: `mlmmj` (a list address reaches `mlmmj-receive`) and `listserv`
    (`listserv@HOST` reaches the command handler). `main.cf` and `master.cf` are backed up first (`BAK/` beside them, the
    3 newest kept) and put back if `postfix check` fails;
@@ -63,6 +66,27 @@ A new list is `NAME@DOMAIN`, with the subject prefix `[NAME]`, a `List-Id: <NAME
 keys on), posting by members only (`--open-post`: anyone), a digest every day, and mlmmj's own mail commands switched
 off (`closedlist`): members come and go through `listserv@`. `closedlistsub` (`--closed-sub`) makes `SUBSCRIBE` refuse
 with "ask the owner"; mlmmj's `submod` is refused the same way, since `listserv` does not run the approval flow.
+
+### Filling a list with old material
+
+`list-import` makes what mlmmj would have delivered out of old list archives and puts it in a member's folder:
+
+```sh
+list-import --list sf-lovers --domain cpbee.cmnet --dry-run  "zip::listservs/SF-LOVERS_Digest_Vol_01.txt"   # count only
+sudo list-import --list sf-lovers --state /var/lib/lists-setup/sf-lovers-chris.ids \
+     "zip::listservs/SF-LOVERS_Digest_Vol_01.txt" -- /usr/lib/dovecot/dovecot-lda -d chris
+```
+
+A source is a file or `ZIPFILE::MEMBER`. Three shapes are read: an **ARPANET-style archive** (messages one after
+another, each with its own `Date:` / `From:` / `Subject:`; SF-Lovers of 1979), an **rmail (Babyl) file** where each
+record is one message (the digest issues of SF-Lovers volumes 13 and 25), and **one long document** cut into one
+message per numbered section (`--format sections --date 1994-09-10 --title Cyphernomicon`). Each message gets the
+shape of a list mail: `List-Id: <NAME.DOMAIN>`, `To: NAME@DOMAIN`, the `[NAME]` subject prefix, a clean `From` (old
+`USER at HOST` forms become `USER@HOST.invalid`), the date read from forms like `15 SEP 1979 2216-PDT`, a
+`Message-ID` (kept when real, made up from the content otherwise), `X-Archive-Source`, and UTF-8 text. Delivery runs a
+command once per message (`-- CMD ARG...`): the delivery agent hands the mail to Dovecot, whose Sieve rule files it
+into `Lists/NAME` like any list mail. `--state` records the Message-IDs delivered, so a re-run skips them; `--out
+FILE.mbox` writes an mbox instead.
 
 ## The commands
 
@@ -102,10 +126,12 @@ script says so when the mode is local.
 ## Tests
 
 ```sh
-./tests/test_lists_setup.sh     # 54 checks: the files configure-lists.sh would write, its option checks, the whole
+./tests/test_lists_setup.sh     # 55 checks: the files configure-lists.sh would write, its option checks, the whole
                                 # install in a sandbox against fake postconf / postfix / doveconf / sievec (re-runs,
-                                # backups, both rollbacks, each missing prerequisite), the client script - and
+                                # backups, both rollbacks, each missing prerequisite), the client script - and the
+                                # two Python suites below
 python3 tests/test_lists.py     # 28 checks: listlib, listserv (every command, the loop guards), listctl, end to end
+python3 tests/test_list_import.py   # 23 checks: list-import - old date and address forms, the splitters, delivery
 ```
 
 The handler and tvmail's Lists service were also run against each other once (tvmail's real backend verbs, the real
