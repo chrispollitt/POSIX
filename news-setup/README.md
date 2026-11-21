@@ -12,6 +12,7 @@ Usenet service, or any newsreader. This is the server half of tvmail's
 | [scripts/create-groups.sh](scripts/create-groups.sh) | make the groups of a list, read-only |
 | [bin/news-import](bin/news-import) | feed old articles (mbox, Maildir, a spool tree, tar, zip, rnews batches) to the server with IHAVE, made fit for it |
 | [bin/fetch-archive](bin/fetch-archive) | list and download the files of an Internet Archive item, checked against its md5s |
+| [bin/usenetarchives-sample.user.js](bin/usenetarchives-sample.user.js) | a Tampermonkey userscript, run by hand: a sample (20 groups x 20 threads x 20 messages) from usenetarchives.com as mbox files, quoting stripped |
 | [groups.d/classic.list](groups.d/classic.list) | a starting set of well-known groups, `net.*` before the renaming included |
 | [scripts/configure-tvmail-news.sh](scripts/configure-tvmail-news.sh) | on a client: point tvmail at the server (`[news]` in `tvmail.conf`), after checking it answers |
 | [tests/](tests/) | `test_news_setup.sh` (runs the others too), `test_news_import.py`, `test_fetch_archive.py`, a fake innd |
@@ -31,7 +32,7 @@ news (cpbee). Safe to re-run; `-h` has every option. It:
 1. installs the `inn2` package;
 2. sets what it needs in `/etc/news`, and nothing else:
    - **inn.conf**: only `organization`, `pathhost`, `artcutoff: 0` (an article of 1987 is not "too
-     old"), `maxartsize` and `verifycancels: false` change; the rest of the package's file stays;
+     old"), and `maxartsize` change (a stray `verifycancels`, which INN 2.7 does not know, is removed); the rest of the package's file stays;
    - **readers.conf**: the machine itself and the `--allow` networks (default: lan0's subnet) may read
      everything and post to `lan.*` only; any other machine is refused;
    - **incoming.conf**: no peers, except `127.0.0.1`, so `news-import` can feed the archive;
@@ -63,7 +64,10 @@ bin/news-import --groups groups.d/classic.list ~/usenet/*.zip           # feed i
 ```
 
 `news-import` reads an mbox (also `.gz`, `.bz2`, or inside a `.zip`), a Maildir or a directory tree of
-article files, a `.tar`/`.tar.gz` of them, or an rnews batch (`-` for standard input). It makes each article
+article files, a `.tar`/`.tar.gz` of them, an rnews batch (`-` for standard input), or the plain-text threads
+that people collect from the web (a `Newsgroup:` / `From:` / `Date:` block per article, a line of `==========`
+between them: the From is put right, the date made proper, replies threaded under the first article).
+`--list-groups` prints the groups in the sources and stops. It makes each article
 fit for a server that has never heard of it: a missing `Message-ID` is made up (a hash of the article, so a
 re-run makes the same one), a missing `Path:` added, a `Date:` the server would not take (two-digit years,
 zone names, nonsense) rewritten with the old one kept as `X-Original-Date`, and `Newsgroups:` cut down to the
@@ -72,7 +76,48 @@ so an old `newgroup`, `rmgroup` or `cancel` cannot do anything to your server. I
 the server's "I have that" is a duplicate, not an error. Its summary says how many were read, repaired,
 accepted, already there, rejected (and why) and skipped.
 
-**Where the articles come from** is not settled here, and is yours to check:
+### A zip of famous posts (the three scripts)
+
+For a LAN server with a small archive from a zip of plain-text threads (`~/Downloads/usenet-historic-posts.zip`:
+27 files, 243 articles, 23 groups), the laptop has three scripts in `src/Claude/TO_BE_RUN`, run in this order:
+`news-1-install-on-cpbee.sh` (this README's "The server", with the port opened), `news-2-populate-on-cpbee.sh`
+(`news-import --list-groups`, `create-groups.sh` for exactly those groups, then the import; 17 of the 243 repeat a
+Message-ID, so the server holds 226), `news-3-tvmail-on-laptop.sh` (builds the tvmail that has the Usenet service, then
+`configure-tvmail-news.sh`).
+
+### A sample from usenetarchives.com (by hand, in your browser)
+
+[usenetarchives.com](https://usenetarchives.com) is a searchable archive with the Utzoo collection and
+hundreds of thousands of groups, but it refuses scripts (HTTP 403), so
+[bin/usenetarchives-sample.user.js](bin/usenetarchives-sample.user.js) is a **Tampermonkey userscript** that
+runs in your own browser, only when you press its button, and takes a small sample:
+
+1. Install it in Tampermonkey (Dashboard > "+" > paste the file > save).
+2. Open a page that lists groups (e.g. `https://usenetarchives.com/groups.php`), click POSTS to put the
+   biggest first, or pick a collection (Utzoo).
+3. A box appears at the bottom right: **groups / threads / messages** (default 20 / 20 / 20 = at most 8000
+   messages) and a delay between requests (1.5 s and a random bit more). **Run** lists the groups and asks
+   first, then for each group takes its biggest threads and the first messages of each, with **quoted text,
+   "X writes:" lines and signatures taken out**, and saves `usenet-GROUP.mbox` as each group finishes (the
+   browser may ask once to allow several downloads). It remembers finished groups (**Forget done** clears
+   that), stops on **Stop**, and stops by itself at the first 403 / 429 / 503.
+4. `bin/news-import --groups groups.d/classic.list usenet-*.mbox` (after `create-groups.sh`).
+
+**Not tested against the real site**: the part that knows what its pages look like (`SITE` in the file) is
+written from three screenshots, and the site could not be read from here. What it assumes: the group list is a
+table (GROUP, DESCRIPTION, THREADS, POSTS); a group's threads are listed **one page per year**
+(`threads.php?id=GROUP&y=1991`, a table Threads / Posts / Date, 100 a page, sorted by Posts, biggest first, with
+the other years as buttons "1991 (2,731)"); a thread is one page (`view.php?id=GROUP&mid=...`) holding every
+message, each under a `#1 author 1992-01-15 11:32UTC` header. So for each group it reads the first page of
+each year in the **years** box (default 1980-2000; blank = all), ranks those threads by Posts, and opens the
+top ones - for 20 groups about 20 x (15 years + 20 threads) = 700 requests, some twenty minutes. It warns if a
+year's list is not in Posts order (its first page could then miss big threads). If Run says it cannot find
+the groups, threads or messages, press **Probe** on that page: it copies a trimmed outline of the page's
+structure (public page text only) to paste to whoever fixes `SITE`. The rest - quote stripping, the mbox,
+ranking, the `From` escaping - is tested (`node tests/test_usenet_sample.js`) and its output is read by
+`news-import` (a check in `test_news_setup.sh`). Read the site's terms first; this is a sample for yourself.
+
+**Other places the articles can come from** are yours to check:
 
 - The Internet Archive has several Usenet collections (an item called `usenethistorical` is the one
   known to hold mbox files per group, as zip files); `fetch-archive --list` shows what an item really holds
@@ -97,7 +142,7 @@ It asks the server first (so a closed firewall is found here), then writes `[new
 ## Tests
 
 ```sh
-./tests/test_news_setup.sh      # 57 checks: the config files, the option checks, the firewall plan,
+./tests/test_news_setup.sh      # 59 checks: the config files, the option checks, the firewall plan,
                                 # create-groups with a fake ctlinnd, the client script with a fake
                                 # server - and both Python suites below
 python3 tests/test_news_import.py     # the importer, against a fake innd

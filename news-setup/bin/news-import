@@ -7,6 +7,10 @@ A SOURCE is any of
     an mbox file (.gz or .zip too)          a Maildir (cur/ and new/), or a directory of article files
     a .tar / .tar.gz / .tgz of article files (a member named *.mbox is read as an mbox)
     an rnews batch ("#! rnews SIZE" ...) from a file or from - (standard input)
+    a text file as collected from the web: articles starting "Newsgroup: ..." / "From: ..." / "Date: 1987-04-21T10:58:09Z" /
+      "Subject:" / "Message-ID:", separated by a line of ==========  (a thread per file, e.g. in a zip); the From is put
+      right (and kept as X-Original-From), the date made RFC 5322, an id with no host given one, and a "Re:" article gets
+      the first article's id as References
 
 Each article is made fit for a server that has never heard of it, then offered with IHAVE to the
 server on --host / --port (the box's own innd, which lists 127.0.0.1 as a peer in incoming.conf):
@@ -28,6 +32,11 @@ Options
     --host H --port N   the news server (127.0.0.1 119)
     --state FILE    resume file (default ~/.local/state/news-import/done-HOST-PORT; --no-state: none)
     --limit N       stop after N articles have been offered
+    --list-groups   read the sources and print "GROUP  COUNT" for every group posted to, then stop (no server,
+                    nothing sent): what a --groups list for create-groups.sh has to hold
+    --first-group   with --list-groups: only the first group of each article's Newsgroups (the group it was really
+                    posted to; the others are crossposts).  Making just those groups keeps a crossposted FAQ from
+                    creating a dozen near-empty groups; --groups then trims the crossposts to the groups that exist.
     --dry-run       read and repair, count, send nothing (also: no connection)
     --keep-control  do not strip Control: and friends (do not use on a server you care about)
     -v              say what happens to each rejected article
@@ -40,6 +49,7 @@ import argparse
 import bz2
 import calendar
 import datetime
+import email.header
 import email.utils
 import fnmatch
 import gzip
@@ -109,10 +119,130 @@ def looks_like_mbox(data):
     return data[:5] == b"From " and re.match(rb"From \S+ ", data) is not None
 
 
+# A plain-text archive as people collect them from the web: a file holds one thread, each article starting
+#     Newsgroup: comp.os.minix          (singular - not a news header)
+#     From: ast@cs.vu.nl Andy Tanenbaum (address and name in any order, or only a name, or a masked "cs...@host")
+#     Date: 1987-04-21T10:58:09.000Z
+#     Subject: ...
+#     Message-ID: <1143@botter.cs.vu.nl>
+#     <blank line, the text>
+# and the articles of the file separated by a line of ==========.  gg_articles() turns each into an
+# ordinary article, which repair() then looks at like any other.
+# (a file may start with a line in brackets, "[Thread has 50 posts; first 40 shown]": ignored)
+_GG_BANNER = rb"\A\s*(?:\[[^\]\n]*\][ \t]*\n\s*)?"
+_GG_START = re.compile(_GG_BANNER + rb"Newsgroup: ")
+_GG_SEP = re.compile(rb"\n={5,}[ \t]*\n+(?=Newsgroup: )")
+
+
+def _ascii_or_word(text):
+    """A header value that is plain ASCII: as it is, or as an RFC 2047 encoded word."""
+    text = " ".join(text.split())
+    try:
+        text.encode("ascii")
+        return text
+    except UnicodeEncodeError:
+        return email.header.Header(text, "utf-8").encode()
+
+
+def gg_from(raw):
+    """A From: value in the form `Name <addr>` for what the archive wrote; (value, changed)."""
+    s = " ".join(raw.split())
+    unmasked = s.replace("...@", "@")                  # a masked address, "cs...@host", loses its dots
+    if re.search(r"<[^<>\s@]+@[^<>\s]+>$", unmasked) or re.match(r"^[^\s@()<>]+@[^\s@()<>]+( \([^()]*\))?$", unmasked):
+        return unmasked, unmasked != s
+    addr = None
+    rest = []
+    for tok in s.split(" "):
+        t = tok.strip(",;:<>")
+        if addr is None and "@" in t[1:-1] and not t.startswith("@"):
+            addr = t
+        elif not tok.startswith("@"):
+            rest.append(tok)
+    name = " ".join(rest)
+    name = re.sub(r'[()<>"\\;:]', "", name).strip()
+    if addr is not None:
+        addr = re.sub(r"[^A-Za-z0-9._%+@-]", "", addr.replace("...", ""))
+    if addr is None or not re.match(r"^[^@]+@[^@]+$", addr):
+        first = re.sub(r"[^A-Za-z0-9._-]", "", (name.split() or [""])[0])
+        addr = (first or "unknown") + "@archive.invalid"
+    if not name:
+        return addr, True
+    try:
+        name.encode("ascii")
+        return '"%s" <%s>' % (name, addr), True
+    except UnicodeEncodeError:
+        return "%s <%s>" % (email.header.Header(name, "utf-8").encode(), addr), True
+
+
+def gg_articles(data):
+    """The ordinary articles (bytes) in one file of the format above.  Within a file, an article whose
+    Subject starts with Re: is given the first article's Message-ID as its References, so the thread
+    shows as a thread (this is a guess from the file, and says so in X-Archive-Thread)."""
+    text = data.replace(b"\r\n", b"\n")
+    text = re.sub(_GG_BANNER, b"", text, count=1)
+    text = re.sub(rb"\n={5,}[ \t]*\n*\Z", b"\n", text)
+    out = []
+    root = None
+    for chunk in _GG_SEP.split(text):
+        head, _, body = chunk.lstrip().partition(b"\n\n")
+        hdrs = []
+        for line in head.decode("utf-8", "replace").split("\n"):
+            if line[:1] in (" ", "\t") and hdrs:
+                hdrs[-1][1] += " " + line.strip()
+            elif ":" in line:
+                k, v = line.split(":", 1)
+                hdrs.append([k.strip(), v.strip()])
+        h = {}
+        for k, v in hdrs:
+            h.setdefault(k.lower(), v)
+        new = []
+        for k, v in hdrs:
+            lk = k.lower()
+            if lk == "newsgroup":
+                new.append(("Newsgroups", v.replace(" ", "")))
+            elif lk == "from":
+                value, changed = gg_from(v)
+                new.append(("From", _ascii_or_word(value)))
+                if changed:
+                    new.append(("X-Original-From", _ascii_or_word(v)))
+            elif lk == "date":
+                try:
+                    dt = datetime.datetime.fromisoformat(v.replace("Z", "+00:00"))
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=datetime.timezone.utc)
+                    new.append(("Date", email.utils.format_datetime(dt)))
+                except ValueError:
+                    new.append(("Date", v))     # repair() deals with a date it cannot read
+            elif lk == "message-id":
+                mid = v
+                if re.match(r"^<[^<>\s@]+>$", mid):
+                    mid = mid[:-1] + "@archive.invalid>"
+                new.append(("Message-ID", mid))
+            elif lk == "subject":
+                new.append(("Subject", _ascii_or_word(v)))
+            else:
+                new.append((k, _ascii_or_word(v)))
+        mid = [v for k, v in new if k == "Message-ID"]
+        subj = h.get("subject", "")
+        if root is None:
+            root = mid[0] if mid and MSGID_RE.match(mid[0].encode("latin-1", "replace")) else None
+        elif root and re.match(r"(?i)re(\[\d+\])?:", subj) and not any(k.lower() == "references" for k, _ in new):
+            new.append(("References", root))
+            new.append(("X-Archive-Thread", "References inferred from the order of the file"))
+        body = body.lstrip(b"\n")
+        if re.search(rb"[\x80-\xff]", body) and not any(k.lower() == "content-type" for k, _ in new):
+            new += [("MIME-Version", "1.0"), ("Content-Type", "text/plain; charset=utf-8"),
+                    ("Content-Transfer-Encoding", "8bit")]
+        out.append(("".join("%s: %s\n" % kv for kv in new)).encode("ascii", "replace") + b"\n" + body)
+    return out
+
+
 def articles_of_bytes(data, name=""):
     """The articles in one blob of bytes: an rnews batch, an mbox (or the one article it is)."""
     if data.startswith(b"#! rnews"):
         return split_rnews(data)
+    if _GG_START.match(data):
+        return gg_articles(data)
     if looks_like_mbox(data) or name.endswith((".mbox", ".mbx")):
         parts = split_mbox(data)
         if parts:
@@ -363,7 +493,23 @@ class Server(object):
 
 
 # --------------------------------------------------------------------- main ---
+def list_groups(args, out):
+    counts = {}
+    for _, raw in iter_sources(args.sources):
+        hdrs, _ = split_article(raw)
+        ng = header_value(hdrs, b"newsgroups")
+        names = [g.strip() for g in (ng.decode("latin-1").split(",") if ng else []) if g.strip()]
+        for g in names[:1] if getattr(args, "first_group", False) else names:
+            if re.match(r"^[A-Za-z0-9+_.-]+$", g):
+                counts[g] = counts.get(g, 0) + 1
+    for g, n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])):
+        out.write("%s  %d\n" % (g, n))
+    return 0
+
+
 def run(args, out=sys.stdout, err=sys.stderr, stdin=None):
+    if getattr(args, "list_groups", False):
+        return list_groups(args, out)
     keep = None
     if args.groups:
         with open(args.groups, encoding="utf-8", errors="replace") as fh:
@@ -470,6 +616,8 @@ def main(argv=None):
     ap.add_argument("--state", metavar="FILE")
     ap.add_argument("--no-state", action="store_true")
     ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--list-groups", action="store_true")
+    ap.add_argument("--first-group", action="store_true")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--keep-control", action="store_true")
     ap.add_argument("-v", "--verbose", action="store_true")

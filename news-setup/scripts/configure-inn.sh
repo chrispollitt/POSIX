@@ -10,7 +10,8 @@
 #   1. installs the inn2 package (apt);
 #   2. sets what it needs in /etc/news - and nothing else:
 #        inn.conf      organization, pathhost, artcutoff 0 (an article of 1987 is not "too old"),
-#                      maxartsize, verifycancels off.  Only these keys change; the rest of the
+#                      maxartsize.  Only these keys change (and a stray verifycancels line, which an
+#                      earlier version of this script added and INN 2.7 does not know, is removed); the rest of the
 #                      file the package wrote stays.
 #        readers.conf  who may read and post: this machine and the --allow networks (default:
 #                      lan0's subnet) may read everything and post to lan.* only; everyone else
@@ -114,6 +115,9 @@ done
 # --------------------------------------------------------------------------
 # the files
 # --------------------------------------------------------------------------
+# drop_key FILE KEY -> FILE without its KEY lines (a key this INN does not know)
+drop_key() { awk -v k="$2" '$0 !~ "^[ \t]*" k "[ \t]*:" { print }' "$1"; }
+
 # set_key FILE KEY VALUE -> FILE with "KEY: VALUE" in place of its (uncommented) KEY line, or added at the end
 set_key() {
   awk -v k="$2" -v v="$3" '
@@ -131,7 +135,7 @@ make_inn_conf() {   # make_inn_conf FILE -> FILE with our keys set, on stdout
   set_key "$t1" pathhost "$PATHHOST"         > "$t2"; cp "$t2" "$t1"
   set_key "$t1" artcutoff 0                  > "$t2"; cp "$t2" "$t1"
   set_key "$t1" maxartsize 4000000           > "$t2"; cp "$t2" "$t1"
-  set_key "$t1" verifycancels false          > "$t2"; cp "$t2" "$t1"
+  drop_key "$t1" verifycancels               > "$t2"; cp "$t2" "$t1"
   cat "$t1"
   rm -f "$t1" "$t2"
 }
@@ -219,20 +223,22 @@ backup_keep3() {
   ls -1t "$d/$b".bak-* 2>/dev/null | tail -n +4 | while IFS= read -r old; do $SUDO rm -f "$old"; done
 }
 
-# put_file NAME NEWFILE: install NEWFILE as $ETC/NAME if it differs (backed up first); sets `changed`
+# put_file NAME NEWFILE MODE GROUP: install NEWFILE as $ETC/NAME if it differs (backed up first); sets `changed`.
+# Owner root, and the mode and group the package gives that file (inncheck checks them): the files with no secret
+# in them are 644 root:root, incoming.conf is 640 root:news.  Set again even when the content is already right.
 put_file() {
-  local dest="$ETC/$1"
+  local dest="$ETC/$1" mode="$3" grp="$4"
   if $SUDO cmp -s "$2" "$dest" 2>/dev/null; then
     log "$1: unchanged"
   else
     backup_keep3 "$dest"
     $SUDO install -d -m 755 "$ETC"
-    $SUDO install -m 644 "$2" "$dest"
-    # INN reads its files as the news user: keep the group the package gave the directory, if there is one
-    if getent group news >/dev/null 2>&1; then $SUDO chgrp news "$dest" 2>/dev/null || true; fi
+    $SUDO install -m "$mode" "$2" "$dest"
     changed=1
     log "$1: written"
   fi
+  if getent group "$grp" >/dev/null 2>&1; then $SUDO chgrp "$grp" "$dest" 2>/dev/null || true; fi
+  $SUDO chmod "$mode" "$dest" 2>/dev/null || true
 }
 
 step "INN2 for the LAN (path: $PATHHOST; read from 127.0.0.1 ${ALLOW[*]}; post to lan.*)"
@@ -256,7 +262,10 @@ make_inn_conf "$base" > "$tmp/inn.conf"
 make_readers_conf    > "$tmp/readers.conf"
 make_incoming_conf   > "$tmp/incoming.conf"
 make_expire_ctl      > "$tmp/expire.ctl"
-for f in inn.conf readers.conf incoming.conf expire.ctl; do put_file "$f" "$tmp/$f"; done
+put_file inn.conf      "$tmp/inn.conf"      644 root
+put_file readers.conf  "$tmp/readers.conf"  644 root
+put_file incoming.conf "$tmp/incoming.conf" 640 news
+put_file expire.ctl    "$tmp/expire.ctl"    644 root
 [ "$CONFIG_ONLY" = 1 ] && { log "(--config-only: the files are in $ETC; nothing else was done)"; exit 0; }
 
 # 3. the service -------------------------------------------------------------------

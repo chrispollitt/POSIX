@@ -248,5 +248,87 @@ class TestRun(Base):
         self.assertIn("cannot reach", err)
 
 
+# the shape of ~/Downloads/usenet-historic-posts.zip: a file per thread, "Newsgroup:" singular, a From of
+# "addr Name" in any order, ISO dates, ids without a host, articles told apart by a line of ==========
+GG = (
+    "Newsgroup: comp.os.minix\r\nFrom: ast@cs.vu.nl Andy Tanenbaum\r\nDate: 1992-01-29T07:12:50.000Z\r\n"
+    "Subject: LINUX is obsolete\r\nMessage-ID: <12595@star.cs.vu.nl>\r\n\r\n\r\nI was in the U.S.\r\n"
+    "\r\n\n==========\n\n"
+    "Newsgroup: comp.os.minix\nFrom: rms@mit-oz @mit-eddie.UUCP (Richard Stallman\nDate: 1992-01-29T09:00:00Z\n"
+    "Subject: Re: LINUX is obsolete\nMessage-ID: <anews.Aucbonyx.118>\n\n>I was in the U.S.\nCafé society.\n"
+    "\n==========\n\n"
+    "Newsgroup: alt.test,comp.os.minix\nFrom: cs...@lcanter.win.net\nDate: not a date\nSubject: ads\n\nbuy\n"
+    "\n==========\n"
+).encode("utf-8")
+
+
+class TestPlainTextFormat(Base):
+    def articles(self):
+        p = self.tmp / "thread.txt"
+        p.write_bytes(GG)
+        return [a for _, a in ni.iter_sources([str(p)])]
+
+    def test_one_file_is_three_articles_and_the_separator_is_gone(self):
+        arts = self.articles()
+        self.assertEqual(len(arts), 3)
+        self.assertTrue(all(b"=====" not in a and b"\r" not in a for a in arts))
+
+    def test_headers_are_made_news_headers(self):
+        h = [self.headers(ni.repair(a)[0]) for a in self.articles()]
+        self.assertEqual(h[0]["Newsgroups"], "comp.os.minix")
+        self.assertEqual(h[0]["From"], '"Andy Tanenbaum" <ast@cs.vu.nl>')
+        self.assertEqual(h[0]["X-Original-From"], "ast@cs.vu.nl Andy Tanenbaum")
+        self.assertEqual(h[0]["Date"], "Wed, 29 Jan 1992 07:12:50 +0000")
+        self.assertEqual(h[0]["Message-ID"], "<12595@star.cs.vu.nl>")
+        self.assertEqual(h[1]["From"], '"Richard Stallman" <rms@mit-oz>')                    # a broken From is read
+        self.assertEqual(h[1]["Message-ID"], "<anews.Aucbonyx.118@archive.invalid>")         # an id with no host gets one
+        self.assertEqual(h[2]["From"], "cs@lcanter.win.net")                                 # the mask "..." goes
+        self.assertEqual(h[2]["Date"], "Tue, 01 Jan 1980 00:00:00 +0000")                      # an unreadable date: the fallback
+        self.assertEqual(h[2]["X-Original-Date"], "not a date")
+        self.assertEqual(h[2]["Newsgroups"], "alt.test,comp.os.minix")
+
+    def test_a_reply_is_threaded_under_the_first_article_and_text_is_clean(self):
+        arts = self.articles()
+        h1 = self.headers(ni.repair(arts[1])[0])
+        self.assertEqual(h1["References"], "<12595@star.cs.vu.nl>")
+        self.assertIn("X-Archive-Thread", h1)
+        self.assertNotIn("References", self.headers(ni.repair(arts[0])[0]))
+        self.assertNotIn("References", self.headers(ni.repair(arts[2])[0]))                  # not a Re:
+        self.assertEqual(ni.split_article(arts[0])[1], b"I was in the U.S.\n\n")
+        self.assertIn("charset=utf-8", self.headers(arts[1])["Content-Type"])                # 8-bit text says so
+        self.assertNotIn("Content-Type", self.headers(arts[0]))
+
+    def test_non_ascii_names_and_subjects_become_encoded_words(self):
+        v, changed = ni.gg_from("jose@x.es José Núñez")
+        self.assertTrue(changed)
+        self.assertRegex(v, r"^=\?utf-8\?[bq]\?.+\?= <jose@x\.es>$")
+        self.assertEqual(ni.gg_from("Henry Spencer <henry@utzoo.uucp>"), ("Henry Spencer <henry@utzoo.uucp>", False))
+        self.assertEqual(ni.gg_from("bob@x.org (Bob)"), ("bob@x.org (Bob)", False))
+        self.assertEqual(ni.gg_from("just a name")[0], '"just a name" <just@archive.invalid>')
+
+    def test_a_truncated_thread_banner_is_ignored_and_first_group_counts_only_the_first(self):
+        p = self.tmp / "banner.txt"
+        p.write_bytes(b"[Thread has 50 posts; first 40 shown]\n\n" + GG)
+        arts = [a for _, a in ni.iter_sources([str(p)])]
+        self.assertEqual(len(arts), 3)
+        self.assertTrue(arts[0].startswith(b"Newsgroups: comp.os.minix\n"))
+        out = io.StringIO()
+        ni.run(Args([str(p)], 0, list_groups=True, first_group=True), out)
+        self.assertEqual(out.getvalue(), "comp.os.minix  2\nalt.test  1\n")
+
+    def test_list_groups_and_the_whole_run(self):
+        p = self.tmp / "thread.txt"
+        p.write_bytes(GG)
+        out = io.StringIO()
+        self.assertEqual(ni.run(Args([str(p)], 0, list_groups=True), out), 0)
+        self.assertEqual(out.getvalue(), "comp.os.minix  3\nalt.test  1\n")
+        srv = FakeInnd()
+        self.addCleanup(srv.stop)
+        out, err = io.StringIO(), io.StringIO()
+        self.assertEqual(ni.run(Args([str(p)], srv.port), out, err), 0, err.getvalue())
+        self.assertIn("read 3: offered 3 (3 repaired): accepted 3", out.getvalue())
+        self.assertEqual(srv.accepted[1][0], b"<anews.Aucbonyx.118@archive.invalid>")
+
+
 if __name__ == "__main__":
     unittest.main()

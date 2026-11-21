@@ -53,6 +53,7 @@ pathhost:               localhost
 mta:                    "/usr/sbin/sendmail -oi -oem %s"
 maxartsize:             1000000
 domain:                 example.org
+verifycancels:          false
 EOF
 inn --print-config inn.conf "$SANDBOX/inn.conf" > "$SANDBOX/inn.out"
 O="$SANDBOX/inn.out"
@@ -60,7 +61,7 @@ check "organization replaced, quoted" 'has "$O" "organization: \"LAN news\""'
 check "pathhost replaced" 'has "$O" "pathhost: cpbee.cmnet" && ! has "$O" "pathhost:               localhost"'
 check "artcutoff 0 added (the commented line is not a setting)" 'has "$O" "artcutoff: 0" && has "$O" "#artcutoff:             10"'
 check "maxartsize raised" 'has "$O" "maxartsize: 4000000"'
-check "verifycancels off, added" 'has "$O" "verifycancels: false"'
+check "verifycancels (no key in INN 2.7) is not added, and one an older run left goes" '! has "$O" "verifycancels"'
 check "the other keys stay as they were" 'has "$O" "mta:                    \"/usr/sbin/sendmail -oi -oem %s\"" && has "$O" "domain:                 example.org"'
 check "each key once" '[ "$(grep -c "^pathhost" "$O")" = 1 ] && [ "$(grep -c "^organization" "$O")" = 1 ]'
 inn --organization "Chris at home" --print-config inn.conf "$SANDBOX/inn.conf" | grep -q 'organization: "Chris at home"'
@@ -222,6 +223,20 @@ t "the importer and the downloader"
 check "test_news_import.py" '[ $? = 0 ] || { tail -20 "$OUT"; false; }'
 "$PY" "$here/test_fetch_archive.py" > "$OUT" 2>&1
 check "test_fetch_archive.py" '[ $? = 0 ] || { tail -20 "$OUT"; false; }'
+
+# --------------------------------------------------------------------------
+t "the Usenet Archives sampler (userscript core)"
+NODE=$(command -v node || command -v nodejs || true)
+if [ -z "$NODE" ]; then
+  echo "  skip  no node here: bin/usenetarchives-sample.user.js's core is not tested"
+else
+  OUTW="$SANDBOX/sample.mbox"; command -v cygpath >/dev/null 2>&1 && OUTW=$(cygpath -w "$SANDBOX/sample.mbox")
+  JSW="$here/test_usenet_sample.js"; command -v cygpath >/dev/null 2>&1 && JSW=$(cygpath -w "$JSW")
+  "$NODE" "$JSW" "$OUTW" > "$OUT" 2>&1
+  check "test_usenet_sample.js" '[ $? = 0 ] || { tail -20 "$OUT"; false; }'
+  "$N/bin/news-import" --groups "$N/groups.d/classic.list" --dry-run "$SANDBOX/sample.mbox" > "$OUT" 2>&1
+  check "news-import reads what the sampler writes (both articles; each gets a Path)" 'has "$OUT" "read 2: would offer 2 (2 repaired)"'
+fi
 
 echo
 echo "news-setup: $PASS passed, $FAIL failed"
