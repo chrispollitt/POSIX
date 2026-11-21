@@ -1,0 +1,292 @@
+#!/usr/bin/env python3
+"""listserv - the command handler of the LAN's mailing lists (lists-setup).
+
+Postfix hands every mail to listserv@HOST to this program (a pipe transport, master.cf `listserv`, run as the mlmmj
+user), which reads the commands in it, does them with listlib / mlmmj, and answers by mail:
+
+    SUBSCRIBE list [First Last]     put the sender on the list (the name is accepted and not kept)
+    SIGNOFF list                    take the sender off (UNSUBSCRIBE and LEAVE mean the same)
+    SET list DIGEST | NODIGEST      one digest mail per interval, or every message (NOMAIL: post only; MAIL: normal)
+    LIST                            the lists there are
+    INFO list                       what a list is, who owns it, how many members
+    REVIEW list                     its members (for the members and the owner)
+    HELP
+
+Commands are read from the lines of the message text (one per line; quoted lines, # lines and everything after a
+line `--` or END are ignored); with none there, the Subject is the command.  Nobody can act for another address: the
+sender (the envelope sender Postfix gives, else From:) is always the one subscribed, signed off or switched.
+
+The answer goes to the sender, In-Reply-To the command mail.  The first line of its text is the verdict, `OK ...` or
+`ERROR ...` - tvmail's Lists service relies on that - and for LIST every following line is `name  description`.  With
+more than one command in a mail the first line says how they went overall, then each command follows as `> command`.
+
+    listserv [--sender ADDR] [--conf FILE] [--dry-run] < message
+
+--dry-run prints the answer instead of sending it.  Exit status 0 whatever the commands said (the answer is the
+report); 75 (EX_TEMPFAIL, Postfix tries again) when the answer could not be sent.
+"""
+import argparse
+import email
+import email.message
+import email.policy
+import email.utils
+import os
+import subprocess
+import sys
+
+_here = os.path.dirname(os.path.realpath(__file__))
+for _p in (_here, "/usr/local/lib/lists-setup"):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+import listlib as L  # noqa: E402
+
+MAX_COMMANDS = 20
+MAX_SIZE = 262144
+
+HELP = [
+    "OK commands (one per line; the Subject is used when the text has none):",
+    "  LIST                              the lists there are",
+    "  INFO list                         what a list is, its owner, its members",
+    "  SUBSCRIBE list [First Last]       join a list",
+    "  SIGNOFF list                      leave a list",
+    "  SET list DIGEST                   one digest mail instead of every message",
+    "  SET list NODIGEST                 every message again (SET list NOMAIL: post only)",
+    "  REVIEW list                       the members (for members and the owner)",
+    "  HELP                              this text",
+    "You are always the sender of the mail; nobody can act for another address.",
+]
+
+
+def valid_address(a):
+    return bool(a) and "@" in a and " " not in a and not a.startswith("@") and not a.endswith("@") and len(a) < 255
+
+
+def requester_of(msg, sender_arg):
+    a = (sender_arg or "").strip().strip("<>")
+    if not a:
+        a = email.utils.parseaddr(str(msg.get("From", "")))[1]
+    return a.lower()
+
+
+def should_ignore(msg, who, cfg):
+    """Mail that must never be answered: robots, bounces, lists, ourselves, nobody."""
+    if not valid_address(who):
+        return "no usable sender"
+    local, _, dom = who.partition("@")
+    if local in ("mailer-daemon", "postmaster", "listserv", "root", "nobody", "mlmmj") or dom.endswith(".mlmmj"):
+        return "sender is a system address"
+    if who == cfg["ADDRESS"].lower():
+        return "mail from the list server itself"
+    if str(msg.get("Auto-Submitted", "no")).strip().lower() not in ("", "no"):
+        return "auto-submitted"
+    if str(msg.get("Precedence", "")).strip().lower() in ("bulk", "junk", "list"):
+        return "bulk mail"
+    if msg.get("List-Id") or msg.get("X-Loop") or msg.get("X-Autoreply") or msg.get("X-Autorespond"):
+        return "list or autoreply mail"
+    return None
+
+
+def command_lines(msg):
+    body = ""
+    try:
+        part = msg.get_body(preferencelist=("plain",))
+        if part is not None:
+            body = part.get_content()
+    except Exception:
+        body = ""
+    lines = []
+    for raw in body.splitlines()[:200]:
+        s = raw.strip()
+        if not s or s.startswith((">", "#")):
+            continue
+        if s in ("--", "-- ") or s.upper() in ("END", "QUIT", "EXIT", "STOP", "THANKS", "THANK YOU"):
+            break
+        lines.append(s)
+    if not lines:
+        subj = " ".join(str(msg.get("Subject", "")).split())
+        if subj and not subj.lower().startswith("re:"):
+            lines = [subj]
+    return lines[:MAX_COMMANDS]
+
+
+# ------------------------------------------------------------------------------------------------ commands ---
+def cmd_help(cfg, who, args):
+    return True, list(HELP)
+
+
+def cmd_list(cfg, who, args):
+    names = L.list_names(cfg)
+    out = ["OK %d list%s" % (len(names), "" if len(names) == 1 else "s")]
+    for n in names:
+        out.append("%-22s  %s" % (n, L.read_control(cfg, n, "description") or "(no description)"))
+    return True, out
+
+
+def cmd_info(cfg, who, args):
+    name = L.need_list(cfg, args[0] if args else "")
+    d = L.describe(cfg, name)
+    out = ["OK %s <%s>" % (name, d["address"]), "  %s" % (d["description"] or "(no description)"),
+           "  owner: %s" % (", ".join(d["owners"]) or "-"),
+           "  members: %d (%d digest, %d post only)" % (d["subscribers"] + d["digesters"] + d["nomail"],
+                                                       d["digesters"], d["nomail"]),
+           "  who may post: %s" % ("members only" if d["members_only_post"] else "anyone"
+                                    ) + ("; moderated" if d["moderated"] else ""),
+           "  joining: %s" % ("closed (ask the owner)" if d["closed_sub"] else
+                              "needs the owner's approval" if d["approval"] else "open")]
+    return True, out
+
+
+def cmd_subscribe(cfg, who, args):
+    name = L.need_list(cfg, args[0] if args else "")
+    if L.has_control(cfg, name, "closedlistsub"):
+        return False, ["ERROR %s is closed to new members: ask its owner (%s)" % (
+            name, ", ".join(L.read_control_lines(cfg, name, "owner")) or "-")]
+    if L.has_control(cfg, name, "submod"):
+        return False, ["ERROR joining %s needs its owner's approval: ask %s" % (
+            name, ", ".join(L.read_control_lines(cfg, name, "submod") or L.read_control_lines(cfg, name, "owner")))]
+    have = L.membership(cfg, name, who)
+    if have:
+        return True, ["OK you are already on %s (%s)" % (name, have)]
+    L.subscribe(cfg, name, who)
+    L.log("subscribe %s %s" % (name, who))
+    return True, ["OK you are subscribed to %s (post to %s@%s; SIGNOFF %s leaves it)" % (name, name, cfg["DOMAIN"], name)]
+
+
+def cmd_signoff(cfg, who, args):
+    name = L.need_list(cfg, args[0] if args else "")
+    if not L.membership(cfg, name, who):
+        return False, ["ERROR you are not subscribed to %s" % name]
+    L.unsubscribe(cfg, name, who)
+    L.log("signoff %s %s" % (name, who))
+    return True, ["OK you are signed off from %s" % name]
+
+
+_MODES = {"DIGEST": "digest", "NODIGEST": "normal", "MAIL": "normal", "NORMAL": "normal", "NOMAIL": "nomail"}
+
+
+def cmd_set(cfg, who, args):
+    name = L.need_list(cfg, args[0] if args else "")
+    opt = (args[1] if len(args) > 1 else "").upper()
+    if opt not in _MODES:
+        return False, ["ERROR SET %s what? DIGEST, NODIGEST, NOMAIL or MAIL" % name]
+    have = L.membership(cfg, name, who)
+    if not have:
+        return False, ["ERROR you are not subscribed to %s" % name]
+    want = _MODES[opt]
+    if have == want:
+        return True, ["OK %s is already set so for you" % name]
+    L.subscribe(cfg, name, who, want)
+    L.log("set %s %s %s" % (name, who, want))
+    return True, ["OK %s: %s" % (name, {"digest": "you get one digest mail per interval",
+                                        "normal": "you get every message", "nomail": "you get no mail, you may post"}[want])]
+
+
+def cmd_review(cfg, who, args):
+    name = L.need_list(cfg, args[0] if args else "")
+    owners = [o.lower() for o in L.read_control_lines(cfg, name, "owner")]
+    if who not in owners and not L.membership(cfg, name, who):
+        return False, ["ERROR only members and owners may review %s" % name]
+    rows = [(a, "") for a in L.members(cfg, name, "subscribers.d")]
+    rows += [(a, "  (digest)") for a in L.members(cfg, name, "digesters.d")]
+    rows += [(a, "  (post only)") for a in L.members(cfg, name, "nomailsubs.d")]
+    rows.sort()
+    return True, ["OK %d member%s of %s" % (len(rows), "" if len(rows) == 1 else "s", name)] + [a + n for a, n in rows]
+
+
+COMMANDS = {"HELP": cmd_help, "LIST": cmd_list, "INFO": cmd_info, "SUBSCRIBE": cmd_subscribe, "SUB": cmd_subscribe,
+            "JOIN": cmd_subscribe, "SIGNOFF": cmd_signoff, "UNSUBSCRIBE": cmd_signoff, "UNSUB": cmd_signoff,
+            "LEAVE": cmd_signoff, "SET": cmd_set, "REVIEW": cmd_review}
+
+
+def run_command(cfg, who, line):
+    parts = line.split()
+    verb = parts[0].upper()
+    fn = COMMANDS.get(verb)
+    if fn is None:
+        return False, ["ERROR unknown command '%s' (HELP lists them)" % parts[0][:40]]
+    try:
+        return fn(cfg, who, parts[1:])
+    except L.ListError as e:
+        return False, ["ERROR %s" % e]
+    except Exception as e:                                           # a bug must not look like an answer to LIST
+        L.log("internal error in %r: %r" % (line, e))
+        return False, ["ERROR internal error (the administrator has been told in the log)"]
+
+
+def render(results):
+    if len(results) == 1:
+        return "\n".join(results[0][2]) + "\n"
+    bad = sum(1 for _, ok, _ in results if not ok)
+    head = "OK %d commands" % len(results) if not bad else "ERROR %d of %d commands failed" % (bad, len(results))
+    out = [head, ""]
+    for line, ok, lines in results:
+        out.append("> " + line)
+        out.extend(lines)
+        out.append("")
+    return "\n".join(out)
+
+
+# --------------------------------------------------------------------------------------------------- answer ---
+def build_reply(cfg, msg, who, text):
+    r = email.message.EmailMessage()
+    r["From"] = email.utils.formataddr(("List server", cfg["ADDRESS"]))
+    r["To"] = who
+    subj = " ".join(str(msg.get("Subject", "")).split())
+    r["Subject"] = subj if subj.lower().startswith("re:") else "Re: " + (subj or "your command")
+    r["Date"] = email.utils.formatdate(localtime=True)
+    r["Message-ID"] = email.utils.make_msgid(domain=cfg["DOMAIN"])
+    mid = str(msg.get("Message-ID", "")).strip()
+    if mid:
+        r["In-Reply-To"] = mid
+        r["References"] = mid
+    r["Auto-Submitted"] = "auto-replied"
+    r["Precedence"] = "bulk"
+    r.set_content(text)
+    return r
+
+
+def send(cfg, reply, who):
+    try:
+        p = subprocess.run([cfg["SENDMAIL"], "-i", "-f", "<>", who], input=reply.as_bytes(), capture_output=True, timeout=120)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return p.returncode == 0
+
+
+def main(argv=None, stdin=None, out=None):
+    ap = argparse.ArgumentParser(description="the command handler of the LAN's mailing lists")
+    ap.add_argument("--sender", help="the envelope sender (Postfix: ${sender}); else From:")
+    ap.add_argument("--conf")
+    ap.add_argument("--dry-run", action="store_true", help="print the answer instead of sending it")
+    a = ap.parse_args(argv)
+    out = out or sys.stdout
+    try:
+        cfg = L.load_config(a.conf)
+    except L.ListError as e:
+        sys.stderr.write("listserv: %s\n" % e)
+        return 75
+    data = (stdin or sys.stdin.buffer).read(MAX_SIZE + 1)
+    if len(data) > MAX_SIZE:
+        return 0
+    msg = email.message_from_bytes(data, policy=email.policy.default)
+    who = requester_of(msg, a.sender)
+    why = should_ignore(msg, who, cfg)
+    if why:
+        L.log("ignored mail from %r: %s" % (who, why))
+        return 0
+    lines = command_lines(msg)
+    if not lines:
+        lines = ["HELP"]
+    results = [(ln, *run_command(cfg, who, ln)) for ln in lines]
+    reply = build_reply(cfg, msg, who, render(results))
+    if a.dry_run:
+        out.write(reply.as_string())
+        return 0
+    if not send(cfg, reply, who):
+        sys.stderr.write("listserv: could not send the answer to %s\n" % who)
+        return 75
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

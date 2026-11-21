@@ -1,0 +1,210 @@
+#!/usr/bin/env python3
+"""listctl - make and manage the LAN's mailing lists (lists-setup).  Run it as root (sudo), on the list server.
+
+    listctl create NAME [--description TEXT] [--owner ADDR]... [--moderated [--moderator ADDR]...]
+                        [--closed-sub] [--open-post] [--digest-interval SECONDS]
+    listctl remove NAME --yes               the list is moved to the REMOVED directory (members and archive kept)
+    listctl list                            every list, its members and description
+    listctl show NAME                       one list in full
+    listctl members NAME                    the member addresses
+    listctl add NAME ADDR... [--digest|--nomail]    put addresses on a list (people can join by themselves with SUBSCRIBE)
+    listctl del NAME ADDR...                take addresses off
+    listctl set NAME description TEXT | owner ADDR... | moderators ADDR... | moderated on|off | closed-sub on|off
+                     | open-post on|off | digest-interval SECONDS
+    listctl sync                            rewrite the Postfix tables from the lists and reload Postfix
+
+A new list gets: the address NAME@DOMAIN, a subject prefix [NAME], a `List-Id: <NAME.DOMAIN>` header (the server's one
+Sieve rule files list mail into each member's folder Lists/NAME by it), posting by members only (--open-post: anyone),
+and mlmmj's own mail commands switched off (members join and leave through listserv@).
+
+Options: --conf FILE (default /etc/lists-setup/lists.conf), --no-postfix (change nothing in Postfix: no postmap, no reload).
+"""
+import argparse
+import os
+import sys
+
+_here = os.path.dirname(os.path.realpath(__file__))
+for _p in (_here, "/usr/local/lib/lists-setup"):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+import listlib as L  # noqa: E402
+
+
+def sync(cfg, args):
+    if args.no_postfix:
+        paths = L.write_maps(cfg)
+        print("wrote %s (Postfix not touched)" % ", ".join(paths))
+    else:
+        L.regenerate_maps(cfg)
+        print("Postfix tables rewritten (%d lists) and reloaded" % len(L.list_names(cfg)))
+
+
+def cmd_create(cfg, a):
+    name = L.create_list(cfg, a.name, a.description or "", a.owner, a.moderated, a.moderator, a.closed_sub, a.open_post,
+                         a.digest_interval)
+    sync(cfg, a)
+    print("created %s <%s@%s>" % (name, name, cfg["DOMAIN"]))
+
+
+def cmd_remove(cfg, a):
+    name = L.need_list(cfg, a.name)
+    if not a.yes:
+        raise L.ListError("this removes the list %s (its members and archive are kept in %s): add --yes" % (name, cfg["REMOVED"]))
+    where = L.remove_list(cfg, name)
+    sync(cfg, a)
+    print("removed %s (kept in %s)" % (name, where))
+
+
+def cmd_list(cfg, a):
+    for n in L.list_names(cfg):
+        d = L.describe(cfg, n)
+        print("%-22s %3d members  %s" % (n, d["subscribers"] + d["digesters"] + d["nomail"], d["description"]))
+
+
+def cmd_show(cfg, a):
+    n = L.need_list(cfg, a.name)
+    d = L.describe(cfg, n)
+    print("%s <%s>" % (n, d["address"]))
+    print("  description : %s" % d["description"])
+    print("  owners      : %s" % ", ".join(d["owners"]))
+    print("  members     : %d (%d digest, %d post only)" % (d["subscribers"] + d["digesters"] + d["nomail"],
+                                                          d["digesters"], d["nomail"]))
+    print("  posting     : %s%s" % ("members only" if d["members_only_post"] else "anyone",
+                                    "; moderated by " + ", ".join(d["moderators"]) if d["moderated"] else ""))
+    print("  joining     : %s" % ("closed" if d["closed_sub"] else "needs approval" if d["approval"] else "open"))
+    print("  digest every: %s s" % d["digest_interval"])
+
+
+def cmd_members(cfg, a):
+    n = L.need_list(cfg, a.name)
+    for kind, label in (("subscribers.d", ""), ("digesters.d", "  (digest)"), ("nomailsubs.d", "  (post only)")):
+        for addr in L.members(cfg, n, kind):
+            print(addr + label)
+
+
+def cmd_add(cfg, a):
+    n = L.need_list(cfg, a.name)
+    for addr in a.addresses:
+        if "@" not in addr:
+            raise L.ListError("'%s' is not an address" % addr)
+        L.subscribe(cfg, n, addr.lower(), "digest" if a.digest else "nomail" if a.nomail else "normal")
+    print("%d address%s added to %s" % (len(a.addresses), "" if len(a.addresses) == 1 else "es", n))
+
+
+def cmd_del(cfg, a):
+    n = L.need_list(cfg, a.name)
+    for addr in a.addresses:
+        L.unsubscribe(cfg, n, addr.lower())
+    print("%d address%s taken off %s" % (len(a.addresses), "" if len(a.addresses) == 1 else "es", n))
+
+
+def _onoff(v):
+    if v.lower() in ("on", "yes", "1", "true"):
+        return True
+    if v.lower() in ("off", "no", "0", "false"):
+        return False
+    raise L.ListError("'%s': on or off" % v)
+
+
+def cmd_set(cfg, a):
+    n = L.need_list(cfg, a.name)
+    key, vals = a.key.lower(), a.values
+    if key == "description":
+        if vals:
+            L.write_control(cfg, n, "description", " ".join(" ".join(vals).split()))
+        else:
+            L.remove_control(cfg, n, "description")
+    elif key in ("owner", "moderators"):
+        if not vals:
+            raise L.ListError("%s: at least one address" % key)
+        L.write_control(cfg, n, key, [v.lower() for v in vals])
+    elif key in ("moderated", "closed-sub", "open-post"):
+        if len(vals) != 1:
+            raise L.ListError("%s: on or off" % key)
+        on = _onoff(vals[0])
+        if key == "moderated":
+            if on:
+                L.write_control(cfg, n, "moderated")
+                if not L.has_control(cfg, n, "moderators"):
+                    L.write_control(cfg, n, "moderators", L.read_control_lines(cfg, n, "owner"))
+            else:
+                L.remove_control(cfg, n, "moderated")
+        elif key == "closed-sub":
+            (L.write_control if on else L.remove_control)(cfg, n, "closedlistsub")
+        else:                                       # open-post on = anyone may post = no subonlypost
+            (L.remove_control if on else L.write_control)(cfg, n, "subonlypost")
+    elif key == "digest-interval":
+        if len(vals) != 1 or not vals[0].isdigit() or int(vals[0]) < 60:
+            raise L.ListError("digest-interval: seconds (at least 60)")
+        L.write_control(cfg, n, "digestinterval", vals[0])
+    else:
+        raise L.ListError("cannot set '%s' (description, owner, moderators, moderated, closed-sub, open-post, "
+                          "digest-interval)" % a.key)
+    print("%s: %s set" % (n, key))
+
+
+def cmd_sync(cfg, a):
+    sync(cfg, a)
+
+
+def parser():
+    p = argparse.ArgumentParser(prog="listctl", description="make and manage the LAN's mailing lists")
+    p.add_argument("--conf")
+    p.add_argument("--no-postfix", action="store_true")
+    sub = p.add_subparsers(dest="cmd", required=True)
+    c = sub.add_parser("create")
+    c.add_argument("name")
+    c.add_argument("--description")
+    c.add_argument("--owner", action="append", default=[])
+    c.add_argument("--moderated", action="store_true")
+    c.add_argument("--moderator", action="append", default=[])
+    c.add_argument("--closed-sub", action="store_true")
+    c.add_argument("--open-post", action="store_true")
+    c.add_argument("--digest-interval", type=int)
+    c.set_defaults(fn=cmd_create)
+    c = sub.add_parser("remove")
+    c.add_argument("name")
+    c.add_argument("--yes", action="store_true")
+    c.set_defaults(fn=cmd_remove)
+    sub.add_parser("list").set_defaults(fn=cmd_list)
+    c = sub.add_parser("show")
+    c.add_argument("name")
+    c.set_defaults(fn=cmd_show)
+    c = sub.add_parser("members")
+    c.add_argument("name")
+    c.set_defaults(fn=cmd_members)
+    c = sub.add_parser("add")
+    c.add_argument("name")
+    c.add_argument("addresses", nargs="+")
+    c.add_argument("--digest", action="store_true")
+    c.add_argument("--nomail", action="store_true")
+    c.set_defaults(fn=cmd_add)
+    c = sub.add_parser("del")
+    c.add_argument("name")
+    c.add_argument("addresses", nargs="+")
+    c.set_defaults(fn=cmd_del)
+    c = sub.add_parser("set")
+    c.add_argument("name")
+    c.add_argument("key")
+    c.add_argument("values", nargs="*")
+    c.set_defaults(fn=cmd_set)
+    sub.add_parser("sync").set_defaults(fn=cmd_sync)
+    return p
+
+
+def main(argv=None):
+    a = parser().parse_args(argv)
+    try:
+        cfg = L.load_config(a.conf)
+        a.fn(cfg, a)
+    except L.ListError as e:
+        sys.stderr.write("listctl: %s\n" % e)
+        return 1
+    except OSError as e:
+        sys.stderr.write("listctl: %s (are you root?)\n" % e)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
