@@ -55,7 +55,9 @@ check "dovecot 2.4: a before storage" 'has "$OUT" "sieve_script lists {" && has 
 pc dovecot-dropin --dovecot-version 2.3.21 > "$OUT"
 check "dovecot 2.3: sieve_before in plugin {}" 'has "$OUT" "plugin {" && has "$OUT" "sieve_before = /etc/dovecot/sieve-before.d"'
 pc cron > "$OUT"
-check "cron: mlmmj-maintd for every list" 'has "$OUT" "*/10 * * * * mlmmj /usr/bin/mlmmj-maintd -F -d /var/spool/mlmmj"'
+check "cron: mlmmj-maintd once per list directory, errors to root" 'has "$OUT" "MAILTO=root" && has "$OUT" "for d in /var/spool/mlmmj/*/; do" && has "$OUT" "mlmmj-maintd -F -L \"\${d\%/}\""'
+check "cron: no unescaped % (cron would turn it into a newline and the job would not run)" '! grep -v "^#" "$OUT" | grep -qE "(^|[^\\])%"'
+check "cron: never the whole spool (-d), which reports Postfix's map files" '! grep -q -- "-d /var/spool" "$OUT"'
 
 # --------------------------------------------------------------------------
 t "option checks"
@@ -73,6 +75,9 @@ t "the whole run, in a sandbox"
 BOX="$SANDBOX/box"; FB="$SANDBOX/fakebin"
 mkdir -p "$BOX/postfix" "$BOX/dovecot/conf.d" "$BOX/bin" "$BOX/lib" "$BOX/etc" "$BOX/cron" "$BOX/spool" "$FB"
 echo "# main.cf" > "$BOX/postfix/main.cf"; echo "# master.cf" > "$BOX/postfix/master.cf"
+printf '# Regular cron jobs for the mlmmj package
+0 */2 * * * root /usr/bin/test -x /usr/bin/mlmmj-maintd && /usr/bin/mlmmj-maintd -F -d /var/spool/mlmmj
+' > "$BOX/cron/mlmmj"
 cat > "$BOX/pc.state" <<EOF
 recipient_delimiter=+
 propagate_unmatched_extensions=canonical, virtual
@@ -167,7 +172,8 @@ check "postfix check ran" 'has "$FAKE_CALLS" "postfix check"'
 check "the lists were made, with the owner" '[ -d "$BOX/spool/alpha/control" ] && has "$BOX/spool/beta/control/owner" "chris@cpbee.cmnet" && has "$BOX/spool/alpha/control/description" "The first list"'
 check "Sieve: the global script, compiled" 'has "$BOX/dovecot/sieve-before.d/90-lists.sieve" "fileinto :create \"Lists/\${1}\";" && [ -f "$BOX/dovecot/sieve-before.d/90-lists.sievec" ]'
 check "Dovecot 2.4 drop-in" 'has "$BOX/dovecot/conf.d/96-lists-setup-sieve.conf" "sieve_script lists {"'
-check "cron entry" 'has "$BOX/cron/lists-setup" "mlmmj-maintd -F -d $BOX/spool"'
+check "cron entry" 'has "$BOX/cron/lists-setup" "for d in $BOX/spool/*/; do" && has "$BOX/cron/lists-setup" "-F -L"'
+check "the package's own cron job is commented out" 'grep -q "^# disabled by lists-setup" "$BOX/cron/mlmmj" && ! grep -q "^[^#].*mlmmj-maintd" "$BOX/cron/mlmmj" && ls "$BOX/cron/BAK/mlmmj.bak-"* >/dev/null 2>&1'
 check "main.cf and master.cf were backed up" 'ls "$BOX/postfix/BAK/main.cf.bak-"* >/dev/null 2>&1 && ls "$BOX/postfix/BAK/master.cf.bak-"* >/dev/null 2>&1'
 
 t "re-running changes nothing"

@@ -136,6 +136,31 @@ LAN_PORT_RULESET="$NFT" inn --firewall-plan > "$OUT" 2>&1
 check "already accepted: nothing to do" 'has "$OUT" "nothing to open" && ! has "$OUT" "nft add rule"'
 
 # --------------------------------------------------------------------------
+t "quiet-daily-report.sh: the nightly report goes to a log, not to your inbox"
+QD="$N/scripts/quiet-daily-report.sh"
+QC="$SANDBOX/qcron"; QL="$SANDBOX/qlogrotate"; mkdir -p "$QC" "$QL"
+printf 'SHELL=/bin/sh
+15 4	* * * 	news	test -x /usr/lib/news/bin/news.daily && news.daily expireover lowmark delayrm
+10 *	* * *	news	[ -x /usr/bin/rnews ] && rnews -U
+' > "$QC/inn2"
+export NEWS_SETUP_SUDO="" NEWS_SETUP_CRON="$QC" NEWS_SETUP_LOGROTATE="$QL" NEWS_SETUP_REPORT_LOG="$SANDBOX/daily-report.log"
+"$QD" --print > "$OUT" 2>&1
+check "--print shows the new line and changes nothing" 'has "$OUT" "news.daily nomail expireover lowmark delayrm >> $SANDBOX/daily-report.log 2>&1" && ! has "$QC/inn2" "nomail"'
+"$QD" > "$OUT" 2>&1
+check "the job says nomail and appends to the log" '[ $? = 0 ] && has "$QC/inn2" "news.daily nomail expireover lowmark delayrm >> $SANDBOX/daily-report.log 2>&1"'
+check "the other job is untouched" 'has "$QC/inn2" "rnews -U" && [ "$(grep -c nomail "$QC/inn2")" = 1 ]'
+check "the cron file was backed up" 'ls "$QC/BAK/inn2.bak-"* >/dev/null 2>&1'
+check "logrotate: monthly, 12 kept" 'has "$QL/inn-daily-report" "monthly" && has "$QL/inn-daily-report" "rotate 12" && has "$QL/inn-daily-report" "$SANDBOX/daily-report.log {"'
+"$QD" > "$OUT" 2>&1
+check "a re-run changes nothing" 'has "$OUT" "already written to a log" && [ "$(ls "$QC/BAK" | wc -l)" = 1 ]'
+"$QD" --undo > "$OUT" 2>&1
+check "--undo brings the mail back" '[ $? = 0 ] && ! has "$QC/inn2" "nomail" && has "$OUT" "mailed again"'
+rm -f "$QC/inn2"; "$QD" > "$OUT" 2>&1
+check "no cron file: says so, fails" '[ $? != 0 ] && has "$OUT" "is not here"'
+unset NEWS_SETUP_SUDO NEWS_SETUP_CRON NEWS_SETUP_LOGROTATE NEWS_SETUP_REPORT_LOG
+export NEWS_SETUP_SUDO=""
+
+# --------------------------------------------------------------------------
 t "create-groups.sh with a fake ctlinnd"
 DB="$SANDBOX/db"; mkdir -p "$DB"
 cat > "$SANDBOX/ctlinnd" <<EOF

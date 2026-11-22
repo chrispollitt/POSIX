@@ -1,0 +1,269 @@
+#!/usr/bin/env python3
+"""monthly-digest: one mail a month about how a machine is doing, instead of a mail a day.
+
+    monthly-digest                 print the digest (nothing is sent)
+    monthly-digest --mail [ADDR]   mail it (default ADDR: root, which is you on cpbee) through /usr/sbin/sendmail
+    monthly-digest --since "2 months ago"   the span the logs are counted over (default: 1 month ago)
+
+Run as root (cron does) to see everything; as an ordinary user it still prints what it can.  A section that fails says so
+and the rest goes on.  The digest starts with "Needs a look", the few lines that matter, then the facts per section.
+Only the Python standard library and the system's own tools (systemctl, journalctl, postqueue, apt-get, openssl) are used.
+Written for cpbee; the sections take a machine name, so another machine's digest can be added to the same mail later
+(see sections() and HOSTS).
+"""
+import argparse
+import calendar
+import datetime
+import email.message
+import os
+import re
+import shutil
+import socket
+import subprocess
+import sys
+import time
+
+# the machines in the digest; "" is this one.  Another host would be run over ssh (not built yet).
+HOSTS = [""]
+SERVICES = ["ssh", "postfix", "dovecot", "radicale", "dcgw", "inn2", "ergo", "tvchat-floyd", "apache2", "nginx", "miniupnpd"]
+CERT_FILES = ["/etc/ssl/Simple_Inc/lan/cpbee-fullchain.pem", "/etc/ssl/Simple_Inc/certs/cpbee.crt", "/etc/ssl/Simple_Inc/lan/lan-ca.pem"]
+NEWS_ACTIVE = os.environ.get("DIGEST_NEWS_ACTIVE", "/var/lib/news/active")
+REPORT_LOG = os.environ.get("DIGEST_REPORT_LOG", "/var/log/news/daily-report.log")
+CANARY_LOGS = [os.environ.get("DIGEST_CANARY_LOG", ""), "/home/chris/.local/state/auth-canary.log", os.path.expanduser("~/.local/state/auth-canary.log")]
+CERT_WARN_DAYS = 90
+
+
+def run(cmd, timeout=60):
+    """(returncode, stdout+stderr text); (127, '') when the command is missing."""
+    exe = cmd[0]
+    if not shutil.which(exe) and not os.path.exists(exe):
+        for d in ("/usr/sbin", "/sbin", "/usr/local/bin"):
+            if os.path.exists(os.path.join(d, exe)):
+                cmd = [os.path.join(d, exe)] + list(cmd[1:])
+                break
+        else:
+            return 127, ""
+    try:
+        r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=timeout)
+    except (subprocess.TimeoutExpired, OSError) as e:
+        return 124, "(%s)" % e
+    return r.returncode, r.stdout.decode("utf-8", "replace")
+
+
+def count_articles(active_text):
+    """(groups, articles, lan_articles) from an INN active file: 'group high low flag'."""
+    groups = arts = lan = 0
+    for line in active_text.splitlines():
+        f = line.split()
+        if len(f) < 4:
+            continue
+        try:
+            hi, lo = int(f[1]), int(f[2])
+            n = hi - lo + 1 if hi >= lo and hi > 0 else 0
+        except ValueError:
+            continue
+        groups += 1
+        arts += n
+        if f[0].startswith("lan."):
+            lan += n
+    return groups, arts, lan
+
+
+def cert_days_left(enddate_line, now=None):
+    """days until 'notAfter=Nov 19 01:28:21 2036 GMT' (negative: expired)."""
+    s = enddate_line.split("=", 1)[-1].strip()
+    t = calendar.timegm(time.strptime(re.sub(r"\s+", " ", s), "%b %d %H:%M:%S %Y %Z"))   # openssl prints GMT
+    return int((t - (now or time.time())) // 86400)
+
+
+class Digest:
+    def __init__(self, since):
+        self.since = since
+        self.attention = []
+        self.out = []
+
+    def line(self, text=""):
+        self.out.append(text)
+
+    def warn(self, text):
+        self.attention.append(text)
+
+    def section(self, title, fn):
+        self.line("== %s ==" % title)
+        try:
+            fn()
+        except Exception as e:                      # one broken section must not lose the digest
+            self.line("  (this section failed: %s: %s)" % (type(e).__name__, e))
+            self.warn("the digest section '%s' failed (%s)" % (title, e))
+        self.line()
+
+    # ----------------------------------------------------------------------------------------------- sections
+    def system(self):
+        up = open("/proc/uptime").read().split()[0] if os.path.exists("/proc/uptime") else ""
+        if up:
+            self.line("  up %.1f days; load %s" % (float(up) / 86400, " ".join("%.2f" % x for x in os.getloadavg())))
+        for mount in ("/", "/var", "/home"):
+            if os.path.ismount(mount) or mount == "/":
+                u = shutil.disk_usage(mount)
+                pct = 100 * u.used // u.total
+                self.line("  disk %-6s %d%% of %.0f GB used (%.0f GB free)" % (mount, pct, u.total / 2**30, u.free / 2**30))
+                if pct >= 85:
+                    self.warn("disk %s is %d%% full" % (mount, pct))
+        if os.path.exists("/proc/meminfo"):
+            m = dict(l.split(":", 1) for l in open("/proc/meminfo") if ":" in l)
+            kb = lambda k: int(m[k].split()[0])
+            avail = "MemAvailable" if "MemAvailable" in m else "MemFree"
+            self.line("  memory: %d of %d MB available" % (kb(avail) // 1024, kb("MemTotal") // 1024))
+        rc, out = run(["journalctl", "--disk-usage"])
+        if rc == 0:
+            self.line("  " + out.strip().replace("Archived and active journals take up", "journals:"))
+        if os.path.exists("/run/reboot-required"):
+            self.line("  a reboot is needed (/run/reboot-required)")
+            self.warn("a reboot is needed")
+
+    def updates(self):
+        rc, out = run(["apt-get", "-s", "-o", "Debug::NoLocking=1", "upgrade"])
+        if rc == 127:
+            self.line("  (no apt-get here)")
+            return
+        inst = [l for l in out.splitlines() if l.startswith("Inst ")]
+        sec = [l for l in inst if "security" in l.lower()]
+        self.line("  %d package(s) can be upgraded, %d of them security updates" % (len(inst), len(sec)))
+        if sec:
+            self.warn("%d security update(s) are waiting" % len(sec))
+        for l in sec[:8]:
+            self.line("    " + l.split(" [")[0])
+        rc, out = run(["tail", "-n", "400", "/var/log/unattended-upgrades/unattended-upgrades.log"])
+        done = [l for l in out.splitlines() if "Packages that were upgraded" in l or "All upgrades installed" in l]
+        self.line("  unattended-upgrades: " + (done[-1][:110] if done else "no upgrade recorded in the recent log"))
+
+    def services(self):
+        rc, out = run(["systemctl", "--failed", "--no-legend", "--plain"])
+        failed = [l.split()[0] for l in out.splitlines() if l.strip()]
+        if rc == 127:
+            self.line("  (no systemctl here)")
+            return
+        for u in failed:
+            self.warn("failed unit: " + u)
+        self.line("  failed units: " + (", ".join(failed) if failed else "none"))
+        states = []
+        for s in SERVICES:
+            rc, out = run(["systemctl", "list-unit-files", s + ".service", "--no-legend"])
+            if not out.strip() or rc != 0:
+                continue
+            rc, st = run(["systemctl", "is-active", s])
+            st = st.strip()
+            states.append("%s=%s" % (s, st))
+            if st != "active" and "enabled" in out:
+                self.warn("%s is %s" % (s, st))
+        self.line("  services: " + (", ".join(states) or "(none of the usual ones)"))
+
+    def mail(self):
+        rc, out = run(["postqueue", "-p"])
+        if rc == 127:
+            self.line("  (no Postfix here)")
+            return
+        q = out.strip().splitlines()[-1] if out.strip() else "?"
+        self.line("  mail queue: " + q)
+        if "empty" not in q:
+            self.warn("the mail queue is not empty (%s)" % q)
+        rc, out = run(["journalctl", "-t", "postfix/smtp", "-t", "postfix/local", "-t", "postfix/lmtp", "-t", "postfix/pipe", "-t",
+                       "postfix/smtpd", "--since", self.since, "--no-pager", "-q"], timeout=120)
+        if rc == 0:
+            c = {k: len(re.findall(r"status=%s\b" % k, out)) for k in ("sent", "deferred", "bounced")}
+            c["rejected"] = len(re.findall(r"NOQUEUE: reject", out))
+            self.line("  since %s: %d sent, %d deferred, %d bounced, %d rejected at the door" % (
+                self.since, c["sent"], c["deferred"], c["bounced"], c["rejected"]))
+            if c["bounced"]:
+                self.warn("%d mail(s) bounced since %s" % (c["bounced"], self.since))
+        rc, out = run(["listctl", "list"])
+        if rc == 0 and out.strip():
+            self.line("  mailing lists:")
+            for l in out.strip().splitlines()[:15]:
+                self.line("    " + l[:100])
+
+    def usenet(self):
+        if not os.path.exists(NEWS_ACTIVE):
+            self.line("  (no news server here)")
+            return
+        g, a, lan = count_articles(open(NEWS_ACTIVE, errors="replace").read())
+        self.line("  %d groups, %d articles (%d in lan.*, the groups people post to)" % (g, a, lan))
+        self.line("  nightly report log: %s (%s)" % (REPORT_LOG, "present" if os.path.exists(REPORT_LOG) else "not written yet"))
+        rc, out = run(["journalctl", "-u", "inn2", "-p", "warning", "--since", self.since, "--no-pager", "-q"])
+        if rc == 0:
+            n = len([l for l in out.splitlines() if l.strip()])
+            self.line("  innd warnings or errors since %s: %d" % (self.since, n))
+
+    def security(self):
+        rc, out = run(["journalctl", "-u", "ssh", "-u", "sshd", "--since", self.since, "--no-pager", "-q"], timeout=120)
+        if rc == 0:
+            bad = len(re.findall(r"Failed password|Invalid user|authentication failure", out))
+            okc = len(re.findall(r"Accepted (?:publickey|password)", out))
+            self.line("  ssh since %s: %d logins accepted, %d failed attempts" % (self.since, okc, bad))
+        rc, out = run(["journalctl", "_COMM=sudo", "--since", self.since, "--no-pager", "-q"])
+        if rc == 0:
+            self.line("  sudo since %s: %d commands, %d failures" % (
+                self.since, len(re.findall(r"COMMAND=", out)), len(re.findall(r"authentication failure|incorrect password", out))))
+        for p in CANARY_LOGS:
+            if p and os.path.exists(p):
+                last = open(p, errors="replace").read().strip().splitlines()[-1:] or ["(empty)"]
+                self.line("  auth canary (%s): %s" % (os.path.basename(p), last[0][:100]))
+                if "own=OK" not in last[0] or "other=DENIED" not in last[0]:
+                    self.warn("the auth canary's last line is not own=OK other=DENIED")
+                break
+        else:
+            self.line("  auth canary: no log found")
+
+    def certificates(self):
+        for p in CERT_FILES:
+            if not os.path.exists(p):
+                continue
+            rc, out = run(["openssl", "x509", "-in", p, "-noout", "-subject", "-enddate"])
+            if rc != 0:
+                self.line("  %s: unreadable (%s)" % (p, out.strip()[:60]))
+                continue
+            subj = re.search(r"CN\s*=\s*([^,\n]+)", out)
+            d = cert_days_left(re.search(r"notAfter=.*", out).group(0))
+            self.line("  %-47s %-18s %5d days left" % (p, (subj.group(1) if subj else "?")[:18], d))
+            if d < CERT_WARN_DAYS:
+                self.warn("certificate %s expires in %d days" % (p, d))
+        self.line("  (the Root and Signing CA expire 2031-03: plan the renewal by 2030)")
+
+    # ---------------------------------------------------------------------------------------------------- the mail
+    def render(self, host):
+        head = ["monthly digest: %s, %s (logs counted since %s)" % (host, datetime.date.today().isoformat(), self.since), ""]
+        for name, fn in (("System", self.system), ("Updates", self.updates), ("Services", self.services), ("Mail", self.mail),
+                         ("Usenet", self.usenet), ("Security", self.security), ("Certificates", self.certificates)):
+            self.section(name, fn)
+        top = ["== Needs a look =="]
+        top += ["  * " + w for w in self.attention] or ["  nothing"]
+        return "\n".join(head + top + [""] + self.out).rstrip() + "\n"
+
+
+def sections(since):
+    host = socket.gethostname().split(".")[0]
+    return host, Digest(since).render(host)
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description="a monthly digest of how this machine is doing")
+    ap.add_argument("--mail", nargs="?", const="root", metavar="ADDR", help="mail it (default: root) instead of printing")
+    ap.add_argument("--since", default="1 month ago", help='how far back the logs are counted (default "1 month ago")')
+    a = ap.parse_args(argv)
+    host, text = sections(a.since)
+    if not a.mail:
+        sys.stdout.write(text)
+        return 0
+    msg = email.message.EmailMessage()
+    msg["To"] = a.mail
+    msg["From"] = "monthly-digest@%s" % (socket.getfqdn() or host)
+    msg["Subject"] = "%s monthly digest, %s" % (host, datetime.date.today().strftime("%B %Y"))
+    msg["Auto-Submitted"] = "auto-generated"
+    msg.set_content(text, charset="utf-8", cte="8bit")
+    sm = shutil.which("sendmail") or "/usr/sbin/sendmail"
+    r = subprocess.run([sm, "-t", "-oi"], input=msg.as_bytes())
+    return r.returncode
+
+
+if __name__ == "__main__":
+    sys.exit(main())
