@@ -46,6 +46,8 @@ jobs:
         run: python3 net-utils/test/test_identity.py
       - name: netrc-to-tickets
         run: python3 net-utils/test/test_netrc_to_tickets.py
+      - name: monthly-digest
+        run: python3 net-utils/test/test_monthly_digest.py
 
   mail-setup:
     name: mail-setup tests (sandboxed)

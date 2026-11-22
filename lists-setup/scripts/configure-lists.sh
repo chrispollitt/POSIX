@@ -191,8 +191,12 @@ EOF
 
 print_cron() {
   cat <<EOF
-# lists-setup: mlmmj's housekeeping (digests, bounces, resending, stale requests) for every list, every 10 minutes
-*/10 * * * * $MLMMJ_USER $MLMMJ_BIN/mlmmj-maintd -F -d $SPOOL
+# lists-setup: mlmmj's housekeeping (digests, bounces, resending, stale requests) for every list, every 10 minutes.
+# One run per list directory (-L): mlmmj-maintd -d would try every entry of the spool, and the spool also holds Postfix's
+# transport and virtual maps, which it reports as "Not a directory" on every run.  Errors go to root: the mlmmj user has no mailbox.
+# (cron turns an unescaped percent sign into a newline, so the one that trims the slash off the list directory is written backslash-percent)
+MAILTO=root
+*/10 * * * * $MLMMJ_USER for d in $SPOOL/*/; do [ -d "\$d" ] && $MLMMJ_BIN/mlmmj-maintd -F -L "\${d\%/}"; done
 EOF
 }
 
@@ -374,6 +378,14 @@ print_cron > "$tmp/cron"
 if ! diff <(sed 1d "$tmp/cron") <(sed 1d "$CRON_DIR/lists-setup" 2>/dev/null) >/dev/null 2>&1; then
   put_file "$CRON_DIR/lists-setup" 644 "$tmp/cron" || true
 else log "$CRON_DIR/lists-setup: unchanged"; fi
+# the mlmmj package has its own cron job, "mlmmj-maintd -d SPOOL" every 2 hours: it hits the same "Not a directory" errors and
+# mails them to root, and ours already does its work: comment it out (kept as a comment, backed up)
+PKGCRON="$CRON_DIR/mlmmj"
+if $SUDO test -f "$PKGCRON" && $SUDO grep -qE '^[^#].*mlmmj-maintd' "$PKGCRON"; then
+  backup_keep3 "$PKGCRON"
+  $SUDO sed -i -E 's|^([^#].*mlmmj-maintd.*)$|# disabled by lists-setup (lists-setup runs it per list): |' "$PKGCRON"
+  log "$PKGCRON: the package's own maintd job is commented out (the old file is in BAK)"
+fi
 
 # 7. the lists asked for -------------------------------------------------------------------
 for spec in ${LISTS[@]+"${LISTS[@]}"}; do

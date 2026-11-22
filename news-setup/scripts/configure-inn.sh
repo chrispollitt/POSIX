@@ -21,6 +21,8 @@
 #        expire.ctl    nothing ever expires.  A re-run rewrites this file.
 #      (each file that changes is backed up first: BAK/ beside it, the 3 newest kept);
 #   3. restarts inn2 if a file changed, and waits for port 119;
+#      and, so a quiet server does not mail a report a day, makes INN's nightly news.daily write its report to
+#      /var/log/news/daily-report.log instead (quiet-daily-report.sh; --undo there brings the mail back);
 #   4. creates the local groups (lan.misc lan.talk lan.test; --local-groups) with posting allowed.
 #      Archive groups are made by create-groups.sh, read-only ("n": only a feed can add to them);
 #   5. the firewall, only with --open-firewall (by default it says what is needed): TCP 119, for
@@ -281,6 +283,10 @@ if ! up; then
   die "$UNIT did not start - the old files are in $ETC/BAK"
 fi
 log "service     : $UNIT running on TCP $PORT"
+
+# 3b. the nightly report: INN's cron job mails news.daily's report to root; write it to a log instead (read monthly)
+HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+"$HERE/quiet-daily-report.sh" | sed 's/^/report      : /' || warn "could not quiet the daily report mail (quiet-daily-report.sh; not fatal)"
 
 # 4. the local groups --------------------------------------------------------------
 as_news() {   # run a command as the news user
