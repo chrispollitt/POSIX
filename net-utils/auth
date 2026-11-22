@@ -75,9 +75,11 @@ COMMANDS (answers on stdout, exit 1 when there is none)
                                      old ssh key, default ~/.ssh-OLD/id_rsa) into the vault, kept out of every file
   import netrc|tickets [FILE]        take the logins of ~/.netrc or ~/.mu-tickets into the vault (-n: plan only;
                                      the same login with another secret is reported and left alone)
-  ca [--smtp] [--out FILE]            cpbee's CA file (public; no unlock; $AUTH_CA_PATH on the server, default
-                                     ~/.config/tvchat/cpbee-ca.pem); --smtp adds the self-signed certificate port 587 presents,
-                                     fetched on cpbee, so a client can pin it instead of setting verify = false
+  ca [--out FILE]                     the LAN's CA file (Simple Inc Signing CA + Root CA, which every cpbee service's
+                                     certificate chains to; public, no unlock; $AUTH_CA_PATH on the server, default
+                                     /etc/ssl/Simple_Inc/lan/lan-ca.pem, else ~/.config/tvchat/cpbee-ca.pem), so a client
+                                     verifies with cafile = that file instead of setting verify = false.  (--smtp is accepted
+                                     and does nothing: port 587 chains to the same CA.)
   render ... --tmp                   write a fresh file into a private directory (mode 700) on tmpfs where there is one
                                      ($XDG_RUNTIME_DIR, else /dev/shm, else the temp dir) instead of your real file; the last
                                      line printed is its path (f=$(auth render netrc --tmp | tail -1)); for tools that take a
@@ -824,12 +826,19 @@ def main(argv=None, restricted=None):
                 return master_err.code
             return 0
         if cmd == "ca":
-            # cpbee's CA file, for a machine that must pin instead of turning verification off.  Public data, no vault, no
-            # unlock: the file is read on the server (over your normal ssh key from a client).  --smtp adds the self-signed
-            # certificate port 587 presents, fetched ON cpbee so ssh vouches for it.
-            snippets = ['cat "%s"' % (os.environ.get("AUTH_CA_PATH") or "$HOME/.config/tvchat/cpbee-ca.pem")]
+            # The LAN's CA file (the Simple Inc Signing CA + Root CA, which every LAN service's certificate chains to), for a
+            # machine that must verify instead of turning verification off.  Public data, no vault, no unlock: the file is
+            # read on the server (over your normal ssh key from a client).  $AUTH_CA_PATH names it; else
+            # /etc/ssl/Simple_Inc/lan/lan-ca.pem (TO_BE_RUN/cpbee-lan-certs.sh puts it there), else the older
+            # ~/.config/tvchat/cpbee-ca.pem.  --smtp used to add port 587's self-signed certificate; 587 now chains to the
+            # same CA, so it is accepted and adds nothing.
+            lan = "/etc/ssl/Simple_Inc/lan/lan-ca.pem"
+            if os.environ.get("AUTH_CA_PATH"):
+                snippets = ['cat "%s"' % os.environ["AUTH_CA_PATH"]]
+            else:
+                snippets = ['f=%s; [ -r "$f" ] || f="$HOME/.config/tvchat/cpbee-ca.pem"; cat "$f"' % lan]
             if a.smtp:
-                snippets.append("openssl s_client -connect localhost:587 -starttls smtp </dev/null 2>/dev/null | openssl x509")
+                print("auth: --smtp is no longer needed: port 587 presents a certificate from the same CA", file=sys.stderr)
             text = ""
             for sn in snippets:
                 if is_server():

@@ -479,6 +479,10 @@ class T(unittest.TestCase):
         rc, out, err = self.run_auth("ca", env=dict(nomaster, AUTH_CA_PATH=os.path.join(self.d, "missing.pem")))   # no such file
         self.assertEqual(rc, 1)
         self.assertIn("no CA certificate", err)
+        # --smtp used to add port 587's self-signed certificate; 587 chains to the same CA now: accepted, adds nothing
+        rc, out, err = self.run_auth("ca", "--smtp", env=nomaster)
+        self.assertEqual((rc, out), (0, open(pem).read()), err)
+        self.assertIn("no longer needed", err)
 
     def test_auth_ftp_and_telnet_wrappers(self):
         self.fresh()
