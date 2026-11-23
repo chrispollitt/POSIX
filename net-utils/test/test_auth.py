@@ -399,6 +399,32 @@ class T(unittest.TestCase):
         self.assertNotIn("NOIDENTITY", out)
         self.assertNotIn("NOSECRET", out)
 
+    def test_check_skips_identity_lines_marked_nosecret(self):
+        self.fresh()
+        self.put("../identities", "floyd talk@cpbee.cmnet floyd bot nosecret\nfloyd irc@cpbee.cmnet Floyd bot\n")
+        rc, out, _ = self.run_auth("check")
+        self.assertEqual(rc, 3)
+        self.assertNotIn("talk@cpbee.cmnet floyd", out)               # a talk name has no password
+        self.assertIn("NOSECRET    identity lists irc@cpbee.cmnet Floyd", out)
+
+    def test_ssh_check_reports_ok_denied_and_unreachable(self):
+        fake = self.put("fake-ssh", "#!/bin/sh\n"
+                        "for h; do :; done; h=$(printf '%s\\n' \"$@\" | grep -v '^-' | grep -vx true | grep -vx BatchMode=yes | grep -vx ConnectTimeout=6 | tail -1)\n"
+                        "case \"$h\" in\n"
+                        "  okhost) echo 'debug1: Server accepts key: /k/id_ed25519 ED25519 SHA256:x' >&2; exit 0 ;;\n"
+                        "  nokey) echo 'x@nokey: Permission denied (publickey).' >&2; exit 255 ;;\n"
+                        "  *) echo 'ssh: connect to host gone port 22: No route to host' >&2; exit 255 ;;\n"
+                        "esac\n")
+        os.chmod(fake, 0o755)
+        env = dict(self.env, AUTH_SSH=fake)
+        rc, out, _ = self.run_auth("ssh-check", "okhost", "nokey", "gone", env=env)
+        self.assertEqual(rc, 3, out)
+        self.assertIn("ok           okhost  key /k/id_ed25519", out)
+        self.assertIn("denied       nokey", out)
+        self.assertIn("unreachable  gone", out)
+        rc, out, _ = self.run_auth("ssh-check", "okhost", env=env)
+        self.assertEqual(rc, 0, out)
+
     def test_check_wildcard_identity_line_is_satisfied_by_any_record(self):
         self.fresh()
         self.run_auth("set", "imaps,smtp@cpbee", "chris", "--stdin", stdin="x\n")
