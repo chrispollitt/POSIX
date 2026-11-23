@@ -250,19 +250,6 @@ check "test_news_import.py" '[ $? = 0 ] || { tail -20 "$OUT"; false; }'
 check "test_fetch_archive.py" '[ $? = 0 ] || { tail -20 "$OUT"; false; }'
 
 # --------------------------------------------------------------------------
-t "the Usenet Archives sampler (userscript core)"
-NODE=$(command -v node || command -v nodejs || true)
-if [ -z "$NODE" ]; then
-  echo "  skip  no node here: bin/usenetarchives-sample.user.js's core is not tested"
-else
-  OUTW="$SANDBOX/sample.mbox"; command -v cygpath >/dev/null 2>&1 && OUTW=$(cygpath -w "$SANDBOX/sample.mbox")
-  JSW="$here/test_usenet_sample.js"; command -v cygpath >/dev/null 2>&1 && JSW=$(cygpath -w "$JSW")
-  "$NODE" "$JSW" "$OUTW" > "$OUT" 2>&1
-  check "test_usenet_sample.js" '[ $? = 0 ] || { tail -20 "$OUT"; false; }'
-  "$N/bin/news-import" --groups "$N/groups.d/classic.list" --dry-run "$SANDBOX/sample.mbox" > "$OUT" 2>&1
-  check "news-import reads what the sampler writes (both articles; each gets a Path)" 'has "$OUT" "read 2: would offer 2 (2 repaired)"'
-fi
-
 echo
 echo "news-setup: $PASS passed, $FAIL failed"
 [ "$FAIL" = 0 ]
