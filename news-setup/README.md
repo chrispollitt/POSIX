@@ -12,7 +12,6 @@ Usenet service, or any newsreader. This is the server half of tvmail's
 | [scripts/create-groups.sh](scripts/create-groups.sh) | make the groups of a list, read-only |
 | [bin/news-import](bin/news-import) | feed old articles (mbox, Maildir, a spool tree, tar, zip, rnews batches) to the server with IHAVE, made fit for it |
 | [bin/fetch-archive](bin/fetch-archive) | list and download the files of an Internet Archive item, checked against its md5s |
-| [bin/usenetarchives-sample.user.js](bin/usenetarchives-sample.user.js) | a Tampermonkey userscript, run by hand: a sample (20 groups x 20 threads x 20 messages) from usenetarchives.com as mbox files, quoting stripped |
 | [groups.d/classic.list](groups.d/classic.list) | a starting set of well-known groups, `net.*` before the renaming included |
 | [scripts/configure-tvmail-news.sh](scripts/configure-tvmail-news.sh) | on a client: point tvmail at the server (`[news]` in `tvmail.conf`), after checking it answers |
 | [tests/](tests/) | `test_news_setup.sh` (runs the others too), `test_news_import.py`, `test_fetch_archive.py`, a fake innd |
@@ -85,37 +84,10 @@ For a LAN server with a small archive from a zip of plain-text threads (`~/Downl
 Message-ID, so the server holds 226), `news-3-tvmail-on-laptop.sh` (builds the tvmail that has the Usenet service, then
 `configure-tvmail-news.sh`).
 
-### A sample from usenetarchives.com (by hand, in your browser)
+### The usenetarchives.com sampler (retired)
 
-[usenetarchives.com](https://usenetarchives.com) is a searchable archive with the Utzoo collection and
-hundreds of thousands of groups, but it refuses scripts (HTTP 403), so
-[bin/usenetarchives-sample.user.js](bin/usenetarchives-sample.user.js) is a **Tampermonkey userscript** that
-runs in your own browser, only when you press its button, and takes a small sample:
-
-1. Install it in Tampermonkey (Dashboard > "+" > paste the file > save).
-2. Open a page that lists groups (e.g. `https://usenetarchives.com/groups.php`), click POSTS to put the
-   biggest first, or pick a collection (Utzoo).
-3. A box appears at the bottom right: **groups / threads / messages** (default 20 / 20 / 20 = at most 8000
-   messages) and a delay between requests (1.5 s and a random bit more). **Run** lists the groups and asks
-   first, then for each group takes its biggest threads and the first messages of each, with **quoted text,
-   "X writes:" lines and signatures taken out**, and saves `usenet-GROUP.mbox` as each group finishes (the
-   browser may ask once to allow several downloads). It remembers finished groups (**Forget done** clears
-   that), stops on **Stop**, and stops by itself at the first 403 / 429 / 503.
-4. `bin/news-import --groups groups.d/classic.list usenet-*.mbox` (after `create-groups.sh`).
-
-**Not tested against the real site**: the part that knows what its pages look like (`SITE` in the file) is
-written from three screenshots, and the site could not be read from here. What it assumes: the group list is a
-table (GROUP, DESCRIPTION, THREADS, POSTS); a group's threads are listed **one page per year**
-(`threads.php?id=GROUP&y=1991`, a table Threads / Posts / Date, 100 a page, sorted by Posts, biggest first, with
-the other years as buttons "1991 (2,731)"); a thread is one page (`view.php?id=GROUP&mid=...`) holding every
-message, each under a `#1 author 1992-01-15 11:32UTC` header. So for each group it reads the first page of
-each year in the **years** box (default 1980-2000; blank = all), ranks those threads by Posts, and opens the
-top ones - for 20 groups about 20 x (15 years + 20 threads) = 700 requests, some twenty minutes. It warns if a
-year's list is not in Posts order (its first page could then miss big threads). If Run says it cannot find
-the groups, threads or messages, press **Probe** on that page: it copies a trimmed outline of the page's
-structure (public page text only) to paste to whoever fixes `SITE`. The rest - quote stripping, the mbox,
-ranking, the `From` escaping - is tested (`node tests/test_usenet_sample.js`) and its output is read by
-`news-import` (a check in `test_news_setup.sh`). Read the site's terms first; this is a sample for yourself.
+A Tampermonkey userscript that took a small sample from usenetarchives.com was retired on 2026-11-23: it was never run on
+the live site. It and its tests are kept in [OLD/](OLD/) for reference only.
 
 **Other places the articles can come from** are yours to check:
 
