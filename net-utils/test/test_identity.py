@@ -31,7 +31,7 @@ class T(unittest.TestCase):
         self.f = os.path.join(self.d, "identities")
         self.put(self.f, LIST)
         self.env = dict(os.environ, IDENTITY_FILE=self.f, IDENTITY_SYSTEM=os.path.join(self.d, "none"),
-                        HOME=os.path.join(self.d, "home"))
+                        HOME=os.path.join(self.d, "home"), IDENTITY_AUTH="")        # no vault unless a test names one
 
     def tearDown(self):
         shutil.rmtree(self.d, ignore_errors=True)
@@ -81,10 +81,15 @@ class T(unittest.TestCase):
         self.assertIn("ann-irc", open(self.f).read())
         self.assertEqual(self.run_tool("login", "ann", "irc", "cpbee"), (0, "ann-irc"))
         self.assertEqual(self.run_tool("plan", "add", "ann", "irc@cpbee", "ann-irc", "--why", "x")[0], 0)   # already there
-        self.assertEqual(len([n for n in os.listdir(self.d) if ".bak-" in n]), 1)
+        self.assertEqual(len([n for n in os.listdir(os.path.join(self.d, "BAK")) if ".bak-" in n]), 1)
         self.assertEqual(self.run_tool("remove", "ann", "irc@cpbee")[0], 0)
         self.assertNotIn("ann-irc", open(self.f).read())
         self.assertIn("# PERSON", open(self.f).read())                         # comments survive
+
+    def test_a_scheme_may_start_with_a_digit(self):                            # 2fa: the one-time-code seeds in the vault
+        rc, out = self.run_tool("add", "ann", "2fa@lan", "ann", "--why", "her code seed")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.run_tool("login", "ann", "2fa", "lan"), (0, "ann"))
 
     def test_add_refusals(self):
         rc, out = self.run_tool("add", "ann", "imaps@cpbee", "chris", "--why", "x")
@@ -136,6 +141,40 @@ class T(unittest.TestCase):
         self.assertIn("ADMIN         admins = chris is not a login the list flags admin", out)
         self.assertNotIn("contact = chris-pollitt is not", out)
         self.assertIn("note DIFFERS  chris on cpbee.cmnet", out)                  # chris vs chris-pollitt on one host
+
+    def fake_auth(self, body):
+        p = os.path.join(self.d, "fake-auth")
+        self.put(p, "#!/bin/sh\n" + body)
+        os.chmod(p, 0o755)
+        self.env["IDENTITY_AUTH"] = p
+
+    def test_check_reads_the_vault_through_auth(self):
+        self.fake_auth('echo "vault: 3 records; identity: 5 lines"\n'
+                       'echo "NOIDENTITY  vault has irc@cpbee.cmnet stray"\n'
+                       'echo "NOSECRET    identity lists smtp@cpbee.cmnet chris; the vault holds no secret for it"\n'
+                       'echo "2 findings"\nexit 3\n')
+        rc, out = self.run_tool("check", "--no-default-files")
+        self.assertEqual(rc, 3, out)
+        self.assertIn("vault: 3 records; identity: 5 lines", out)
+        self.assertIn("NOIDENTITY  vault has irc@cpbee.cmnet stray", out)
+        self.assertIn("NOSECRET    identity lists smtp@cpbee.cmnet chris", out)
+        self.assertIn("2 findings", out)                      # counted with the list's own findings
+        rc, out = self.run_tool("check", "--no-default-files", "--no-vault")
+        self.assertEqual(rc, 0, out)
+        self.assertNotIn("NOIDENTITY", out)
+
+    def test_check_a_clean_vault_adds_nothing(self):
+        self.fake_auth('echo "vault: 1 record; identity: 5 lines"\necho "0 findings"\nexit 0\n')
+        rc, out = self.run_tool("check", "--no-default-files")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("vault: 1 record", out)
+
+    def test_check_a_locked_vault_is_a_note_not_a_finding(self):
+        self.fake_auth('echo "auth: the vault is locked (ssh -t cpbee auth unlock)" >&2\nexit 4\n')
+        rc, out = self.run_tool("check", "--no-default-files")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("note VAULT     not read", out)
+        self.assertIn("locked", out)
 
     def test_check_flags_conflict_and_duplicate(self):
         self.put(self.f, LIST + "ann   imaps@cpbee   chris   # oops\nchris irc@irc.libera.chat chris-p2  # second\n")

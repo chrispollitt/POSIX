@@ -390,6 +390,15 @@ class T(unittest.TestCase):
         self.assertNotIn("imap@cpbee.cmnet chris;", out)
         self.assertNotIn("a\n", out.replace("vault has", ""))
 
+    def test_check_ignores_sudo_rows_and_records(self):
+        self.fresh()
+        self.run_auth("set", "sudo@cmpi", "root", "--stdin", stdin="a\n")          # an OS password, not a person's login
+        self.put("../identities", "chris sudo@cpbee.cmnet chris\n")                # an OS administrator row, no vault secret
+        rc, out, _ = self.run_auth("check")
+        self.assertEqual(rc, 0, out)
+        self.assertNotIn("NOIDENTITY", out)
+        self.assertNotIn("NOSECRET", out)
+
     def test_check_wildcard_identity_line_is_satisfied_by_any_record(self):
         self.fresh()
         self.run_auth("set", "imaps,smtp@cpbee", "chris", "--stdin", stdin="x\n")

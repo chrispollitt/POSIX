@@ -1118,10 +1118,14 @@ def main(argv=None, restricted=None):
             def on_lan(h):
                 return a.all or h.endswith("." + dom) or h == "localhost" or h.startswith(("192.168.", "10.", "127."))
             for r in sorted(flat, key=lambda r: (r["host"], r["scheme"], r["login"])):
+                if r["scheme"] == "sudo":
+                    continue                                  # a root/OS password for sudo, not a person's login
                 if on_lan(r["host"]) and (scheme_of(r["scheme"]), r["host"], r["login"]) not in idset and ("*", r["host"], r["login"]) not in idset:
                     findings.append("NOIDENTITY  vault has %s@%s %s; identity does not list that login" % (r["scheme"], r["host"], r["login"]))
             have = {(scheme_of(r["scheme"]), r["host"], r["login"]) for r in flat}
             for s, h, l in sorted(idset):
+                if s == "sudo":
+                    continue                                  # an OS administrator row: the OS and sudo-mfa hold that
                 if not any(x[1] == h and x[2] == l and (s == "*" or x[0] in (s, "*")) for x in have):
                     findings.append("NOSECRET    identity lists %s@%s %s; the vault holds no secret for it" % (s, h, l))
             print("vault: %d record%s; identity: %d line%s" % (len(recs), "" if len(recs) == 1 else "s", len(rows), "" if len(rows) == 1 else "s"))
