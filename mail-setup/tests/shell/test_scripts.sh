@@ -381,6 +381,21 @@ check "re-run doesn't repeat the ~/.mailrc block" '[ "$(grep -c "^set xmailer" "
 check "re-run backs up ~/.mail" 'ls "$HOME"/.mail.bak.* >/dev/null 2>&1'
 ASSUME=no "$S/configure-mailutils.sh" --role master > "$OUT" 2>&1
 check "--assume-no writes nothing new" '[ $? = 0 ] && has "$OUT" "Write ~/.mail and ~/.mu-tickets now? -> no"'
+# the vault already has the login: no password is asked or handled, `auth render tickets` writes the file
+FAKEAUTH="$SANDBOX/fake-auth"; mkdir -p "$FAKEAUTH"
+cat > "$FAKEAUTH/auth" <<'EOF'
+#!/bin/sh
+case "$1" in
+  get) [ "$2 $3 $4" = "imaps vhost vme" ] && { echo vaultpw; exit 0; }; exit 1 ;;
+  render) echo "# BEGIN auth" > "$HOME/.mu-tickets"; echo "imaps://vme:***@vhost" >> "$HOME/.mu-tickets"; echo "# END auth" >> "$HOME/.mu-tickets" ;;  # allowlist secret: fake test line
+esac
+EOF
+chmod +x "$FAKEAUTH/auth"
+printf 'vhost\n143\nvme\nvhost\n25\n' | PATH="$FAKEAUTH:$PATH" ASSUME=yes "$S/configure-mailutils.sh" --role client > "$OUT" 2>&1
+check "vault has the login: tickets come from auth render" 'has "$OUT" "wrote ~/.mu-tickets from the vault" && has "$HOME/.mu-tickets" "imaps://vme:***@vhost"'  # allowlist secret: fake test line
+check "vault has the login: no password prompt" '! has "$OUT" "password for vme@vhost"'  # allowlist secret: fake test line
+printf 'mhost\n143\nme\nmhost\n25\nnewpw\n' | PATH="$FAKEAUTH:$PATH" ASSUME=yes "$S/configure-mailutils.sh" --role client > "$OUT" 2>&1
+check "vault lacks the login: the old prompt still works" 'has "$HOME/.mu-tickets" "me:newpw@mhost"'
 
 # --------------------------------------------------------------------------
 t "install-sendmail-shim"

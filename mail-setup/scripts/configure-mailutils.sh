@@ -123,7 +123,14 @@ EOF
     log "added 'set xmailer' to $mailrc (User-Agent header on outgoing mail)"
   fi
 
-  if ask "Add a ~/.mu-tickets credential for ${imap_user}@${imap_host}?"; then
+  # The LAN's vault (net-utils `auth`) is the one place for passwords.  When it already holds this login, nothing is typed
+  # and no password is handled here: `auth render tickets` writes ~/.mu-tickets (both host spellings, Radicale too).
+  if command -v auth >/dev/null 2>&1 && auth get imaps "$imap_host" "$imap_user" </dev/null >/dev/null 2>&1; then
+    if ask "The auth vault has ${imap_user}@${imap_host}: write ~/.mu-tickets from it (auth render tickets)?"; then
+      backup "$HOME/.mu-tickets"
+      if auth render tickets; then log "wrote ~/.mu-tickets from the vault"; else warn "auth render tickets failed - ~/.mu-tickets unchanged"; fi
+    fi
+  elif ask "Add a ~/.mu-tickets credential for ${imap_user}@${imap_host}?"; then
     pw=$(readsecret "password for ${imap_user}@${imap_host}")
     tickets="$HOME/.mu-tickets"
     backup "$tickets"
