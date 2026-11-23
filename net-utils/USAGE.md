@@ -200,11 +200,19 @@ that service. Add the identity line **before** (or along with) the vault record 
 ```bash
 auth check          # LAN records with no identity line, and identity lines with no vault secret
 auth check --all    # also outside hosts (gmail, github ...)
-identity check      # logins in use that the list does not know; Floyd's admins; duplicates
+identity check      # logins in use that the list does not know; Floyd's admins; duplicates; AND the vault (runs auth check)
+identity check --no-vault   # the list against the config files only
 ```
 
-Expect `identity check` to show 0 findings. `auth check` lists identity lines that still have no vault secret
-(Delta Chat, Floyd's IRC logins, `cpollitt` on the VAX): these are Phase 2 items in the GitHub issues (chrispollitt/POSIX#14).
+`identity check` now audits both in one command: it runs `auth check` (names and logins, never a secret) and adds its
+NOIDENTITY and NOSECRET lines. A locked vault is a note, not a finding. `sudo@` rows and `sudo` vault records are
+skipped by `auth check`: they say who is an OS administrator, and the OS and `sudo-mfa` hold that.
+Until the vault is filled for everyone (Delta Chat, Floyd's IRC, talk and Live Helper Chat logins, Radicale users,
+`cpollitt` on the VAX) the NOSECRET lines remain: that is POSIX#9.
+
+The master copy of the list on cpbee is `/etc/identities` (root:root 644; `identity` reads it as well as `~/.config/identities`).
+Publish a change with `TO_BE_RUN/REUSABLE/cpbee-identities-master.sh`. `identity add` and `remove` keep the 3 newest backups
+in `BAK/` beside the list. `configure-floyd.sh` takes Floyd's `admins =` from `identity admins` unless `--admins` is given.
 
 ## When something goes wrong
 

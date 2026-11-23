@@ -379,6 +379,7 @@ check "  the account is replaced, not doubled" '[ "$(grep -c "^\[account:delta\]
 t "configure-floyd.sh (the floyd.conf and the unit it would write)"
 FL="$C/scripts/configure-floyd.sh"
 fl() { "$FL" --tvchat-dir "$FIX" "$@"; }
+export IDENTITY_CMD=""                      # no identity list unless a test names one
 check "bash -n configure-floyd.sh" 'bash -n "$FL"'
 check "-h prints the usage" '"$FL" -h | grep -q "^Usage:"'
 fl --print-config > "$SANDBOX/floyd.conf" 2> "$OUT"
@@ -413,6 +414,14 @@ fl --user fbot --print-unit | grep -qx "User=fbot"
 check "  the service user follows --user" '[ $? = 0 ]'
 "$FL" --tvchat-dir "$SANDBOX/nowhere" --print-config > "$OUT" 2>&1
 check "no tvchat files: fails, says --tvchat-dir" '[ $? != 0 ] && has "$OUT" "--tvchat-dir"'
+FAKEID="$SANDBOX/fake-identity"
+printf '#!/bin/sh
+[ "$1" = admins ] && printf "chris-pollitt\nchris\nchris\n"
+' > "$FAKEID"; chmod +x "$FAKEID"
+IDENTITY_CMD="$FAKEID" fl --print-config > "$FC" 2> "$OUT"
+check "admins default to the identity list's admin logins" 'grep -qx "admins   = chris, chris-pollitt" "$FC"'
+IDENTITY_CMD="$FAKEID" fl --admins ops --print-config > "$FC" 2> "$OUT"
+check "--admins beats the identity list" 'grep -qx "admins   = ops" "$FC"'
 fl --admins 'a;b' --print-config > "$OUT" 2>&1
 check "--admins with odd characters is refused" '[ $? != 0 ] && has "$OUT" "--admins"'
 fl --nick 'bad nick' --print-config > "$OUT" 2>&1

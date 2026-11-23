@@ -67,7 +67,8 @@
 #   --irc-host HOST     where he connects to Ergo's TLS port (default: the address
 #                       Ergo listens on, from ss; on the master the name "cpbee" is
 #                       127.0.1.1 or ::1, which Ergo's LAN-only listener refuses)
-#   --admins LIST       NickServ accounts that may give him orders (default: chris)
+#   --admins LIST       NickServ accounts that may give him orders (default: the logins `identity admins`
+#                       lists as admin, from the one identity list; chris when there is no list)
 #   --claude-dir DIR    the directory the Claude CLI works in (default: ~floyd/src)
 #   --clone URL         a repository to clone (or update) into --claude-dir, so Claude
 #                       can read it; repeatable (default: github.com/chrispollitt's
@@ -98,7 +99,7 @@ MAILHOST=localhost
 IRCPORT=6667
 ACCOUNT=cpbee
 SVCUSER=""
-ADMINS=chris
+ADMINS=""
 IRCHOST=""
 CLAUDEDIR=""
 CONFFILE=/etc/tvchat/floyd.conf
@@ -158,6 +159,12 @@ case "$ACCOUNT" in ''|*[!A-Za-z0-9_-]*) die "--account: '$ACCOUNT' may only have
 [ -n "$SVCUSER" ] || SVCUSER=$USERNAME
 [ ${#CLONES[@]} -gt 0 ] || CLONES=(https://github.com/chrispollitt/TUIs https://github.com/chrispollitt/POSIX)
 case "$CLAUDECMD" in ''|/*) : ;; *) die "--claude-cmd: '$CLAUDECMD' is not a full path" ;; esac
+# the admins come from the LAN's one identity list unless --admins says otherwise (IDENTITY_CMD= turns that off)
+if [ -z "$ADMINS" ] && [ -n "${IDENTITY_CMD-identity}" ] && command -v "${IDENTITY_CMD-identity}" >/dev/null 2>&1; then
+  ADMINS=$("${IDENTITY_CMD-identity}" admins </dev/null 2>/dev/null | sort -u | paste -sd, - | sed 's/,/, /g') || ADMINS=""
+  [ -z "$ADMINS" ] || log "admins      : from the identity list ($ADMINS)" >&2
+fi
+ADMINS=${ADMINS:-chris}
 case "$ADMINS" in ''|*[!A-Za-z0-9_,\ \`^{}\|\[\]\\-]*) die "--admins: '$ADMINS' is not a list of account names" ;; esac
 
 # tvchat's files: a source checkout has them in configure/, an install in the doc dir

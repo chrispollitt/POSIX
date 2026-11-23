@@ -44,7 +44,7 @@ COMMANDS (for scripts: the answer on stdout, exit 1 when there is none)
                                      the commands that would reconcile; it changes nothing.  Exit 0 consistent, 3 findings
 `plan` exits 0 (nothing to do), 3 (something to change) or 1 (refused).  `add` refuses a login that is another
 person's on that scheme and host, and a second login for one person there (--also allows it: say why).  The
-list is backed up (FILE.bak-DATE) before any change.
+list is backed up (BAK/FILE.bak-DATE beside it, the 3 newest kept) before any change.
 
 CHECK reads, when they exist (each can be named: --tickets --netrc --tvchat-conf --tvmail-conf --tvcal-conf
 --floyd-conf --mail-conf; pass a name more than once; --no-default-files reads only the ones named):
@@ -61,7 +61,10 @@ Exit 0 when nothing but notes was found (--strict: notes count), 3 when there is
 
 --floyd-local HOST says that 127.0.0.1 / localhost in the --floyd-conf files means HOST (a copy of cpbee's floyd.conf:
 cpbee).
-Options: --file FILE (the list to change; default as above)  --domain DOMAIN  --no-domain  --root  -v  -h
+The vault: `check` also runs `auth check` (names and logins only) and reports NOIDENTITY (the vault has a login this
+list lacks) and NOSECRET (this list has a login the vault holds no secret for), so one command audits both.  A locked
+or missing vault is a note.  --no-vault skips it; IDENTITY_AUTH=CMD names another command (empty: none).
+Options: --file FILE (the list to change; default as above)  --domain DOMAIN  --no-domain  --root  --no-vault  -v  -h
 Environment: IDENTITY_SSH (ssh, how other machines are asked), IDENTITY_SUDO (sudo-mfa, for --root).
 """
 import argparse
@@ -367,7 +370,7 @@ def check(reg, a):
 # ------------------------------------------------------------------- edit ---
 def parse_spec(spec, reg):
     scheme, at, host = spec.partition("@")
-    if not at or not host or not (scheme == "*" or re.match(r"^[A-Za-z][\w+.-]*$", scheme)):
+    if not at or not host or not (scheme == "*" or re.match(r"^[A-Za-z0-9][\w+.-]*$", scheme)):
         raise Err("SCHEME@HOST wanted, not %r" % spec)
     return scheme_of(scheme), reg.host(host)
 
@@ -393,19 +396,47 @@ def plan_add(reg, a):
 
 
 def rewrite(path, text):
+    """write the list; the old one goes to BAK/ beside it first, and only the 3 newest backups are kept."""
     d = os.path.dirname(os.path.abspath(path))
     os.makedirs(d, exist_ok=True)
     if os.path.exists(path):
-        b, n = "%s.bak-%s" % (path, time.strftime("%Y%m%d-%H%M%S")), 0
+        bdir = os.path.join(d, "BAK")
+        os.makedirs(bdir, exist_ok=True)
+        base = os.path.join(bdir, os.path.basename(path) + ".bak-")
+        b, n = base + time.strftime("%Y%m%d-%H%M%S"), 0
         while os.path.exists(b):
             n += 1
-            b = "%s.bak-%s-%d" % (path, time.strftime("%Y%m%d-%H%M%S"), n)
+            b = "%s%s-%d" % (base, time.strftime("%Y%m%d-%H%M%S"), n)
         with open(path, "rb") as fh, open(b, "wb") as out:
             out.write(fh.read())
+        old = sorted(f for f in os.listdir(bdir) if f.startswith(os.path.basename(path) + ".bak-"))
+        for f in old[:-3]:
+            os.remove(os.path.join(bdir, f))
     tmp = "%s.tmp%d" % (path, os.getpid())
     with open(tmp, "w", encoding="utf-8") as fh:
         fh.write(text)
     os.replace(tmp, path)
+
+
+def vault_check():
+    """what `auth check` says about the vault against this list: (summary line, findings, notes).  The vault is read
+    only through `auth` (names and logins, never a secret).  IDENTITY_AUTH names the command (default auth; empty
+    = do not look); --no-vault skips it.  A locked or unreachable vault is a note, not a finding."""
+    cmd = os.environ.get("IDENTITY_AUTH", "auth")
+    if not cmd:
+        return "", [], []
+    try:
+        r = subprocess.run([cmd, "check"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                           universal_newlines=True, timeout=90)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        why = "timed out" if isinstance(e, subprocess.TimeoutExpired) else "no `%s` here" % cmd
+        return "", [], ["note VAULT     not read: %s" % why]
+    if r.returncode not in (0, 3):
+        why = (r.stderr.strip().splitlines() or ["exit %d" % r.returncode])[-1]
+        return "", [], ["note VAULT     not read (%s check: %s)" % (cmd, why)]
+    lines = r.stdout.splitlines()
+    head = next((ln for ln in lines if ln.startswith("vault:")), "")
+    return head, [ln for ln in lines if ln.startswith(("NOIDENTITY", "NOSECRET"))], []
 
 
 # ------------------------------------------------------- OS administrators ---
@@ -623,6 +654,7 @@ def main(argv=None):
     ap.add_argument("--also", action="store_true")
     ap.add_argument("--root", action="store_true")
     ap.add_argument("--strict", action="store_true")
+    ap.add_argument("--no-vault", action="store_true")
     ap.add_argument("--no-default-files", action="store_true")
     for n in ("tickets", "netrc", "tvchat-conf", "tvmail-conf", "tvcal-conf", "floyd-conf", "mail-conf"):
         ap.add_argument("--" + n, action="append")
@@ -732,8 +764,13 @@ def main(argv=None):
             return 3 if findings else 0
         if cmd == "check":
             findings, notes, read = check(reg, a)
+            vault_line, vfind, vnotes = ("", [], []) if a.no_vault else vault_check()
+            findings += vfind
+            notes += vnotes
             print("list: %d line%s (%s)" % (len(reg.rows), "" if len(reg.rows) == 1 else "s", user_file))
             print("read: " + (", ".join(read) if read else "no configuration file found"))
+            if vault_line:
+                print(vault_line)
             for x in findings + notes:
                 print(x)
             bad = findings + (notes if a.strict else [])
