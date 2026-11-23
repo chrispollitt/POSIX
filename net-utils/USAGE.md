@@ -210,6 +210,12 @@ skipped by `auth check`: they say who is an OS administrator, and the OS and `su
 Until the vault is filled for everyone (Delta Chat, Floyd's IRC, talk and Live Helper Chat logins, Radicale users,
 `cpollitt` on the VAX) the NOSECRET lines remain: that is POSIX#9.
 
+A line flagged `nosecret` (`identity add floyd talk@cpbee floyd bot nosecret --why ...`) is one the vault is not expected to
+hold a password for: a talk name, or a login whose password only its owner knows. `auth check` skips it.
+
+`auth ssh-check [HOST...]` says which ssh key opens which host (`ok  cpbee  key ~/.ssh/id_rsa`, `denied`, `unreachable`);
+with no host it asks every host that has a `sudo@` row. The keys stay on the machines; the vault holds none.
+
 The master copy of the list on cpbee is `/etc/identities` (root:root 644; `identity` reads it as well as `~/.config/identities`).
 Publish a change with `TO_BE_RUN/REUSABLE/cpbee-identities-master.sh`. `identity add` and `remove` keep the 3 newest backups
 in `BAK/` beside the list. `configure-floyd.sh` takes Floyd's `admins =` from `identity admins` unless `--admins` is given.

@@ -8,14 +8,15 @@ lan-port: a plain file, one tool every project calls (not its own copy), `plan` 
 line, and `check` to compare the list with what the configurations really say.  It holds NO passwords.
 
 THE LIST   $IDENTITY_FILE, else ~/.config/identities  (and /etc/identities, read-only, when there is one)
-    # PERSON  SCHEME@HOST          LOGIN             [admin] [bot]   # why
+    # PERSON  SCHEME@HOST          LOGIN             [admin] [bot] [nosecret]   # why
     chris     imaps@cpbee.cmnet    chris                             # mail: the Unix and Dovecot user
     chris     *@cpbee.cmnet        chris                             # any other service there
     chris     irc@irc.libera.chat  chris-pollitt     admin           # my Libera account
   SCHEME is imaps, smtp, irc, https, lhc, talk ... or * (any); imap/imaps, smtp/smtps, irc/ircs and http/https are
   one scheme each for matching.  HOST may carry a port (ignored when matching).  A bare host name gets the LAN domain
   (cmnet): cpbee is cpbee.cmnet.  `admin` marks a login that answers for the bots (Floyd's admins); `bot` a login
-  that is a program.  One login per person per scheme and host.
+  that is a program; `nosecret` that the vault is not expected to hold a password for it (a talk name, or a login whose
+  password only its owner knows), so `auth check` does not ask for one.  One login per person per scheme and host.
   `@host NAME ALIAS...` says that other spellings are the same machine: `@host cpbee.cmnet 192.168.10.1`.
   OPERATING-SYSTEM ADMINISTRATORS: a row with the scheme `sudo` says that this person's account on that machine is an
   administrator there (a sudoer on Linux, a member of Administrators on Windows):
@@ -81,7 +82,7 @@ from urllib.parse import unquote
 GROUP = {"imap": "imap", "imaps": "imap", "smtp": "smtp", "smtps": "smtp", "submission": "smtp", "irc": "irc",
          "ircs": "irc", "http": "http", "https": "http", "caldav": "http", "caldavs": "http", "lhc": "lhc"}
 NAME_RX = re.compile(r"^[A-Za-z0-9._-]+$")
-FLAGS = ("admin", "bot")
+FLAGS = ("admin", "bot", "nosecret")
 URL = re.compile(r"^(?P<scheme>\*|[A-Za-z][\w+.-]*)://(?:(?P<user>[^:@/]*)(?::[^@/]*)?@)?(?P<host>[^:/]+)")  # allowlist secret
 
 
@@ -150,7 +151,7 @@ class Reg:
             person, spec, login, flags = f[0], f[1], f[2], f[3:]
             scheme, _, host = spec.partition("@")
             if not NAME_RX.match(person) or not host or any(x not in FLAGS for x in flags):
-                raise Err("%s:%d: a person is letters, digits . _ - ; flags are admin, bot; host needed" % (path, n))
+                raise Err("%s:%d: a person is letters, digits . _ - ; flags are admin, bot, nosecret; host needed" % (path, n))
             self.rows.append({"person": person, "scheme": scheme_of(scheme), "host": host_of(host, self.domain),
                               "login": login, "flags": set(flags), "why": why.strip(), "src": source, "line": n})
         return True
@@ -379,7 +380,7 @@ def plan_add(reg, a):
     if not NAME_RX.match(a.person):
         raise Err("a person is letters, digits . _ - only")
     if any(f not in FLAGS for f in a.flags):
-        raise Err("flags are admin and bot")
+        raise Err("flags are admin, bot and nosecret")
     if not (a.why or "").strip():
         raise Err("say why: --why TEXT")
     sch, h = parse_spec(a.spec, reg)

@@ -89,6 +89,9 @@ COMMANDS (answers on stdout, exit 1 when there is none)
                                      touched except older lines for the same scheme+host+login, which the block
                                      replaces; backed up first; mode 600; -n shows the plan without secrets.
                                      netrc takes only records that came from a netrc, or are ftp or telnet.
+  ssh-check [HOST...]                which ssh key opens which host (key login only, BatchMode): ok with the key the host
+                                     accepted, denied, or unreachable.  Default hosts: those with a sudo@ row in `identity`.
+                                     The keys stay on the machines; the vault holds none.  Exit 3 when one fails.
   check [--all]                      the vault against `identity`: LAN records (hosts in the domain, private
                                      addresses, localhost) with no identity line, and identity lines with no
                                      secret; --all also asks about outside hosts (gmail, github ...).  Never
@@ -549,7 +552,7 @@ def identity_rows():
         f = ln.partition("#")[0].split()
         if len(f) >= 3 and "@" in f[1]:
             s, _, h = f[1].partition("@")
-            rows.append((s, h, f[2]))
+            rows.append((s, h, f[2], "nosecret" in f[3:]))
     return rows
 
 
@@ -1112,7 +1115,8 @@ def main(argv=None, restricted=None):
             rows = identity_rows()
             if rows is None:
                 raise Err("`identity list` is not available here")
-            idset = {(scheme_of(s), host_of(h, dom), l) for s, h, l in rows}
+            idset = {(scheme_of(s), host_of(h, dom), l) for s, h, l, _ns in rows}
+            nosec = {(scheme_of(s), host_of(h, dom), l) for s, h, l, ns in rows if ns}
             findings = []
             flat = [dict(r, scheme=x) for r in recs for x in schemes(r)]
             def on_lan(h):
@@ -1124,8 +1128,8 @@ def main(argv=None, restricted=None):
                     findings.append("NOIDENTITY  vault has %s@%s %s; identity does not list that login" % (r["scheme"], r["host"], r["login"]))
             have = {(scheme_of(r["scheme"]), r["host"], r["login"]) for r in flat}
             for s, h, l in sorted(idset):
-                if s == "sudo":
-                    continue                                  # an OS administrator row: the OS and sudo-mfa hold that
+                if s == "sudo" or (s, h, l) in nosec:
+                    continue                                  # an OS administrator row (the OS and sudo-mfa hold that), or marked nosecret
                 if not any(x[1] == h and x[2] == l and (s == "*" or x[0] in (s, "*")) for x in have):
                     findings.append("NOSECRET    identity lists %s@%s %s; the vault holds no secret for it" % (s, h, l))
             print("vault: %d record%s; identity: %d line%s" % (len(recs), "" if len(recs) == 1 else "s", len(rows), "" if len(rows) == 1 else "s"))
@@ -1133,6 +1137,38 @@ def main(argv=None, restricted=None):
                 print(f)
             print("%d finding%s" % (len(findings), "" if len(findings) == 1 else "s"))
             return 3 if findings else 0
+
+        if cmd == "ssh-check":
+            rows = identity_rows()
+            if rows is None and not args:
+                raise Err("`identity list` is not available here")
+            hosts = list(args) or sorted({h for s, h, l, _ns in rows if s == "sudo"})
+            me = socket.gethostname().split(".")[0].lower()
+            ssh_cmd = os.environ.get("AUTH_SSH", "ssh")
+            bad = 0
+            for h in hosts:
+                short = h[:-len(dom) - 1] if dom and h.endswith("." + dom) else h
+                if short.lower() == me:
+                    print("self         %s  (this machine)" % short)
+                    continue
+                try:
+                    r = subprocess.run([ssh_cmd, "-v", "-o", "BatchMode=yes", "-o", "ConnectTimeout=6", short, "true"],
+                                       stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                       universal_newlines=True, timeout=30)
+                except (OSError, subprocess.TimeoutExpired) as e:
+                    print("unreachable  %s  (%s)" % (short, e.__class__.__name__))
+                    bad += 1
+                    continue
+                err = r.stderr.splitlines()
+                key = next((ln.split("Server accepts key:", 1)[1].split()[0] for ln in err if "Server accepts key:" in ln), "")
+                if r.returncode == 0:
+                    print("ok           %s  key %s" % (short, key or "(not shown)"))
+                else:
+                    last = next((ln for ln in reversed(err) if ln.strip() and not ln.startswith("debug")), "exit %d" % r.returncode)
+                    kind = "denied      " if "Permission denied" in r.stderr else "unreachable "
+                    print("%s %s  (%s)" % (kind, short, last.strip()[:90]))
+                    bad += 1
+            return 3 if bad else 0
 
         raise Err("unknown command %r (auth --help)" % cmd, 2)
     except Err as e:
