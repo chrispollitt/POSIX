@@ -192,6 +192,10 @@ identity remove chris https@cpbee.cmnet chris
 identity check                         # list vs the configs (tickets, netrc, tvchat/tvmail/tvcal confs)
 ```
 
+tvchat's `[people]` table (who is who across its accounts, for invitations) can be made from this list instead of by
+hand: `tvchat-backend people-from-identity` prints the block, and `tvchat-backend people-from-identity --check` reports where
+the table in `tvchat.conf` disagrees (TUIs#79). A person whose rows are all `bot` is left out.
+
 When you leave the login out of `auth get`, `auth` asks `identity` which login the current person uses on
 that service. Add the identity line **before** (or along with) the vault record for a new login.
 
