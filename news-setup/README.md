@@ -84,6 +84,21 @@ For a LAN server with a small archive from a zip of plain-text threads (`~/Downl
 Message-ID, so the server holds 226), `news-3-tvmail-on-laptop.sh` (builds the tvmail that has the Usenet service, then
 `configure-tvmail-news.sh`).
 
+### More archives from a folder of zips (`news-4`)
+
+`news-4-more-archives-on-cpbee.sh` (same steps as `news-2`, with `DRY_RUN=1` as the plan) added four more zips on 2026-11-23:
+`clarinet-sample-60` (60 articles), `dave-barry-usenet-sample` (47), `usenet-interests-sample` (66) and
+`listserv-and-fidonet-sample` (63: FidoNet echomail and a few Usenet posts). With the four from `news-2` the server holds
+**all eight zips of `usenet arc`**: 249 groups, about 1,765 articles (a crossposted article counts in each group). `control`
+(INN's own group) is never made, and every archive group is read-only.
+
+- **The `clari.*` groups are a licensed news wire** (a sample, kept for the LAN): their description says "LAN only". Never
+  give this server to outside peers or publish the groups.
+- The SF-LOVERS listserv digests in the last zip are not news articles; they would go to `lists-setup` (`list-import`) and are
+  not imported yet.
+- To check which articles of a zip the server holds, ask it with `STAT <Message-ID>` for each (`news-import`'s `repair()`
+  makes the same Message-ID for the same article); the `--dry-run` of `news-import` does not connect to the server.
+
 ### The usenetarchives.com sampler (retired)
 
 A Tampermonkey userscript that took a small sample from usenetarchives.com was retired on 2026-11-23: it was never run on
