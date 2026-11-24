@@ -49,6 +49,12 @@ auth remove https@cpbee:5232 michelle # DELETE one record
 auth remove imaps@cpbee chris          # on a multi-scheme record: drops that scheme (imap and imaps count as one), keeps the others
 ```
 
+**Type the real login.** In `auth set SCHEME@HOST LOGIN` the word `LOGIN` stands for the login name (`whatwelo`, `chris` ...): it is
+not typed as it is. `auth set` (and `bar`, and `identity add`) refuse a placeholder word (`LOGIN`, `USER`, `ADMINNAME` ...) before asking
+for the secret; `--allow-placeholder` takes one if it really is the login. `auth import` skips such logins, and `auth check` reports any
+that are already in the vault (`PLACEHOLDER`), and a login held twice with the same secret in one tier (`DUPLICATE`) or with two
+secrets for one scheme (`CONFLICT`). A copy in the service tier of a master record is by design and is not a finding.
+
 Notes:
 
 - **One record can serve several schemes**: `imap,imaps,smtp,smtps@cpbee`. Use a comma list when the same login

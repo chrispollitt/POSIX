@@ -390,6 +390,85 @@ class T(unittest.TestCase):
         self.assertNotIn("imap@cpbee.cmnet chris;", out)
         self.assertNotIn("a\n", out.replace("vault has", ""))
 
+    def test_set_refuses_a_placeholder_login_before_asking_for_the_secret(self):
+        self.fresh()
+        for word in ("LOGIN", "login", "ADMINNAME", "user", "USERNAME"):
+            rc, out, err = self.run_auth("set", "https@dyndns.example.org", word, "--stdin", stdin="pw\n")
+            self.assertEqual(rc, 2, (word, out, err))
+            self.assertIn("placeholder", err)
+            self.assertIn("type the real login", err)
+        self.assertEqual(self.run_auth("list")[1].strip(), "", "nothing was stored")
+        self.assertEqual(self.run_auth("set", "https@dyndns.example.org", "whatwelo", "--stdin", stdin="pw\n")[0], 0)
+        rc, out, _ = self.run_auth("set", "https@dyndns.example.org", "LOGIN", "--stdin", "--allow-placeholder", stdin="pw\n")
+        self.assertEqual(rc, 0, "--allow-placeholder takes it")
+        rc, out, err = self.run_auth("bar", "somelabel", "USER", "--stdin", stdin="pw\n")
+        self.assertEqual(rc, 2, "bar refuses it too")
+
+    def test_import_skips_placeholder_logins(self):
+        self.fresh()
+        self.put(".netrc", "machine good.example login real password s1\nmachine bad.example login user password s2\n")    # allowlist secret: a test value
+        rc, out, _ = self.run_auth("import", "netrc", os.path.join(self.env["HOME"], ".netrc"))
+        self.assertIn("skip  ", out)
+        self.assertIn("bad.example user: the login looks like a placeholder", out)
+        listing = self.run_auth("list")[1]
+        self.assertIn("good.example", listing)
+        self.assertNotIn("bad.example", listing)
+
+    def test_check_reports_placeholder_logins(self):
+        self.fresh()
+        self.run_auth("set", "https@dyndns.example.org", "LOGIN", "--stdin", "--allow-placeholder", stdin="pw\n")
+        self.put("../identities", "chris https@dyndns.example.org LOGIN\n")
+        rc, out, _ = self.run_auth("check")
+        self.assertEqual(rc, 3, out)
+        self.assertIn("PLACEHOLDER vault has https@dyndns.example.org LOGIN", out)
+        self.assertNotIn("pw", out.replace("password", ""))
+
+    def test_check_reports_a_duplicate_but_not_an_override(self):
+        self.fresh()
+        # the same login and secret twice: a specific scheme under a `*` record that already covers it
+        self.run_auth("set", "*@mesh", "mesh", "--stdin", stdin="s-one\n")
+        self.run_auth("set", "postgres@mesh", "mesh", "--stdin", stdin="s-one\n")
+        # a `*` record and a specific one with another secret is an override, not a finding
+        self.run_auth("set", "*@api.example.com", "bot", "--stdin", stdin="s-two\n")
+        self.run_auth("set", "https@api.example.com", "bot", "--stdin", stdin="s-three\n")
+        self.put("../identities", "chris *@mesh.cmnet mesh\nchris postgres@mesh.cmnet mesh\n"
+                                  "chris *@api.example.com bot\nchris https@api.example.com bot\n")
+        rc, out, _ = self.run_auth("check", "--all")
+        self.assertEqual(rc, 3, out)
+        self.assertIn("DUPLICATE   *@mesh.cmnet and postgres@mesh.cmnet hold the same login mesh with the same secret", out)
+        self.assertNotIn("api.example.com", out, "an override is not a finding")
+        self.assertNotIn("s-one", out)                                                   # no secret is ever printed
+
+    def test_duplicate_findings_function(self):
+        import importlib.machinery, importlib.util
+        ld = importlib.machinery.SourceFileLoader("auth_mod", TOOL)
+        mod = importlib.util.module_from_spec(importlib.util.spec_from_loader("auth_mod", ld))
+        ld.exec_module(mod)
+
+        def rec(scheme, secret, login="a", host="x.cmnet", kind="password"):
+            return {"scheme": scheme, "host": host, "login": login, "kind": kind, "secret": secret}    # allowlist secret: a test value
+        f = mod.duplicate_findings
+        self.assertEqual(f([rec("https", "s1"), rec("https", "s2")])[0][:8], "CONFLICT", "one scheme, two secrets")
+        self.assertEqual(f([rec("https", "s1"), rec("https", "s1")])[0][:9], "DUPLICATE")
+        self.assertEqual(f([rec("imap,imaps,smtp", "s1"), rec("imaps", "s1")])[0][:9], "DUPLICATE", "a group scheme overlaps its member")
+        self.assertEqual(f([rec("*", "s1"), rec("https", "s2")]), [], "an override is allowed")
+        self.assertEqual(f([rec("https", "s1"), rec("ftp", "s1")]), [], "different schemes")
+        self.assertEqual(f([rec("https", "s1"), rec("https", "s1", login="b")]), [], "different logins")
+        self.assertEqual(f([rec("2fa", "s1"), rec("2fa", "s1", kind="totp")]), [], "a password and a seed are not the same record")
+        self.assertEqual(f([rec("https", "s1"), rec("https", "s1", host="y.cmnet")]), [], "different hosts")
+        for line in f([rec("https", "topsecret1"), rec("https", "topsecret2")]):
+            self.assertNotIn("topsecret", line)
+
+    def test_identity_and_auth_agree_on_the_placeholder_words(self):
+        import importlib.machinery, importlib.util
+        mods = []
+        for name, path in (("auth_mod2", TOOL), ("identity_mod", os.path.join(TOOLS, "identity"))):
+            ld = importlib.machinery.SourceFileLoader(name, path)
+            m = importlib.util.module_from_spec(importlib.util.spec_from_loader(name, ld))
+            ld.exec_module(m)
+            mods.append(m)
+        self.assertEqual(mods[0].PLACEHOLDER_LOGINS, mods[1].PLACEHOLDER_LOGINS)
+
     def test_check_ignores_sudo_rows_and_records(self):
         self.fresh()
         self.run_auth("set", "sudo@cmpi", "root", "--stdin", stdin="a\n")          # an OS password, not a person's login

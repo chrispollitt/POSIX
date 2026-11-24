@@ -86,6 +86,16 @@ class T(unittest.TestCase):
         self.assertNotIn("ann-irc", open(self.f).read())
         self.assertIn("# PERSON", open(self.f).read())                         # comments survive
 
+    def test_add_refuses_a_placeholder_login(self):
+        for word in ("LOGIN", "ADMINNAME", "user"):
+            rc, out = self.run_tool("add", "ann", "irc@cpbee", word, "--why", "x")
+            self.assertEqual(rc, 1, (word, out))
+            self.assertIn("placeholder from the help text", out)
+        rows = [ln for ln in open(self.f).read().splitlines() if not ln.lstrip().startswith("#")]
+        self.assertFalse([ln for ln in rows if "LOGIN" in ln or "ADMINNAME" in ln], "no placeholder row was written")
+        rc, out = self.run_tool("add", "ann", "irc@cpbee", "LOGIN", "--why", "x", "--allow-placeholder")
+        self.assertEqual(rc, 0, out)
+
     def test_a_scheme_may_start_with_a_digit(self):                            # 2fa: the one-time-code seeds in the vault
         rc, out = self.run_tool("add", "ann", "2fa@lan", "ann", "--why", "her code seed")
         self.assertEqual(rc, 0, out)

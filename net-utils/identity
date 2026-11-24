@@ -376,7 +376,16 @@ def parse_spec(spec, reg):
     return scheme_of(scheme), reg.host(host)
 
 
+# words from the help text typed literally instead of a real login (the same list as auth's PLACEHOLDER_LOGINS; a test keeps them equal)
+PLACEHOLDER_LOGINS = frozenset(("login", "user", "username", "userid", "usr", "name", "yourname", "adminname", "admin_name",
+                                "account", "host", "hostname", "password", "passwd", "secret", "changeme", "example",
+                                "xxx", "todo", "tbd"))
+
+
 def plan_add(reg, a):
+    if a.login.strip().lower() in PLACEHOLDER_LOGINS and not a.allow_placeholder:
+        raise Err("%r is a placeholder from the help text, not a login: use the real login name "
+                  "(--allow-placeholder if that really is the login)" % a.login)
     if not NAME_RX.match(a.person):
         raise Err("a person is letters, digits . _ - only")
     if any(f not in FLAGS for f in a.flags):
@@ -653,6 +662,7 @@ def main(argv=None):
     ap.add_argument("--why")
     ap.add_argument("--floyd-local")
     ap.add_argument("--also", action="store_true")
+    ap.add_argument("--allow-placeholder", action="store_true")
     ap.add_argument("--root", action="store_true")
     ap.add_argument("--strict", action="store_true")
     ap.add_argument("--no-vault", action="store_true")
