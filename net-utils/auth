@@ -41,6 +41,8 @@ COMMANDS (answers on stdout, exit 1 when there is none)
                                      (person default: $USER) or the vault itself knows only one
   set SCHEME@HOST LOGIN [--kind K] [--note TEXT] [--stdin]
                                      store a secret: prompted without echo, or one line on stdin with --stdin  # allowlist secret
+                                     LOGIN must be the real login: a placeholder word (LOGIN, USER, ADMINNAME ...) is refused
+                                     (--allow-placeholder if it really is the login); import skips such logins the same way
   remove SCHEME@HOST LOGIN
   set / remove ... --service         the same in the service tier (no passphrase needed; shown as [service] in list)
   init-service                       create the passphrase-less key auth-service and an empty service tier (server)
@@ -95,7 +97,10 @@ COMMANDS (answers on stdout, exit 1 when there is none)
   check [--all]                      the vault against `identity`: LAN records (hosts in the domain, private
                                      addresses, localhost) with no identity line, and identity lines with no
                                      secret; --all also asks about outside hosts (gmail, github ...).  Never
-                                     prints a secret; exit 3 when something is off
+                                     prints a secret; exit 3 when something is off.  Also PLACEHOLDER (a login that is a
+                                     word from the help text: LOGIN, USER, ADMINNAME ...), DUPLICATE (the same login and
+                                     secret twice in one tier, e.g. a `*` record plus a specific one) and CONFLICT (one
+                                     scheme, one login, two secrets)
 
 A client with ~/.ssh/auth_service ($AUTH_SERVICE_KEY) uses that key for get/totp when nothing is typing at it
 (no tty on stdin, or $AUTH_SERVICE_KEY set) and falls back to its normal ssh key if that fails.
@@ -129,6 +134,41 @@ class Err(Exception):
     def __init__(self, msg, code=1):
         super().__init__(msg)
         self.code = code
+
+
+# Words from the help text and the docs ("auth set SCHEME@HOST LOGIN", "ADMINNAME", ...) that get typed literally instead of
+# the real login.  set / bar / import refuse them (--allow-placeholder when one really is the login) and check reports them.
+PLACEHOLDER_LOGINS = frozenset(("login", "user", "username", "userid", "usr", "name", "yourname", "adminname", "admin_name",
+                                "account", "host", "hostname", "password", "passwd", "secret", "changeme", "example",
+                                "xxx", "todo", "tbd"))
+
+
+def placeholder(login):
+    return (login or "").strip().lower() in PLACEHOLDER_LOGINS
+
+
+def overlaps(x, y):
+    """do two records answer for a common scheme (`*` answers for every one)?"""
+    sx, sy = sset(x["scheme"]), sset(y["scheme"])
+    return "*" in sx or "*" in sy or bool(sx & sy)
+
+
+def duplicate_findings(recs):
+    """DUPLICATE / CONFLICT lines for records of ONE tier that hold the same login on the same host for a common scheme:
+    the same secret twice is a DUPLICATE; two different secrets for the same specific scheme is a CONFLICT.  (A `*` record and
+    a specific one with different secrets is an override, not a finding.  A copy in the other tier is by design.)"""
+    out = []
+    for i, x in enumerate(recs):
+        for y in recs[i + 1:]:
+            if x["host"] != y["host"] or x["login"] != y["login"] or x.get("kind") != y.get("kind") or not overlaps(x, y):
+                continue
+            star = "*" in sset(x["scheme"]) or "*" in sset(y["scheme"])
+            where = "%s and %s@%s" % (x["scheme"] + "@" + x["host"], y["scheme"], y["host"])
+            if x["secret"] == y["secret"]:
+                out.append("DUPLICATE   %s hold the same login %s with the same secret: keep one" % (where, x["login"]))
+            elif not star:
+                out.append("CONFLICT    %s hold the login %s with different secrets: keep one" % (where, x["login"]))
+    return out
 
 
 def sset(s):
@@ -655,6 +695,7 @@ def main(argv=None, restricted=None):
     ap.add_argument("--pubkey")
     ap.add_argument("--with-login", action="store_true")
     ap.add_argument("--delete", action="store_true")
+    ap.add_argument("--allow-placeholder", action="store_true")
     ap.add_argument("-n", "--dry-run", action="store_true")
     ap.add_argument("-h", "--help", action="store_true")
     try:
@@ -947,6 +988,9 @@ def main(argv=None, restricted=None):
             if len(args) != 2:
                 raise Err("set SCHEME@HOST LOGIN [--kind K] [--note TEXT] [--stdin]", 2)
             sch, h, spec_host, raw = split_spec(args[0], dom)
+            if placeholder(args[1]) and not a.allow_placeholder:
+                raise Err("%r is a placeholder from the help text, not a login: type the real login name in its place "
+                          "(--allow-placeholder if that really is the login)" % args[1], 2)
             if a.stdin:
                 secret = sys.stdin.readline().rstrip("\r\n")
             else:
@@ -974,6 +1018,9 @@ def main(argv=None, restricted=None):
             if len(args) != (1 if a.delete else 2):
                 raise Err("bar LABEL LOGIN --stdin   |   bar --delete LABEL", 2)
             label, note = args[0], "from ~/.foo: %s" % args[0]
+            if not a.delete and placeholder(args[1]) and not a.allow_placeholder:
+                raise Err("%r is a placeholder from the help text, not a login: type the real login name in its place "
+                          "(--allow-placeholder if that really is the login)" % args[1], 2)
             recs = v.load()
             keep = [r for r in recs if r.get("label") != label and r.get("note") != note]
             if a.delete:
@@ -1026,6 +1073,9 @@ def main(argv=None, restricted=None):
                 if any(x.lower() in (f["label"].lower(), f["host"]) for x in (a.skip or [])):
                     print("skip  %s" % f["label"])
                     continue
+                if placeholder(f["login"]) and not a.allow_placeholder:
+                    print("skip  %s: the login %r looks like a placeholder (--allow-placeholder takes it)" % (f["label"], f["login"]))
+                    continue
                 have = exact(recs, scheme_of(f["scheme"]), f["host"], f["login"])
                 where = "%s@%s %s (%s)" % (f["scheme"], f["host"], f["login"], f["kind"])
                 if have is None:
@@ -1059,6 +1109,9 @@ def main(argv=None, restricted=None):
             recs = v.load()
             add = same = clash = 0
             for f in found:
+                if placeholder(f["login"]) and not a.allow_placeholder:
+                    print("skip  %s@%s %s: the login looks like a placeholder (--allow-placeholder takes it)" % (f["scheme"], f["host"], f["login"]))
+                    continue
                 have = exact(recs, scheme_of(f["scheme"]), f["host"], f["login"])
                 if have is None:
                     add += 1
@@ -1126,6 +1179,11 @@ def main(argv=None, restricted=None):
                     continue                                  # a root/OS password for sudo, not a person's login
                 if on_lan(r["host"]) and (scheme_of(r["scheme"]), r["host"], r["login"]) not in idset and ("*", r["host"], r["login"]) not in idset:
                     findings.append("NOIDENTITY  vault has %s@%s %s; identity does not list that login" % (r["scheme"], r["host"], r["login"]))
+            for r in sorted(recs, key=lambda r: (r["host"], r["scheme"], r["login"])):
+                if placeholder(r["login"]):
+                    findings.append("PLACEHOLDER vault has %s@%s %s: the login is a word from the help text, not a real login; "
+                                    "set the real one and remove this record" % (r["scheme"], r["host"], r["login"]))
+            findings.extend(duplicate_findings(recs))
             have = {(scheme_of(r["scheme"]), r["host"], r["login"]) for r in flat}
             for s, h, l in sorted(idset):
                 if s == "sudo" or (s, h, l) in nosec:
